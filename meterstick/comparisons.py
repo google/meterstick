@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Comparisons for //ads/metrics/lib/meterstick."""
+"""Comparisons for meterstick."""
 
 from __future__ import division
 
-import google3
 import numpy as np
 import pandas as pd
 

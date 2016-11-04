@@ -18,7 +18,7 @@
 
 # Present unified interface in a single module.
 # pylint: disable=wildcard-import
-from google3.ads.metrics.lib.meterstick.comparisons import *
-from google3.ads.metrics.lib.meterstick.core import *
-from google3.ads.metrics.lib.meterstick.metrics import *
-from google3.ads.metrics.lib.meterstick.standard_errors import *
+from meterstick.comparisons import *
+from meterstick.core import *
+from meterstick.metrics import *
+from meterstick.standard_errors import *

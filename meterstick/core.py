@@ -14,12 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Core module for //ads/metrics/lib/meterstick."""
+"""Core module for meterstick."""
 
 import collections
 import copy
 
-import google3
 import numpy as np
 import pandas as pd
 

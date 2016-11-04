@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Standard Errors for //ads/metrics/lib/meterstick."""
+"""Standard Errors for meterstick."""
 
 from __future__ import division
 
-import google3
 import numpy as np
 import pandas as pd
 import scipy.stats

@@ -14,18 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for google3.ads.metrics.lib.meterstick.comparisons."""
+"""Tests for meterstick.comparisons."""
 
 from __future__ import division
 
-import google3
 import numpy as np
 import pandas as pd
 
 from google3.testing.pybase import googletest
 
-from google3.ads.metrics.lib.meterstick import comparisons
-from google3.ads.metrics.lib.meterstick import metrics
+from meterstick import comparisons
+from meterstick import metrics
 
 
 class ComparisonsTests(googletest.TestCase):

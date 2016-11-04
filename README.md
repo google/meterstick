@@ -3,7 +3,6 @@
 The meterstick package provides a concise syntax to describe and execute
 routine data analysis tasks.
 
-[TOC]
 
 ## Building up an analysis
 
