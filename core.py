@@ -11,15 +11,11 @@ from typing import List, Union
 
 import attr
 from meterstick import comparisons
-from meterstick import confidence_interval_display
 from meterstick import metrics as metrics_module
 from meterstick import pdutils
 import numpy as np
 import pandas as pd
 from six import string_types
-
-_show_display_hint = True
-
 
 def _merge_metrics(row):
   non_empty = [str(r) for r in row if pd.notnull(r)]
@@ -48,7 +44,7 @@ class AnalysisParameters(object):
   """
   metrics = attr.ib(default=None)
   split_index = attr.ib(default=None, type=pd.Index)
-  split_vars = attr.ib(factory=list)
+  split_vars = attr.ib(factory=list, type=Union[str, List[str], None])
   comparison = attr.ib(default=None)
   se_method = attr.ib(default=None)
   sort = attr.ib(type=bool, default=False)
@@ -243,7 +239,6 @@ class Analyze(object):
     Raises:
       ValueError: No metrics to calculate.
     """
-    global _show_display_hint
     results = []
 
     split_index = self.parameters.split_index
@@ -413,147 +408,5 @@ class Analyze(object):
         else:
           new_idx = [" ".join(c).strip() for c in results.columns]
         results.columns = new_idx
-
-    def _display(res,
-                 confidence=None,
-                 aggregate_dimensions=False,
-                 show_control=None,
-                 metric_formats=None,
-                 sort_by=None,
-                 **display_kwargs):
-      """Displays the meterstick result in notebook.
-
-      When no se_method is used, the function returns res itself. Else, it
-      displays confidence intervals in a nice way and highlights significant
-      changes.
-
-      Args:
-        res: The DataFrame returned by meterstick.
-        confidence: The level of the confidence interval, if it's not specified
-          in se_method. Must be in (0,1).
-        aggregate_dimensions: Whether to aggregate all dimension columns into
-          one column. Dimension columns are split_vars + all over columns.
-        show_control: If False, only ratio values in non-control rows are shown.
-        metric_formats: A dict specifiying how to display metric values. Keys
-          can be 'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp'
-          or a formatting string. For example, '{:.2%}' would have the same
-            effect as 'percent'. By default, Value is in absolute form and Ratio
-            in percent.
-        sort_by: In the form of
-          [{'column': ('CI_Lower', 'Metric Foo'), 'ascending': False}},
-           {'column': 'Dim Bar': 'order': ['Logged-in', 'Logged-out']}].
-             'column' is the column to sort by. If you want to sort by a metric,
-             use (field, metric name) where field could be 'Ratio', 'Value',
-             'CI_Lower' and 'CI_Upper'. 'order' is optional and for categorical
-             column. 'ascending' is optional and default True. The result will
-             be displayed in the order specified by sort_by from top to bottom.
-        **display_kwargs: Extra args passed to underlying rendering function.
-
-      Returns:
-        By default None. It just displays a colabtools.interactive_table in
-        Colab. You can also return the df to be rendered for further tweaking.
-
-      Raises:
-        ValueError: If show_control but there isn't any comparison used.
-        ValueError: If confidence is given both in se_method and here.
-      """
-      if not se_method:
-        return res
-      if show_control and not comparison:
-        raise ValueError("show_control requires a comparison.")
-      if se_method.confidence and confidence:
-        raise ValueError("Can only specify one confidence level.")
-
-      expr_id = comparison.condition_column if comparison else None
-      ctrl_id = comparison.baseline_key if comparison else None
-      base_name = comparison.name if comparison else ""
-      center_value_name = base_name if comparison else value_name
-      std_name = se_method.name
-      se_name = " ".join([base_name, std_name, "SE"]).strip()
-      lower_name = " ".join([base_name, std_name, "CI-lower"]).strip()
-      upper_name = " ".join([base_name, std_name, "CI-upper"]).strip()
-      metric_names = [m.name for m in self.parameters.metrics]
-
-      df = res.copy()
-      if not melted:
-        df.columns = column_multiindex
-        # Stacking order matters for renaming
-        df = df.stack(all_metric_indices).stack(0)
-        df.index.names = df.index.names[:-1] + [var_name]
-
-      if not se_method.confidence:
-        confidence = confidence or 0.95
-        df = se_method.calculate_ci_lower_upper(df, confidence, df[se_name],
-                                                center_value_name, lower_name,
-                                                upper_name)
-
-      # TODO(Xunmo Yang): Refactor this part to run().
-      if show_control:
-        # Calculates the raw values.
-        # Keep the original metrics in case users want them.
-        fresh_metrics = copy.deepcopy(self.parameters.metrics)
-        for m in fresh_metrics:
-          m.index = None
-        raw_vals = Analyze(self.data).split_by(
-            split_vars +
-            [comparison.condition_column]).calculate(fresh_metrics).run(
-                melted=True, value_name="Raw Value")
-        df = raw_vals.reorder_levels(df.index.names).join(df)
-
-      df.reset_index(inplace=True)
-      if all_metric_indices:
-        # The display function can only take one Metric column.
-        metric_cols = [var_name] + all_metric_indices
-        df[var_name] = df[metric_cols].apply(_merge_metrics, axis=1)
-
-      value = "Raw Value" if show_control else None
-      metric_formats = metric_formats or {}
-
-      if all_metric_indices:
-        if melted:
-          metric_names = list(df[var_name])
-        else:
-          metric_names = []
-          for idx_tuple in column_multiindex.tolist():
-            # The 2nd element is Value, Jackknife SE and so on. We only need to
-            # pick one of them to get all metric names.
-            if idx_tuple[1] == center_value_name:
-              metric_names.append(
-                  _merge_metrics(idx_tuple[0:1] + idx_tuple[2:]))
-
-      if comparison:
-        df[var_name] = df[var_name].astype(str) + " " + base_name
-        metric_names = ["%s %s" % (m, base_name) for m in metric_names]
-      if (not metric_formats and
-          not isinstance(comparison,
-                         (comparisons.PercentageDifference, comparisons.MH))):
-        metric_formats = {"Ratio": "absolute"}
-
-      formatted_df = confidence_interval_display.get_formatted_df(
-          df,
-          metric=var_name,
-          aggregate_dimensions=aggregate_dimensions,
-          dims=split_vars + all_over_columns,
-          value=value,
-          ratio=center_value_name,
-          ci_lower=lower_name,
-          ci_upper=upper_name,
-          expr_id=expr_id,
-          ctrl_id=ctrl_id,
-          show_control=show_control,
-          metric_formats=metric_formats,
-          sort_by=sort_by,
-          metric_order=metric_names)
-      display_formatted_df = confidence_interval_display.display_formatted_df
-      display_formatted_df(formatted_df, **display_kwargs)
-
-    # Bound display to results instance.
-    # https://stackoverflow.com/questions/972/adding-a-method-to-an-existing-object-instance
-    results.display = _display.__get__(results)
-    if se_method and _show_display_hint:
-      # Add a hint so users can know the method.
-      hint = "Try result.display() to get a Rasta-like visualization."
-      print(hint)
-      _show_display_hint = False
 
     return results
