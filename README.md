@@ -1,4 +1,4 @@
-# MeterStick Documentation
+# Meterstick Documentation
 
 The meterstick package provides a concise syntax to describe and execute
 routine data analysis tasks.
