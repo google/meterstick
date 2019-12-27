@@ -3,6 +3,10 @@
 The meterstick package provides a concise syntax to describe and execute
 routine data analysis tasks.
 
+## Disclamer
+
+This is not an officially supported Google product.
+
 
 ## Building up an analysis
 
