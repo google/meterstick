@@ -134,6 +134,19 @@ class AnalysisTest(googletest.TestCase):
 
     pd.util.testing.assert_frame_equal(output, correct)
 
+  def testBytesSplit(self):
+    data = pd.DataFrame({"X": [1, 4, -3, 13, 10, 32],
+                         "Y": [b"A", b"A", b"A", b"B", b"B", b"B"]})
+
+    metric = metrics.Sum("X")
+    output = core.Analyze(data).calculate(metric).split_by("Y").run()
+
+    correct = pd.DataFrame({"sum(X)": [2, 55],
+                            "Y": ["A", "B"]})
+    correct = correct.set_index("Y")
+
+    pd.util.testing.assert_frame_equal(output, correct)
+
   def testMultipleSplitBy(self):
     data = pd.DataFrame({"X": [4, 5, 6, 7, 0, 1, 2, 3],
                          "Y": [1, 1, 1, 1, 0, 0, 0, 0],

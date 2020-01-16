@@ -104,7 +104,7 @@ class Analyze(object):
 
     return self
 
-  def split_by(self, split_vars, expand=False, sort=True):
+  def split_by(self, split_vars, expand=False, sort=True, encoding="utf8"):
     """Splits the analysis by categorical variables.
 
     Args:
@@ -139,6 +139,18 @@ class Analyze(object):
       if not all_strings:
         raise TypeError("Split variable is not a string or list of strings.")
       self.parameters.split_vars = split_vars
+
+    # Explicitly decode columns that will become part of the index,
+    # to avoid UnicodeDecodeErrors.  Since pandas has no way to distinguish
+    # between bytes and strings, we just try decoding and catch any failures.
+    for col in self.parameters.split_vars:
+      # Only convert columns of type "object".
+      if self.data[col].dtype == np.object_:
+        try:
+          decoded = self.data[col].str.decode(encoding)
+          self.data.loc[~decoded.isna(), col] = decoded[~decoded.isna()]
+        except UnicodeEncodeError:
+          pass
 
     # Determine the index for split_vars
     self.parameters.split_index = pdutils.index_product_from_vars(
