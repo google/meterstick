@@ -7,6 +7,11 @@ routine data analysis tasks.
 
 This is not an officially supported Google product.
 
+## Installing dependencies
+
+```Shell
+pip install -r requirements.txt
+```
 
 ## Building up an analysis
 
