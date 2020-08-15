@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2020 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,713 +11,1012 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Metrics for //ads/metrics/lib/meterstick."""
+"""Base classes for Meterstick."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from typing import Callable, List, Optional, Union
-
-import attr
-from meterstick import pdutils
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Text, Union
+from meterstick import utils
 import numpy as np
 import pandas as pd
-import six
 
 
-def _get_name(obj):
-  """Gets name and function for obj (either a Metric or a constant)."""
-  return obj.name if isinstance(obj, Metric) else str(obj)
+def compute_on(df, split_by=None, **kwargs):
+  return lambda x: x.compute_on(df, split_by, **kwargs)
 
 
-@attr.s()
 class Metric(object):
-  """Base class for metrics.
+  """Core class of Meterstick.
 
-  Each metric represents a calculation to perform on a pandas
-  DataFrame. There are three types of indexing columns you can specify. See
-  screenshot/9z0GDaP1FEy for an intuitive display.
-  1. split_vars: Think them as part of the data, not part of the metric. Metric
-    is calculated for each slice after splitting.
-  2. metric_idx: Only exists when you specify argument fn. If fn returns a
-    pd.Series, metric_idx is the indexing columns in the Series. If fn returns a
-    pd.DataFrame, it's the df.columns. For any column not named in metric_idx,
-    it will be renamed to MetricIndex0, MetricIndex1 and so on. By using
-    metric_idx, you can use cross-row information in a slice. For example, for
-    every slice, you can fit a linear regression and return the fitted values
-    for every row.
-  3. over: Only exists when you specify argument fn and fn returns a
-    pd.DataFrame. In this case, over will be df.index. Over column(s) are always
-    displayed vertically. Namely, they're different from split_vars in that they
-    are part of the metric, but they are always displayed vertically just like
-    split_vars columns. See DistributionMetric() below for a typical use case.
+  A Metric is defined broadly in Meterstick. It could be a routine metric like
+  CTR, or an operation like Bootstrap. As long as it taks a DataFrame and
+  returns a number or a pd.Series, it can be treated as a Metric.
+
+  The relations of methods of Metric are
+        <------------------------------------------------------compute_on-------------------------------------------------------->
+        <------------------------------compute_through---------------------------->                                              |
+        |                              <-------compute_slices------->             |                                              |
+        |                              |-> slice1 -> compute |      |             |                                              |
+  df -> df.query(where) -> precompute -|-> slice2 -> compute | -> concat  -> postcompute -> manipulate -> final_compute -> flush_tmp_cache # pylint: disable=line-too-long
+                                       |-> ...
+  In summary, compute() operates on a slice of data. precompute(),
+  postcompute(), compute_slices(), compute_through() and final_compute() operate
+  on the whole data. manipulate() does common data manipulation like melting
+  and cleaning. Caching is handled in compute_on().
+
+  Depending on your case, you can overwrite most of them, but we suggest you NOT
+  to overwrite compute_on because it might mess up the caching mechanism. Here
+  are some rules to help you to decide.
+  1. If your Metric has no vectorization over slices, overwrite compute(). To
+  overwrite, you can either create a new class inheriting from Metric or just
+  pass a lambda function into Metric.
+  2. If you have vectorization logic over slices, overwrite compute_slices().
+  See Sum() for an example.
+  3. As compute() operates on a slice of data, it doesn't have access to the
+  columns to split_by and the index value of the slice. If you need them, check
+  out compute_with_split_by(). See Jackknife for a real example.
+  4. By default, the data passed into manipulate() is in wide/unmelted format,
+  namely, the outermost column level is metric name. If your compute or
+  compute_slices obey this contract, you don't need to worry about
+  manipulate(). If your fucntion returns long/melted DataFrame instead, set
+  the attribute manipulate_input_type to 'melted' then manipulate() would
+  know how to handle it.
+
+  It's possible to cache your result. However, as DataFrame is mutable, it's
+  slow to hash it (O(shape) complexity). To avoid hashing, for most cases you'd
+  rely on our MetricList() and CompositeMetric() which we know in one round
+  of their computation, the DataFrame doesn't change. Or if you have to run
+  many rounds of computation on the same DataFrame, you can directly assign a
+  cache_key in compute_on(), then it's your responsibility to ensure
+  same key always corresponds to the same DataFrame and split_by.
+
+  Your Metric shouldn't rely on the index of the input DataFrame. We might
+  set/reset the index during the computation so put all the information you need
+  in the columns.
 
   Attributes:
-    name: A string name for the metric's result (e.g., sum(Queries)).
-    _parents: A list of Metric objects that specify the parents
-      of the current metric object. For example, if the
-      metric is defined as Sum("Clicks") / Sum("Impressions"),
-      then the parents of this metric are Sum("Clicks") and
-      Sum("Impressions").
-    index: A Pandas Index which will be used as the index for
-      the output.
-    split_vars: A list of the names of indices.
-    fn: A function to calculate metric. It may return a single value, a
-      pd.Series, or a pd.DataFrame.
-    metric_idx: A list of the column name(s) when a pd.Series or a pd.DataFrame
-      is returned by fn. See the description above for details.
-    over:  If a pd.DataFrame with indexing column(s) is returned by fn, this is
-      a list of the column name(s). See the description above for details.
+    name: Name of the Metric.
+    children: An iterable of Metric(s) this Metric based upon.
+    cache: A dict to store cached results.
+    where: A string that will be passed to df.query() as a prefilter.
+    precompute: A function. See the workflow chart above for its behavior.
+    compute: A function. See the workflow chart above for its behavior.
+    postcompute: A function. See the workflow chart above for its behavior.
+    compute_slices: A function. See the workflow chart above for its behavior.
+    final_compute: A function. See the workflow chart above for its behavior.
+    cache_key: The key currently being used in computation.
+    manipulate_input_type: Whether the input df is 'melted' or 'unmelted'.
+    tmp_cache_keys: The set to track what temporary cache_keys are used during
+      computation when default caching is enabled. When computation is done, all
+      the keys in tmp_cache_keys are flushed.
   """
-  name = attr.ib(type=str)
-  _parents = attr.ib(factory=list, type=List["Metric"])
-  index = attr.ib(default=None, type=Optional[pd.Index])
-  fn = attr.ib(
-      default=None,
-      type=Optional[
-          Callable[[pd.DataFrame], Union[float, pd.Series, pd.DataFrame]]])
-  metric_idx = attr.ib(init=False, factory=list, type=List[str])
-  over = attr.ib(init=False, factory=list, type=List[str])
+  RESERVED_KEY = '_RESERVED'
 
-  def compute(self, data):
-    """Computes metric for given data.
+  def __init__(self,
+               name: Text,
+               children: Optional[Union['Metric',
+                                        Iterable[Union['Metric', int,
+                                                       float]]]] = (),
+               where: Optional[Text] = None,
+               precompute=None,
+               compute: Optional[Callable[[pd.DataFrame], Any]] = None,
+               postcompute=None,
+               compute_slices=None,
+               final_compute=None,
+               manipulate_input_type='unmelted'):
+    self.name = name
+    self.cache = {}
+    self.cache_key = None
+    self.children = (children,) if isinstance(children, Metric) else children
+    self.where = where
+    if precompute:
+      self.precompute = precompute
+    if compute:
+      self.compute = compute
+    if postcompute:
+      self.postcompute = postcompute
+    if compute_slices:
+      self.compute_slices = compute_slices
+    if final_compute:
+      self.final_compute = final_compute
+    self.manipulate_input_type = manipulate_input_type
+    self.tmp_cache_keys = set()
 
-    Every Metric must implement this method.
+  def compute_with_split_by(self,
+                            df,
+                            split_by: Optional[List[Text]] = None,
+                            slice_name=None):
+    del split_by, slice_name  # In case users need them in derived classes.
+    return self.compute(df)
+
+  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+    """Applies compute() to all slices. Each slice needs a unique cache_key."""
+    if split_by:
+      # Adapted from http://esantorella.com/2016/06/16/groupby. This is faster
+      # than df.groupby(split_by).apply(self.compute).
+      slices = []
+      result = []
+      # Different DataFrames need to have different cache_keys. Here as we split
+      # the df so each slice need to has its own key. And we need to make sure
+      # the key is recovered so when we continue to compute other Metrics that
+      # might be vectoriezed, the key we use is the one for the whole df.
+      for df_slice, slice_i in self.split_data(df, split_by):
+        cache_key = self.cache_key
+        slice_i_iter = slice_i if isinstance(slice_i, tuple) else [slice_i]
+        self.cache_key = self.wrap_cache_key(
+            cache_key or self.RESERVED_KEY,
+            slice_val=dict(zip(split_by, slice_i_iter)))
+        try:
+          result.append(self.compute_with_split_by(df_slice, split_by, slice_i))
+          slices.append(slice_i)
+        finally:
+          self.cache_key = cache_key
+      if isinstance(result[0], (pd.Series, pd.DataFrame)):
+        res = pd.concat(result, keys=slices, names=split_by, sort=False)
+      else:
+        if len(split_by) == 1:
+          ind = pd.Index(slices, name=split_by[0])
+        else:
+          ind = pd.MultiIndex.from_tuples(slices, names=split_by)
+        res = pd.Series(result, index=ind)
+    else:
+      # Derived Metrics might do something in split_data().
+      df, _ = next(self.split_data(df, split_by))
+      res = self.compute_with_split_by(df)
+    return res
+
+  @staticmethod
+  def split_data(df, split_by=None):
+    if not split_by:
+      yield df, None
+    else:
+      keys, indices = list(zip(*df.groupby(split_by).groups.items()))
+      for i, idx in enumerate(indices):
+        yield df.loc[idx], keys[i]
+
+  def compute_through(self, df, split_by: Optional[List[Text]] = None):
+    """Precomputes df -> split df and apply compute() -> postcompute."""
+    df = df.query(self.where) if df is not None and self.where else df
+    res = self.precompute(df, split_by)
+    res = self.compute_slices(res, split_by)
+    return self.postcompute(res, split_by)
+
+  def compute_on(self,
+                 df: pd.DataFrame,
+                 split_by: Optional[Union[Text, List[Text]]] = None,
+                 melted: bool = False,
+                 return_dataframe: bool = True,
+                 cache_key: Any = None):
+    """Key API of Metric.
+
+    Wraps computing logic with caching.
+
+    This is what you should call to use Metric. It's compute_through +
+    final_compute + caching. As caching is the shared part of Metric, we suggest
+    you NOT to overwrite this method. Overwriting compute_slices and/or
+    final_compute should be enough. If not, contact us with your use cases.
 
     Args:
-      data: A Pandas DataFrame.
+      df: The DataFrame to compute on.
+      split_by: Something can be passed into df.group_by().
+      melted: Whether to transform the result to long format.
+      return_dataframe: Whether to convert the result to DataFrame if it's not.
+        If False, it could still return a DataFrame.
+      cache_key: What key to use to cache the df. You can use anything that can
+        be a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ..).
 
     Returns:
-      A Pandas Series or a scalar containing the metric value(s).
-
-    Raises:
-      ValueError: When there's no function defined to calculate the metric.
-      ValueError: When split_vars but the output isn't a pd.Series after all
-        processing.
+      Final result returned to user. If split_by, it's a pd.Series or a
+      pd.DataFrame, otherwise it could be a base type.
     """
+    need_clean_up = True
+    try:
+      split_by = [split_by] if isinstance(split_by, str) else split_by or []
+      if cache_key is not None:
+        cache_key = self.wrap_cache_key(cache_key, split_by)
+        if self.in_cache(cache_key):
+          need_clean_up = False
+          raw_res = self.get_cached(cache_key)
+          res = self.manipulate(raw_res, melted, return_dataframe)
+          res = self.final_compute(res, melted, return_dataframe, split_by, df)
+          return res
+        else:
+          self.cache_key = cache_key
+          raw_res = self.compute_through(df, split_by)
+          self.save_to_cache(cache_key, raw_res)
+          if utils.is_tmp_key(cache_key):
+            self.tmp_cache_keys.add(cache_key)
+      else:
+        raw_res = self.compute_through(df, split_by)
 
-    def _fill_index(idx, base_name):
-      """Fills no-name level in idx with numbered base_name."""
-      return [base_name + str(i) if not n else n for i, n in enumerate(idx)]
+      res = self.manipulate(raw_res, melted, return_dataframe)
+      res = self.final_compute(res, melted, return_dataframe, split_by, df)
+      return res
 
-    if not self.fn:
-      raise ValueError("No function found to calculate metric %s." % self.name)
+    finally:
+      if need_clean_up:
+        self.flush_tmp_cache()
 
-    if self.split_vars:
-      output = self._group(data).apply(self.fn)
-      # The output must be a pd.Series or a number. When there are split_vars,
-      # it can't be a number, so we need to transform the output to a pd.Series
-      # if it's not he case.
-      if isinstance(output, pd.DataFrame):
-        # The index = split_vars + optional over columns.
-        if len(output.index.names) > len(self.split_vars):
-          self.over = _fill_index(output.index.names[len(self.split_vars):],
-                                  "OverColumn")
-          output.index.names = self.split_vars + self.over
+  def precompute(self, df, split_by):
+    del split_by  # Useful in derived classes.
+    return df
 
-        self.metric_idx = _fill_index(output.columns.names, "MetricIndex")
-        output.columns.names = self.metric_idx
-        # Transform to a pd.Series for easier handling.
-        output = output.stack(self.metric_idx)
-      if not isinstance(output, pd.Series):
-        raise ValueError("Output must be a pd.Series.")
-    else:
-      output = self.fn(data)
-      if isinstance(output, pd.Series):
-        fn_idx = _fill_index(output.index.names, "MetricIndex")
-        output.index.names = fn_idx
-        self.metric_idx = fn_idx
-      elif isinstance(output, pd.DataFrame):
-        self.over = _fill_index(output.index.names, "OverColumn")
-        output.index.names = self.over
-        self.metric_idx = _fill_index(output.columns.names, "MetricIndex")
-        output.columns.names = self.metric_idx
-        # Transform to a pd.Series for easier handling.
-        output = output.stack(self.metric_idx)
+  def postcompute(self, df, split_by):
+    del split_by  # Useful in derived classes.
+    return df
 
-    return output
+  def final_compute(self, res, melted, return_dataframe, split_by, df):
+    del melted, return_dataframe, split_by, df  # Useful in derived classes.
+    return res
 
-  def precalculate(self, data, split_index):
-    """Sets the index for the metric result.
+  def manipulate(self,
+                 res: pd.Series,
+                 melted: bool = False,
+                 return_dataframe: bool = True):
+    """Common adhoc data manipulation.
+
+    It does
+    1. Converts res to a DataFrame if asked.
+    2. Melts res to long format if asked.
+    3. Removes redundant index levels in res.
 
     Args:
-      data: Pandas DataFrame
-      split_index: Pandas Index representing the variables in split_by.
-    """
-    # update split_vars for metric
-    self.split_vars = [] if split_index is None else split_index.names
-    # set the index if not already set
-    if self.index is None:
-      self.index = split_index
-    # repeat the process for parent metrics
-    for parent in self._parents:
-      if isinstance(parent, Metric):
-        parent.precalculate(data, split_index)
-
-  def _group(self, data):
-    """Groups data by split_vars if split_vars is set.
-
-    Pandas does not allow grouping by 0 variables, i.e.,
-    .groupby([]). This function provides a unified API
-    to handle both the case where we group by 0 variables
-    and the case where we group by 1 or more variables.
-
-    Args:
-      data: A Pandas DataFrame or Series
+      res: Returned by compute_through(). Usually a DataFrame, but could be a
+        pd.Series or a base type.
+      melted: Whether to transform the result to long format.
+      return_dataframe: Whether to convert the result to DataFrame if it's not.
+        If False, it could still return a DataFrame if the input is already a
+        DataFrame.
 
     Returns:
-      A Pandas NDFrameGroupBy object, if self.split_vars is set.
-      Otherwise, returns an ungrouped NDFrame.
+      Final result returned to user. If split_by, it's a pd.Series or a
+      pd.DataFrame, otherwise it could be a base type.
     """
-    if self.split_vars:
-      return data.groupby(level=self.split_vars, sort=False)
-    else:
-      return data
+    if isinstance(res, pd.Series):
+      res.name = self.name
+    res = self.to_dataframe(res) if return_dataframe else res
+    if self.manipulate_input_type == 'unmelted' and melted:
+      res = utils.melt(res)
+    elif self.manipulate_input_type == 'melted' and not melted:
+      res = utils.unmelt(res)
+    return utils.remove_empty_level(res)
 
-  def __call__(self, data):
-    output = self.compute(data)
-    if isinstance(output, pd.Series):
-      if not self.fn:
-        # When self.fn, the indexing is handled in Metric.compute() already.
-        output = output.reindex(self.index)
-      output.name = ""
-    return output
+  @staticmethod
+  def group(df, split_by=None):
+    return df.groupby(split_by) if split_by else df
+
+  def to_dataframe(self, res):
+    if isinstance(res, pd.DataFrame):
+      return res
+    elif isinstance(res, pd.Series):
+      return pd.DataFrame(res)
+    return pd.DataFrame({self.name: [res]})
+
+  def wrap_cache_key(self, key, split_by=None, where=None, slice_val=None):
+    if key is None:
+      return None
+    return utils.CacheKey(key, where or self.where, split_by, slice_val)
+
+  def save_to_cache(self, key, val, split_by=None, where=None):
+    key = self.wrap_cache_key(key, split_by, where)
+    val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
+    self.cache[key] = val
+
+  def in_cache(self, key, split_by=None, where=None, exact=True):
+    key = self.wrap_cache_key(key, split_by, where)
+    if exact:
+      return key in self.cache
+    else:
+      return any(k.includes(key) for k in self.cache)
+
+  def get_cached(self,
+                 key=None,
+                 split_by=None,
+                 where=None,
+                 exact=True,
+                 return_key=False):
+    """Retrieves result from cache if there is an unique one."""
+    key = self.wrap_cache_key(key, split_by, where)
+    if key in self.cache:
+      return (key, self.cache[key]) if return_key else self.cache[key]
+    elif not exact:
+      matches = {k: v for k, v in self.cache.items() if k.includes(key)}
+      if len(matches) > 1:
+        raise ValueError('Muliple fuzzy matches found!')
+      elif matches:
+        return tuple(matches.items())[0] if return_key else tuple(
+            matches.values())[0]
+
+  def flush_cache(self,
+                  key=None,
+                  split_by=None,
+                  where=None,
+                  recursive=True,
+                  prune=True):
+    """If prune, stops when the cache seems to be flushed already."""
+    key = self.wrap_cache_key(key, split_by, where)
+    if prune:
+      if (key is not None and not self.in_cache(key)) or not self.cache:
+        return
+    if key is None:
+      self.cache = {}
+    elif self.in_cache(key):
+      del self.cache[key]
+    if recursive:
+      self.flush_children(key, split_by, where, recursive, prune)
+
+  def flush_children(self,
+                     key=None,
+                     split_by=None,
+                     where=None,
+                     recursive=True,
+                     prune=True):
+    for m in self.children:
+      if isinstance(m, Metric):
+        m.flush_cache(key, split_by, where, recursive, prune)
+
+  def flush_tmp_cache(self):
+    """Flushes all the temporary caches when a Metric tree has been computed.
+
+    A Metric and all the descendants form a tree. When a computation is started
+    from a MetricList or CompositeMetric, we know the input DataFrame is not
+    going to change in the computation. So even if user doesn't ask for caching,
+    we still enable it, but we need to clean things up when done. As the results
+    need to be cached until all Metrics in the tree have been computed, we
+    should only clean up at the end of the computation of the entry/top Metric.
+    We recognize the top Metric by looking at the cache_key. All descendants
+    will have it assigned as RESERVED_KEY but the entry Metric's will be None.
+    """
+    if self.cache_key is None:  # Entry point of computation
+      descendants = list(self.children)
+      while descendants:
+        m = descendants.pop(0)
+        if isinstance(m, Metric):
+          descendants += list(m.children)
+          while m.tmp_cache_keys:
+            m.flush_cache(m.tmp_cache_keys.pop(), recursive=False)
+    self.cache_key = None
+
+  def __or__(self, fn):
+    """Overwrites the '|' operator to enable pipeline chaining."""
+    return fn(self)
 
   def __add__(self, other):
-    return CompositeMetric(lambda x, y: x + y, "{} + {}", [self, other])
+    return CompositeMetric(lambda x, y: x + y, '{} + {}', (self, other))
 
   def __radd__(self, other):
-    return CompositeMetric(lambda x, y: x + y, "{} + {}", [other, self])
+    return CompositeMetric(lambda x, y: x + y, '{} + {}', (other, self))
 
   def __sub__(self, other):
-    return CompositeMetric(lambda x, y: x - y, "{} - {}", [self, other])
+    return CompositeMetric(lambda x, y: x - y, '{} - {}', (self, other))
 
   def __rsub__(self, other):
-    return CompositeMetric(lambda x, y: x - y, "{} - {}", [other, self])
+    return CompositeMetric(lambda x, y: x - y, '{} - {}', (other, self))
 
   def __mul__(self, other):
-    return CompositeMetric(lambda x, y: x * y, "{} * {}", [self, other])
+    return CompositeMetric(lambda x, y: x * y, '{} * {}', (self, other))
 
   def __rmul__(self, other):
-    return CompositeMetric(lambda x, y: x * y, "{} * {}", [other, self])
+    return CompositeMetric(lambda x, y: x * y, '{} * {}', (other, self))
 
   def __neg__(self):
-    metric = -1 * self
-    metric.name = "-{}".format(self.name)
-    return metric
+    return CompositeMetric(lambda x, _: -x, '-{}', (self, -1))
 
   def __div__(self, other):
-    return CompositeMetric(lambda x, y: x / y, "{} / {}", [self, other])
+    return CompositeMetric(lambda x, y: x / y, '{} / {}', (self, other))
 
   def __truediv__(self, other):
     return self.__div__(other)
 
   def __rdiv__(self, other):
-    return CompositeMetric(lambda x, y: x / y, "{} / {}", [other, self])
+    return CompositeMetric(lambda x, y: x / y, '{} / {}', (other, self))
 
   def __rtruediv__(self, other):
     return self.__rdiv__(other)
 
   def __pow__(self, other):
-    return CompositeMetric(lambda x, y: x ** y, "{} ^ {}", [self, other])
+    return CompositeMetric(lambda x, y: x**y, '{} ^ {}', (self, other))
 
   def __rpow__(self, other):
-    return CompositeMetric(lambda x, y: x ** y, "{} ^ {}", [other, self])
+    return CompositeMetric(lambda x, y: x**y, '{} ^ {}', (other, self))
+
+
+class MetricList(Metric):
+  """Wraps Metrics and compute them with caching.
+
+  Attributes:
+    name: Name of the Metric.
+    children: An sequence of Metrics.
+    names: A list of names of children.
+    where: A string that will be passed to df.query() as a prefilter.
+    cache: A dict to store cached results.
+    cache_key: The key currently being used in computation.
+    children_return_dataframe: Whether to convert the result to a children
+      Metrics to DataFrames if they are not.
+    And all other attributes inherited from Metric.
+  """
+
+  def __init__(self,
+               children: Sequence[Metric],
+               where: Optional[Text] = None,
+               children_return_dataframe: bool = True):
+    for m in children:
+      if not isinstance(m, Metric):
+        raise ValueError('%s is not a Metric.' % m)
+    name = 'MetricList(%s)' % ', '.join(m.name for m in children)
+    super(MetricList, self).__init__(name, children, where=where)
+    self.children_return_dataframe = children_return_dataframe
+    self.names = [m.name for m in children]
+
+  def compute_slices(self, df, split_by=None):
+    """Computes all Metrics with caching.
+
+    We know df is not going to change so we can safely enable caching with an
+    arbitrary key.
+
+    Args:
+      df: The DataFrame to compute on.
+      split_by: Something can be passed into df.group_by().
+
+    Returns:
+      A list of results.
+    """
+    res = []
+    key = self.cache_key or self.RESERVED_KEY
+    for m in self:
+      res.append(
+          m.compute_on(
+              df,
+              split_by,
+              return_dataframe=self.children_return_dataframe,
+              cache_key=key))
+    return res
+
+  def to_dataframe(self, res):
+    res_all = pd.concat(res, axis=1, sort=False)
+    # In PY2, if index order are different, the names might get dropped.
+    res_all.index.names = res[0].index.names
+    return res_all
+
+  def __iter__(self):
+    for m in self.children:
+      yield m
+
+  def __len__(self):
+    return len(self.children)
 
 
 class CompositeMetric(Metric):
-  """Class for metrics formed by composing two metrics.
+  """Class for Metrics formed by composing two Metrics.
 
   Attributes:
-    name: A string name for the metric's result (e.g., CTR for
-      Sum(Clicks) / Sum(Impressions)).
-    index: A Pandas Index which will be used as the index for
-      the output.
+    name: Name of the Metric.
+    op: Binary operation that defines the composite metric.
+    name_tmpl: The template to generate the name from child Metrics' names.
+    children: A length-2 iterable of Metrics and/or constants that forms the
+      CompositeMetric.
+    columns: Used to rename the columns of all DataFrames returned by child
+      Metrics, so could be a list of column names or a pd.Index. This is useful
+      when further operations (e.g., subtraction) need to be performed between
+      two multiple-column DataFrames, which require that the DataFrames have
+      matching column names.
+    where: A string that will be passed to df.query() as a prefilter.
+    cache: A dict to store cached results.
+    cache_key: The key currently being used in computation.
+    manipulate_input_type: Whether the input df is 'melted' or 'unmelted'.
+    And all other attributes inherited from Metric.
   """
 
-  def __init__(self, op, name_format, parents, index=None):
-    """Initializes Metric.
-
-    Args:
-      op: Binary operation that defines the composite metric.
-      name_format: A format string for the metric's result.
-      parents: A list of Metric objects that specify the parents
-        of the current metric object. For example, if the
-        metric is defined as Sum("Clicks") / Sum("Impressions"),
-        then the parents of this metric are Sum("Clicks") and
-        Sum("Impressions").
-      index: A Pandas Index object which will be used as the
-        index for the output.
-    """
-    name = name_format.format(_get_name(parents[0]), _get_name(parents[1]))
-    super(CompositeMetric, self).__init__(name, parents, index)
-    self._op = op
-
-  def compute(self, data):
-    """Calculates composite metric based on parents.
-
-    Args:
-      data: A Pandas DataFrame containing the data.
-
-    Returns:
-      A Pandas Series or constant value representing the value.
-    """
-    a = (self._parents[0].compute(data)
-         if isinstance(self._parents[0], Metric)
-         else self._parents[0])
-    b = (self._parents[1].compute(data)
-         if isinstance(self._parents[1], Metric)
-         else self._parents[1])
-    return self._op(a, b)
-
-
-### Classes
-class Count(Metric):
-  """Initializes count estimator.
-
-  Args:
-    variable: A string representing the variable to count.
-    name: A string for the column name of results.
-  """
-
-  def __init__(self, variable, name=None):
-    if name is None:
-      name = "count({})".format(variable)
-    super(Count, self).__init__(name)
-
-    self._var = variable
-
-  def compute(self, data):
-    return self._group(data)[self._var].count()
-
-
-class Sum(Metric):
-  """Sum estimator."""
-
-  def __init__(self, variable, name=None):
-    """Initializes sum estimator.
-
-    Args:
-      variable: A string representing the variable to sum.
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "sum({})".format(variable)
-    super(Sum, self).__init__(name)
-
-    self._var = variable
-
-  def compute(self, data):
-    return self._group(data)[self._var].sum(min_count=1)
-
-
-class Mean(Metric):
-  """Mean estimator."""
-
-  def __init__(self, variable, name=None):
-    """Initializes mean estimator.
-
-    Args:
-      variable: A string representing the variable to average.
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "mean({})".format(variable)
-    super(Mean, self).__init__(name)
-
-    self._var = variable
-
-  def compute(self, data):
-    return self._group(data)[self._var].mean()
-
-
-class WeightedMean(Metric):
-  """Weighted mean estimator."""
-
-  def __init__(self, variable, weight_variable, name=None):
-    """Initializes weighted mean estimator.
-
-    Args:
-      variable: A string representing the variable to average.
-      weight_variable: A string representing the weight variable.
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "{}_weighted_mean({})".format(weight_variable, variable)
-    super(WeightedMean, self).__init__(name)
-
-    self._var = variable
-    self._weight = weight_variable
-
-  def compute(self, data):
-    data["weighted_var"] = data[self._var] * data[self._weight]
-    data_grouped = self._group(data)
-    return (data_grouped["weighted_var"].sum(min_count=1) /
-            data_grouped[self._weight].sum(min_count=1))
-
-
-class Quantile(Metric):
-  """Quantile estimator."""
-
-  def __init__(self, variable, quantile, name=None):
-    """Initializes quantile estimator.
-
-    Args:
-      variable: A string representing the variable to _calculate the quantile.
-      quantile: The quantile to be _calculated (range is [0,1]).
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "quantile({}, {:.2f})".format(variable, quantile)
-    super(Quantile, self).__init__(name)
-
-    self._var = variable
-    self._quantile = quantile
-
-  def compute(self, data):
-    return self._group(data)[self._var].quantile(self._quantile)
-
-
-class Variance(Metric):
-  """Variance estimator.
-  """
-
-  def __init__(self, variable, unbiased=True, name=None):
-    """Initializes variance estimator.
-
-    Args:
-      variable: A string for the variable column.
-      unbiased: A boolean; if true the unbiased estimate is used,
-        otherwise the unbiased MLE estimator is used.
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "var({})".format(variable)
-    super(Variance, self).__init__(name)
-
-    self._var = variable
-    self._ddof = 1 if unbiased else 0
-
-  def compute(self, data):
-    return self._group(data)[self._var].var(ddof=self._ddof)
-
-
-class StandardDeviation(Metric):
-  """Standard Deviation estimator.
-  """
-
-  def __init__(self, variable, unbiased=True, name=None):
-    """Initializes standard deviation estimator.
-
-    Args:
-      variable: A string for the variable column.
-      unbiased: A boolean; if true the unbiased estimate is used,
-        otherwise the unbiased MLE estimator is used.
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "sd({})".format(variable)
-    super(StandardDeviation, self).__init__(name)
-
-    self._var = variable
-    self._ddof = 1 if unbiased else 0
-
-  def compute(self, data):
-    return self._group(data)[self._var].std(ddof=self._ddof)
-
-
-class CV(Metric):
-  """Coefficient of variation estimator.
-  """
-
-  def __init__(self, variable, unbiased=True, name=None):
-    """Initializes CV estimator.
-
-    Args:
-      variable: A string for the variable column.
-      unbiased: A boolean; if true the unbiased estimate for the standard
-        deviation is used, otherwise the unbiased MLE estimator is used.
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "cv({})".format(variable)
-    super(CV, self).__init__(name)
-
-    self._var = variable
-    self._ddof = 1 if unbiased else 0
-
-  def compute(self, data):
-    var_grouped = self._group(data)[self._var]
-    return var_grouped.std(ddof=self._ddof) / var_grouped.mean()
-
-
-class Correlation(Metric):
-  """Correlation estimator.
-  """
-
-  def __init__(self, var1, var2, name=None):
-    """Initializes correlation estimator.
-
-    Args:
-      var1: A string for the first variable column.
-      var2: A string for the second variable column.
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "corr({}, {})".format(var1, var2)
-    super(Correlation, self).__init__(name)
-
-    self._var1 = var1
-    self._var2 = var2
-
-  def compute(self, data):
-    return self._group(data)[self._var1].corr(data[self._var2])
-
-
-class WeightedCorrelation(Metric):
-  """Weighted correlation estimator."""
-
-  def __init__(self, var1, var2, weight_variable, name=None):
-    """Initializes weighted correlation estimator.
-
-    Args:
-      var1: A string for the first variable column.
-      var2: A string for the second variable column.
-      weight_variable: A string representing the weight variable.
-      name: A string for the column name of results.
-    """
-    if name is None:
-      name = "{}_weighted_corr({}, {})".format(weight_variable, var1, var2)
-    super(WeightedCorrelation, self).__init__(name)
-
-    self._var1 = var1
-    self._var2 = var2
-    self._weight = weight_variable
-
-  def _weighted_corr(self, df):
-    """Computes weighted correlation.
-
-    Args:
-      df: A Pandas data frame.
-
-    Returns:
-      The weighted correlation batween self._var1 and self._var2 based on
-      self._weight.
-    """
-    wts = df[self._weight]
-    mean1 = (df[self._var1] * wts).sum(min_count=1) / wts.sum(min_count=1)
-    mean2 = (df[self._var2] * wts).sum(min_count=1) / wts.sum(min_count=1)
-
-    cross = (wts * (df[self._var1] - mean1) * (df[self._var2] - mean2)).sum(
-        min_count=1
-    )
-    ss1 = (wts * (df[self._var1] - mean1) ** 2).sum(min_count=1)
-    ss2 = (wts * (df[self._var2] - mean2) ** 2).sum(min_count=1)
-
-    return cross / np.sqrt(ss1 * ss2)
-
-  def compute(self, data):
-    if self.split_vars:
-      return self._group(data).apply(self._weighted_corr)
-    else:
-      return self._weighted_corr(data)
-
-
-# Define Ratio estimator for backwards compatibility.
-def Ratio(numerator, denominator, name=None):  # pylint: disable=invalid-name
-  """Constructs a Ratio estimator."""
-
-  metric = Sum(numerator) / Sum(denominator)
-  metric.numerator = numerator  # pylint: disable=g-missing-from-attributes
-  metric.denominator = denominator  # pylint: disable=g-missing-from-attributes
-
-  if name is not None:
-    metric.name = name
-  else:
-    # for compatibility with older versions of Meterstick
-    metric.name = "%s / %s" % (numerator, denominator)
-
-  return metric
-
-
-## Distribution Metrics
-
-
-def _fillna(dist):
-  """Fills NaN values in a distribution with zeros.
-
-  Args:
-    dist: A Pandas Series representing a distribution.
-
-  Returns:
-    A Pandas Series with the NaN values replaced by zeros, only if the
-    distribution is well-defined (i.e., its values do not sum to 0).
-  """
-  return dist.fillna(0.) if dist.sum() > 0 else dist
-
-
-class DistributionMetric(Metric):
-  """Base class for distribution metrics.
-
-  Attributes:
-    name: A string name for the metric's result (e.g., "X Distribution").
-    over: A list of strings indicating what variable(s) to calculate the
-      distribution over.
-    over_index: A pd.Index of the over columns.
-  """
-
-  def __init__(self, name, of, over, expand=False,
-               sort=True, ascending=True, normalize=True):
-    """Initializes DistributionMetric with relevant fields.
-
-    Args:
-      name: A string name for the distribution metric result.
-      of: A string indicating what variable to calculate the distribution of.
-      over: A string or a list of strings indicating what variable(s)
-        to calculate the distribution over.
-      expand: A boolean indicating whether or not to expand to have the full
-        product of all possible levels in all "over" variables.
-      sort: A boolean indicating whether or not to sort the levels of the
-        "over" variable.
-      ascending: A boolean indicating whether the levels in the "over"
-        variables should be sorted in ascending or descending order.
-      normalize: A boolean indicating whether the distribution should be
-        scaled to sum to one.
-    """
-    super(DistributionMetric, self).__init__(name)
-
-    # ensure that the "over" variables are a list
-    if isinstance(over, six.string_types):
-      over = [over]
-    self._of = of
-    self.over = over
-    self._expand = expand
-    self._sort = sort
-    self._ascending = ascending
-    self._normalize = normalize
+  def __init__(self,
+               op,
+               name_tmpl: Text,
+               children: Sequence[Union[Metric, int, float]],
+               rename_columns=None,
+               where: Optional[Text] = None,
+               manipulate_input_type: Text = 'unmelted'):
+    if len(children) != 2:
+      raise ValueError('CompositeMetric must take two children!')
+    if not isinstance(children[0], (Metric, int, float)):
+      raise ValueError('%s is not a Metric or a number!' %
+                       utils.get_name(children[0]))
+    if not isinstance(children[1], (Metric, int, float)):
+      raise ValueError('%s is not a Metric or a number!' %
+                       utils.get_name(children[1]))
+
+    self.name_tmpl = name_tmpl
+    name = name_tmpl.format(*map(utils.get_name, children))
+    super(CompositeMetric, self).__init__(
+        name, children, where, manipulate_input_type=manipulate_input_type)
+    self.op = op
+    self.columns = rename_columns
+
+  def rename_columns(self, rename_columns):
+    self.columns = rename_columns
+    return self
+
+  def set_name(self, name):
     self.name = name
+    return self
 
-  def precalculate(self, data, split_index):
-    """Precalculates the index for the distribution metric.
+  def compute_slices(self, df, split_by=None):
+    """Computes the result with caching.
 
-    Args:
-      data: A Pandas DataFrame
-      split_index: A Pandas Index for the variables on which the analysis
-        is being split.
-    """
-    # Get index for the "over" variables.
-    over_index = pdutils.index_product_from_vars(data, self.over, self._expand)
-
-    # Sort the index, as appropriate
-    if self._sort:
-      over_index = over_index.sort_values(ascending=self._ascending)
-    self.over_index = over_index
-
-    # Take the product of the two indexes.
-    self.index = pdutils.index_product(split_index, over_index)
-
-    super(DistributionMetric, self).precalculate(data, split_index)
-
-  def compute(self, data):
-    """Calculates distribution of self._of over the columns in self.over.
+    1. We know df is not going to change so we can safely enable caching with an
+    arbitrary key.
+    2. Computations between two DataFrames require columns to match. It makes
+    Metric as simple as Sum('X') - Sum('Y') infeasible because they don't have
+    same column names. To overcome this and make CompositeMetric useful, we try
+    our best to reduce DataFrames to pd.Series and scalars. The rule is,
+      2.1 If no split_by, a 1*1 DataFrame will be converted to a scalar and a
+        n*1 DataFrame will be a pd.Series.
+      2.2 If split_by, both cases will be converted to pd.Series.
+      2.3 If both DataFrames have the same number of columns but names don't
+        match, you can pass in columns or call set_columns() to unify the
+        columns. Otherwise you'll get plenty of NAs.
 
     Args:
-      data: A Pandas DataFrame
+      df: The DataFrame to compute on.
+      split_by: Something can be passed into df.group_by().
+
+    Raises:
+      ValueError: If none of the children is a Metric.
 
     Returns:
-      A Pandas Series, indexed by the split_vars and the over var,
-      representing the distribution.
+      The result to be sent to final_compute().
     """
-    if self.split_vars:
-      group_vars = self.split_vars + self.over
-      dist = data.groupby(by=group_vars, sort=False)[self._of].sum(
-          min_count=1
-      )
+    m1 = self.children[0]
+    m2 = self.children[1]
+    if not isinstance(m1, Metric) and not isinstance(m2, Metric):
+      raise ValueError('Must have at least one Metric.')
 
-      if self._normalize:
-        dist = (dist.groupby(level=self.split_vars, sort=False).
-                transform(lambda x: x / x.sum(min_count=1)))
+    key = self.cache_key or self.RESERVED_KEY
+    # MetricList returns a list we don't want when return_dataframe is False.
+    rd_a = isinstance(m1, MetricList)
+    rd_b = isinstance(m2, MetricList)
+    if isinstance(m1, Metric) and not isinstance(m2, Metric):
+      a = m1.compute_on(df, split_by, return_dataframe=rd_a, cache_key=key)
+      if isinstance(a, pd.DataFrame):
+        if hasattr(self, 'name_tmpl'):
+          a.columns = [self.name_tmpl.format(c, m2) for c in a.columns]
+      return self.op(a, m2)
+    if isinstance(m2, Metric) and not isinstance(m1, Metric):
+      b = m2.compute_on(df, split_by, return_dataframe=rd_b, cache_key=key)
+      if isinstance(b, pd.DataFrame):
+        if hasattr(self, 'name_tmpl'):
+          b.columns = [self.name_tmpl.format(c, m1) for c in b.columns]
+      return self.op(m1, b)
+
+    a = m1.compute_on(df, split_by, return_dataframe=rd_a, cache_key=key)
+    b = m2.compute_on(df, split_by, return_dataframe=rd_b, cache_key=key)
+    if not isinstance(a, pd.DataFrame) and not isinstance(b, pd.DataFrame):
+      res = self.op(a, b)
+      if isinstance(res, pd.Series):
+        res.name = self.name
+      return res
+
+    if self.columns is not None:
+      if isinstance(a, pd.DataFrame):
+        a.columns = self.columns
+      if isinstance(b, pd.DataFrame):
+        b.columns = self.columns
+
+    if isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
+      res = self.op(a, b)
+    elif isinstance(a, pd.DataFrame):
+      if not isinstance(b, pd.Series):
+        res = self.op(a, b)
+      else:
+        for col in a.columns:
+          a[col] = self.op(a[col], b)
+        res = a
+    elif isinstance(b, pd.DataFrame):
+      if not isinstance(a, pd.Series):
+        res = self.op(a, b)
+      else:
+        for col in b.columns:
+          b[col] = self.op(a, b[col])
+        res = b
     else:
-      dist = data.groupby(self.over, sort=False)[self._of].sum(
-          min_count=1
-      )
+      raise ValueError("Shoundn't reach here!")
 
-      if self._normalize:
-        dist /= data[self._of].sum(min_count=1)
-
-    # reindex the distribution (this will possibly sort the levels)
-    dist = dist.reindex(self.index)
-
-    return self._group(dist).transform(_fillna)
+    return res
 
 
-class Distribution(DistributionMetric):
-  """Distribution estimator."""
+class Ratio(CompositeMetric):
+  """Syntactic sugar for Sum('A') / Sum('B')."""
 
-  def __init__(self, of, over, expand=False, sort=True,
-               normalize=True, name=None):
-    """Initializes distribution estimator.
+  def __init__(self,
+               numerator: Text,
+               denominator: Text,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None):
+    super(Ratio, self).__init__(
+        lambda x, y: x / y,
+        '{} / {}', (Sum(numerator), Sum(denominator)),
+        where=where)
+    self.name = name or self.name
 
-    Args:
-      of: A string indicating what variable to calculate the distribution of.
-      over: A string or a list of strings indicating what variable(s)
-        to calculate the distribution over.
-      expand: A boolean indicating whether or not to expand to have the full
-        product of all possible levels in all "over" variables.
-      sort: A boolean indicating whether or not to sort the levels of the
-        "over" variable.
-      normalize: A boolean indicating whether the distribution should be
-        scaled to sum to one.
-      name: A string for the column name of results.
-    """
+
+class SimpleMetric(Metric):
+  """Base class for common built-in aggregate functions of df.group_by()."""
+
+  def __init__(self,
+               var: Text,
+               name: Optional[Text] = None,
+               name_tmpl=None,
+               where: Optional[Text] = None,
+               **kwargs):
+    self.name_tmpl = name_tmpl
+    name = name or name_tmpl.format(var)
+    self.var = var
+    self.kwargs = kwargs
+    super(SimpleMetric, self).__init__(name, where=where)
+
+
+class Count(SimpleMetric):
+  """Count estimator.
+
+  Attributes:
+    var: Column to compute on.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.count().
+    And all other attributes inherited from Metric.
+  """
+
+  def __init__(self,
+               var: Text,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    super(Count, self).__init__(var, name, 'count({})', where, **kwargs)
+
+  def compute_slices(self, df, split_by=None):
+    return self.group(df, split_by)[self.var].count(**self.kwargs)
+
+
+class Sum(SimpleMetric):
+  """Sum estimator.
+
+  Attributes:
+    var: Column to compute on.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.sum().
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var: Text,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    super(Sum, self).__init__(var, name, 'sum({})', where, **kwargs)
+
+  def compute_slices(self, df, split_by=None):
+    return self.group(df, split_by)[self.var].sum(**self.kwargs)
+
+
+class Mean(SimpleMetric):
+  """Mean estimator.
+
+  Attributes:
+    var: Column to compute on.
+    weight: The column of weights.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.mean(). Only has effect if no
+      weight is specified.
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var: Text,
+               weight: Optional[Text] = None,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    name_tmpl = '%s-weighted mean({})' % weight if weight else 'mean({})'
+    super(Mean, self).__init__(var, name, name_tmpl, where, **kwargs)
+    self.weight = weight
+
+  def compute(self, df):
+    if not self.weight:
+      raise ValueError('Weight is missing in %s.' % self.name)
+    return np.average(df[self.var], weights=df[self.weight])
+
+  def compute_slices(self, df, split_by=None):
+    if self.weight:
+      # When there is weight, just loop through slices.
+      return super(Mean, self).compute_slices(df, split_by)
+    return self.group(df, split_by)[self.var].mean(**self.kwargs)
+
+
+class Quantile(SimpleMetric):
+  """Quantile estimator.
+
+  Attributes:
+    var: Column to compute on.
+    quantile: Same as the arg "q" in np.quantile().
+    weight: The column of weights. If specified, we always return a DataFrame.
+    interpolation: As the same arg in pd.Series.quantile(). No effect if
+      'weight' is specified.
+    one_quantile: If quantile is a number or an iterable.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.quantile().
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var: Text,
+               quantile: Union[float, int] = 0.5,
+               weight: Optional[Text] = None,
+               interpolation='linear',
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    self.one_quantile = isinstance(quantile, (int, float))
+    if not self.one_quantile:
+      quantile = np.array(quantile)
+    if self.one_quantile and not 0 <= quantile <= 1:
+      raise ValueError('quantiles must be in [0, 1].')
+    if not self.one_quantile and not (np.all(quantile >= 0) and
+                                      np.all(quantile <= 1)):
+      raise ValueError('quantiles must be in [0, 1].')
+    name_tmpl = 'quantile({}, {})'
+    if weight:
+      name_tmpl = '%s-weighted quantile({}, {})' % weight
+    name = name or name_tmpl.format(var, str(quantile))
+    self.quantile = quantile
+    self.interpolation = interpolation
+    self.weight = weight
+    super(Quantile, self).__init__(var, name, name_tmpl, where, **kwargs)
+
+  def compute(self, df):
+    """Adapted from https://stackoverflow.com/a/29677616/12728137."""
+    if not self.weight:
+      raise ValueError('Weight is missing in %s.' % self.name)
+
+    sample_weight = np.array(df[self.weight])
+    values = np.array(df[self.var])
+    sorter = np.argsort(values)
+    values = values[sorter]
+    sample_weight = sample_weight[sorter]
+    weighted_quantiles = np.cumsum(sample_weight) - 0.5 * sample_weight
+    weighted_quantiles /= np.sum(sample_weight)
+    res = np.interp(self.quantile, weighted_quantiles, values)
+    if self.one_quantile:
+      return res
+    return pd.DataFrame(
+        [res],
+        columns=[self.name_tmpl.format(self.var, q) for q in self.quantile])
+
+  def compute_slices(self, df, split_by=None):
+    if self.weight:
+      # When there is weight, just loop through slices.
+      return super(Quantile, self).compute_slices(df, split_by)
+    res = self.group(df, split_by)[self.var].quantile(
+        self.quantile, interpolation=self.interpolation, **self.kwargs)
+    if self.one_quantile:
+      return res
+
+    if split_by:
+      res = res.unstack()
+      res.columns = [self.name_tmpl.format(self.var, c) for c in res]
+      return res
+    res = utils.unmelt(pd.DataFrame(res))
+    res.columns = [self.name_tmpl.format(self.var, c[0]) for c in res]
+    return res
+
+
+class Variance(SimpleMetric):
+  """Variance estimator.
+
+  Attributes:
+    var: Column to compute on.
+    ddof: Degree of freedom to use in pd.DataFrame.var().
+    weight: The column of weights.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.var(). Only has effect if no
+      weight is specified.
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var: Text,
+               unbiased: bool = True,
+               weight: Optional[Text] = None,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    self.ddof = 1 if unbiased else 0
+    self.weight = weight
+    name_tmpl = '%s-weighted var({})' % weight if weight else 'var({})'
+    super(Variance, self).__init__(var, name, name_tmpl, where, **kwargs)
+
+  def compute(self, df):
+    if not self.weight:
+      raise ValueError('Weight is missing in %s.' % self.name)
+    avg = np.average(df[self.var], weights=df[self.weight])
+    total = (df[self.weight] * (df[self.var] - avg)**2).sum()
+    total_weights = df[self.weight].sum()
+    return total / (total_weights - self.ddof)
+
+  def compute_slices(self, df, split_by=None):
+    if self.weight:
+      # When there is weight, just loop through slices.
+      return super(Variance, self).compute_slices(df, split_by)
+    return self.group(df, split_by)[self.var].var(ddof=self.ddof, **self.kwargs)
+
+
+class StandardDeviation(SimpleMetric):
+  """Standard Deviation estimator.
+
+  Attributes:
+    var: Column to compute on.
+    ddof: Degree of freedom to use in pd.DataFrame.std().
+    weight: The column of weights.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.std(). Only has effect if no
+      weight is specified.
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var: Text,
+               unbiased: bool = True,
+               weight: Optional[Text] = None,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    self.ddof = 1 if unbiased else 0
+    self.weight = weight
+    name_tmpl = '%s-weighted sd({})' % weight if weight else 'sd({})'
+    super(StandardDeviation, self, **kwargs).__init__(var, name, name_tmpl,
+                                                      where)
+
+  def compute(self, df):
+    if not self.weight:
+      raise ValueError('Weight is missing in %s.' % self.name)
+    avg = np.average(df[self.var], weights=df[self.weight])
+    total = (df[self.weight] * (df[self.var] - avg)**2).sum()
+    total_weights = df[self.weight].sum()
+    return np.sqrt(total / (total_weights - self.ddof))
+
+  def compute_slices(self, df, split_by=None):
+    if self.weight:
+      # When there is weight, just loop through slices.
+      return super(StandardDeviation, self).compute_slices(df, split_by)
+    return self.group(df, split_by)[self.var].std(ddof=self.ddof, **self.kwargs)
+
+
+class CV(SimpleMetric):
+  """Coefficient of variation estimator.
+
+  Attributes:
+    var: Column to compute on.
+    ddof: Degree of freedom to use.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to both pd.DataFrame.std() and
+      pd.DataFrame.mean().
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var: Text,
+               unbiased: bool = True,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    self.ddof = 1 if unbiased else 0
+    super(CV, self).__init__(var, name, 'cv({})', where, **kwargs)
+
+  def compute_slices(self, df, split_by=None):
+    var_grouped = self.group(df, split_by)[self.var]
+    return var_grouped.std(
+        ddof=self.ddof, **self.kwargs) / var_grouped.mean(**self.kwargs)
+
+
+class Correlation(SimpleMetric):
+  """Correlation estimator.
+
+  Attributes:
+    var: Column of first variable.
+    var2: Column of second variable.
+    weight: The column of weights.
+    name: Name of the Metric.
+    method: Method of correlation. The same arg in pd.Series.corr(). Only has
+      effect if no weight is specified.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.corr(). Only has effect if no
+      weight is specified.
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var1: Text,
+               var2: Text,
+               weight: Optional[Text] = None,
+               name: Optional[Text] = None,
+               method='pearson',
+               where: Optional[Text] = None,
+               **kwargs):
+    name_tmpl = 'corr({}, {})'
+    if weight:
+      name_tmpl = '%s-weighted corr({}, {})' % weight
     if name is None:
-      name = "{} Distribution".format(of)
-    super(Distribution, self).__init__(name, of, over,
-                                       expand=expand, sort=sort,
-                                       normalize=normalize)
+      name = name_tmpl.format(var1, var2)
+    self.var2 = var2
+    self.method = method
+    self.weight = weight
+    super(Correlation, self).__init__(var1, name, name_tmpl, where, **kwargs)
+
+  def compute(self, df):
+    if not self.weight:
+      raise ValueError('Weight is missing in %s.' % self.name)
+    cov = np.cov(
+        df[[self.var, self.var2]],
+        rowvar=False,
+        bias=True,
+        aweights=df[self.weight])
+    return cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1])
+
+  def compute_slices(self, df, split_by=None):
+    if self.weight:
+      # When there is weight, just loop through slices.
+      return super(Correlation, self).compute_slices(df, split_by)
+    return self.group(df, split_by)[self.var].corr(
+        df[self.var2], method=self.method, **self.kwargs)
 
 
-class CumulativeDistribution(DistributionMetric):
-  """Ratio estimator."""
+class Cov(SimpleMetric):
+  """Covariance estimator.
 
-  def __init__(self, of, over, expand=False, ascending=True,
-               normalize=True, name=None):
-    """Initializes distribution estimator.
+  Attributes:
+    var: Column of first variable.
+    var2: Column of second variable.
+    bias: The same arg passed to np.cov().
+    ddof: The same arg passed to np.cov().
+    weight: Column name of aweights passed to np.cov(). If you need fweights,
+      pass it in kwargs.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to np.cov().
+    And all other attributes inherited from SimpleMetric.
+  """
 
-    Args:
-      of: A string indicating what variable to calculate the distribution of.
-      over: A string or a list of strings indicating what variable(s)
-        to calculate the distribution over.
-      expand: A boolean indicating whether or not to expand to have the full
-        product of all possible levels in all "over" variables.
-      ascending: A boolean indicating whether the levels in the "over"
-        variables should be sorted in ascending or descending order.
-      normalize: A boolean indicating whether the distribution should be
-        scaled to sum to one.
-      name: A string for the column name of results.
-    """
+  def __init__(self,
+               var1: Text,
+               var2: Text,
+               bias: bool = False,
+               ddof: Optional[int] = None,
+               weight: Optional[Text] = None,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    name_tmpl = 'cov({}, {})'
+    if weight:
+      name_tmpl = '%s-weighted %s' % (weight, name_tmpl)
+
     if name is None:
-      name = "{} Cumulative Distribution".format(of)
-    super(CumulativeDistribution, self).__init__(name, of, over,
-                                                 expand=expand,
-                                                 ascending=ascending,
-                                                 normalize=normalize)
+      name = name_tmpl.format(var1, var2)
+    self.var2 = var2
+    self.bias = bias
+    self.ddof = ddof
+    self.weight = weight
+    super(Cov, self).__init__(var1, name, name_tmpl, where, **kwargs)
 
-  def compute(self, data):
-    """Computes cumulative distribution of data over variables.
-
-    The cumulative distribution is computed such that the numbers in each
-    slice increase from 0 to 1.
-
-    Args:
-      data: A Pandas DataFrame.
-
-    Returns:
-      A Pandas Series, indexed by the variables in self.split_vars, followed
-      by the variables in self.over. The levels of the variables in
-      self.over are sorted in ascending order if self._ascending is True.
-    """
-    dist = super(CumulativeDistribution, self).compute(data)
-    return self._group(dist).cumsum()
+  def compute(self, df):
+    return np.cov(
+        df[[self.var, self.var2]],
+        rowvar=False,
+        bias=self.bias,
+        ddof=self.ddof,
+        aweights=df[self.weight] if self.weight else None,
+        **self.kwargs)[0, 1]

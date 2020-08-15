@@ -1,4 +1,4 @@
-# Copyright 2019 Google LLC
+# Copyright 2020 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 
 # Present unified interface in a single module.
 # pylint: disable=wildcard-import
-from meterstick.comparisons import *
-from meterstick.core import *
-from meterstick.metrics import *
-from meterstick.standard_errors import *
+from meterstick import utils
+from meterstick.v2.metrics import *
+from meterstick.v2.operations import *

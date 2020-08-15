@@ -1,0 +1,811 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Operation classes for Meterstick."""
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+import copy
+from typing import Any, Iterable, List, Optional, Text, Tuple, Union
+from meterstick import metrics
+from meterstick import utils
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+
+class Operation(metrics.Metric):
+  """An meta-Metric that operates on a Metric instance.
+
+  The differences between Metric and Operation are
+  1. Operation must take another Metric as the child to operate on.
+  2. The name of Operation is reflected in the result differently. A Metric
+    usually returns a 1D data and its name could just be used as the column.
+    However, Operation ofern operates on MetricList and one name doesn't fit
+    all. What we do is we apply the name_tmpl of Operation to all Metric names
+
+  Attributes:
+    name: Name of the Metric.
+    name_tmpl: The template to generate the name from child Metrics' names.
+    children: A Length-1 tuple of the child Metric(s) whose results will be the
+      input to the Operation. Might be None in __init__, but must be assigned
+      before compute().
+    extra_index: Many Operations rely on adding extra split_by columns to child
+      Metric. For example,
+      PercentChange('condition', base_value, Sum('X')).compute_on(df, 'grp')
+      would compute Sum('X').compute_on(df, ['grp', 'condition']) then get the
+      change. As the result, the CacheKey used in PercentChange is different to
+      that used in Sum('X'). The latter has more columns in the split_by.
+      extra_index records what columns need to be added to children Metrics so
+      we can flush the cache correctly. The convention is extra_index comes
+      after split_by. If not, you need to overwrite flush_children().
+    where: A string that will be passed to df.query() as a prefilter.
+    cache_key: What key to use to cache the df. You can use anything that can be
+      a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ...).
+    manipulate_input_type: Whether the input df is 'melted' or 'unmelted'.
+    And all other attributes inherited from Metric.
+  """
+
+  def __init__(self,
+               child: Optional[metrics.Metric] = None,
+               name_tmpl: Optional[Text] = None,
+               extra_index: Optional[Union[Text, Iterable[Text]]] = None,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               manipulate_input_type: Text = 'unmelted',
+               **kwargs):
+    if name_tmpl and not name:
+      name = name_tmpl.format(utils.get_name(child))
+    super(Operation, self).__init__(
+        name,
+        child or (),
+        where,
+        manipulate_input_type=manipulate_input_type,
+        **kwargs)
+    self.name_tmpl = name_tmpl
+    self.extra_index = [extra_index] if isinstance(extra_index,
+                                                   str) else extra_index or []
+
+  def compute_child(self,
+                    df: pd.DataFrame,
+                    split_by=None,
+                    melted=False,
+                    return_dataframe=True,
+                    cache_key=None):
+    child = self.children[0]
+    cache_key = cache_key or self.cache_key or self.RESERVED_KEY
+    return child.compute_on(df, split_by, melted, return_dataframe, cache_key)
+
+  def manipulate(self, res, melted, return_dataframe=True):
+    """Applies name_tmpl to all Metric names."""
+    res = super(Operation, self).manipulate(res, melted, return_dataframe)
+    res = res.copy()  # Avoid changing the result in cache.
+    if melted:
+      if len(res.index.names) > 1:
+        res.index.set_levels(
+            map(self.name_tmpl.format, res.index.levels[0]), 0, inplace=True)
+      else:
+        res.index = map(self.name_tmpl.format, res.index)
+    else:
+      res.columns = map(self.name_tmpl.format, res.columns)
+    return res
+
+  def flush_children(self,
+                     key=None,
+                     split_by=None,
+                     where=None,
+                     recursive=True,
+                     prune=True):
+    split_by = (split_by or []) + self.extra_index
+    super(Operation, self).flush_children(key, split_by, where, recursive,
+                                          prune)
+
+  def __call__(self, child: metrics.Metric):
+    op = copy.deepcopy(self) if self.children else self
+    op.name = op.name_tmpl.format(utils.get_name(child))
+    op.children = (child,)
+    return op
+
+
+class Normalize(Operation):
+  """Computes the normalized values of a Metric over a column.
+
+  Attributes:
+    over: The column to normalize over.
+    children: A tuple of a Metric whose result we normalize on.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               over: Text,
+               child: Optional[metrics.Metric] = None,
+               **kwargs):
+    self.over = over
+    super(Normalize, self).__init__(child, '{} Normalized', over, **kwargs)
+
+  def compute_slices(self, df, split_by=None):
+    lvls = split_by + [self.over] if split_by else self.over
+    res = self.compute_child(df, lvls)
+    total = res.groupby(level=split_by).sum() if split_by else res.sum()
+    return res / total
+
+
+class CumulativeDistribution(Operation):
+  """Computes the normalized cumulative sum.
+
+  Attributes:
+    over: The column to normalize over.
+    children: A tuple of a Metric whose result we compute the cumulative
+      distribution on.
+    order: An iterable. The over column will be ordered by it before computing
+      cumsum.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               over: Text,
+               child: Optional[metrics.Metric] = None,
+               order=None,
+               **kwargs):
+    self.over = over
+    self.order = order
+    super(CumulativeDistribution,
+          self).__init__(child, 'Cumulative Distribution {}', over, **kwargs)
+
+  def split_data(self, df, split_by=None):
+    """Caches the result for the whole df instead of many slices."""
+    if not split_by:
+      yield self.compute_child(df, self.over), None
+    else:
+      child = self.compute_child(df, split_by + [self.over])
+      keys, indices = list(zip(*child.groupby(split_by).groups.items()))
+      for i, idx in enumerate(indices):
+        yield child.loc[idx.unique()].droplevel(split_by), keys[i]
+
+  def compute(self, df):
+    if self.order:
+      df = pd.concat((
+          df.loc[[o]] for o in self.order if o in df.index.get_level_values(0)))
+    dist = df.cumsum()
+    dist /= df.sum()
+    return dist
+
+
+class Comparison(Operation):
+  """Base class for comparisons like percent/absolute change."""
+
+  def __init__(self,
+               condition_column,
+               baseline_key,
+               child: Optional[metrics.Metric] = None,
+               include_base: bool = False,
+               name_tmpl: Optional[Text] = None,
+               extra_index=None,
+               **kwargs):
+    self.condition_column = condition_column
+    self.baseline_key = baseline_key
+    self.include_base = include_base
+    super(Comparison, self).__init__(child, name_tmpl, extra_index or
+                                     condition_column, **kwargs)
+
+
+class PercentChange(Comparison):
+  """Percent change estimator on a Metric.
+
+  Attributes:
+    condition_column: The column that contains the conditions.
+    baseline_key: The value of the condition that represents the baseline (e.g.,
+      "Control"). All conditions will be compared to this baseline.
+    children: A tuple of a Metric whose result we compute percentage change on.
+    include_base: A boolean for whether the baseline condition should be
+      included in the output.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               condition_column: Text,
+               baseline_key,
+               child: Optional[metrics.Metric] = None,
+               include_base: bool = False,
+               **kwargs):
+    super(PercentChange,
+          self).__init__(condition_column, baseline_key, child, include_base,
+                         '{} Percent Change', **kwargs)
+
+  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+    if split_by:
+      to_split = split_by + [self.condition_column]
+      level = self.condition_column
+    else:
+      to_split = [self.condition_column]
+      level = None
+    res = self.compute_child(df, to_split)
+    res = (res / res.xs(self.baseline_key, level=level) - 1) * 100
+    if not self.include_base:
+      res = res.drop(self.baseline_key, level=level)
+    return res
+
+
+class AbsoluteChange(Comparison):
+  """Absolute change estimator on a Metric.
+
+  Attributes:
+    condition_column: The column that contains the conditions.
+    baseline_key: The value of the condition that represents the baseline (e.g.,
+      "Control"). All conditions will be compared to this baseline.
+    children: A tuple of a Metric whose result we compute absolute change on.
+    include_base: A boolean for whether the baseline condition should be
+      included in the output.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               condition_column: Text,
+               baseline_key,
+               child: Optional[metrics.Metric] = None,
+               include_base: bool = False,
+               **kwargs):
+    super(AbsoluteChange,
+          self).__init__(condition_column, baseline_key, child, include_base,
+                         '{} Absolute Change', **kwargs)
+
+  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+    if split_by:
+      to_split = split_by + [self.condition_column]
+      level = self.condition_column
+    else:
+      to_split = [self.condition_column]
+      level = None
+    res = self.compute_child(df, to_split)
+    # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
+    # has different implementations for __sub__ and __isub__. ___isub__ tries
+    # to reindex to update in place which sometimes lead to lots of NAs.
+    res = res - res.xs(self.baseline_key, level=level)
+    if not self.include_base:
+      res = res.drop(self.baseline_key, level=level)
+    return res
+
+
+class MH(Comparison):
+  """Cochran-Mantel-Haenszel statistics estimator on a Metric.
+
+  Attributes:
+    condition_column: The column that contains the conditions.
+    baseline_key: The value of the condition that represents the baseline (e.g.,
+      "Control"). All conditions will be compared to this baseline.
+    stratified_by: The stratification column(s) in the DataFrame.
+    children: A tuple of a Metric whose result we compute the MH on.
+    include_base: A boolean for whether the baseline condition should be
+      included in the output.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               condition_column: Text,
+               baseline_key: Text,
+               stratified_by: Union[Text, List[Text]],
+               metric: Optional[metrics.Metric] = None,
+               include_base: bool = False,
+               **kwargs):
+    self.stratified_by = stratified_by if isinstance(stratified_by,
+                                                     list) else [stratified_by]
+    super(MH, self).__init__(condition_column, baseline_key, metric,
+                             include_base, '{} MH Ratio',
+                             [condition_column] + self.stratified_by, **kwargs)
+
+  def compute_one_metric(self, metric, df, split_by=None):
+    """Computes MH statistics for one Metric."""
+    if not isinstance(metric,
+                      metrics.CompositeMetric) or metric.op(2.0, 2) != 1:
+      raise ValueError('MH only makes sense on ratio metrics.')
+
+    mh_metric = metrics.MetricList(metric.children)
+    numer = metric.children[0].name
+    denom = metric.children[1].name
+    df_all = mh_metric.compute_on(
+        df,
+        split_by + [self.condition_column] + self.stratified_by,
+        cache_key=self.cache_key or self.RESERVED_KEY)
+    df_baseline = df_all.xs(self.baseline_key, level=self.condition_column)
+    mh_ratios = []
+    conds = []
+    for cond in df[self.condition_column].unique():
+      if cond == self.baseline_key and not self.include_base:
+        continue
+      df_cond = df_all.xs(cond, level=self.condition_column)
+      ka, na = df_cond[numer], df_cond[denom]
+      kb, nb = df_baseline[numer], df_baseline[denom]
+      weights = 1. / (na + nb)
+      if split_by:
+        mh_ratio = ((ka * nb * weights).groupby(split_by).sum() /
+                    (kb * na * weights).groupby(split_by).sum() - 1) * 100
+      else:
+        mh_ratio = ((ka * nb * weights).sum() /
+                    (kb * na * weights).sum() - 1) * 100
+      mh_ratios.append(mh_ratio)
+      conds.append(cond)
+    if split_by:
+      res = pd.concat(mh_ratios, keys=conds, names=[self.condition_column])
+      res.name = metric.name
+      res = res.reorder_levels(split_by + [self.condition_column])
+      return res
+    res = pd.DataFrame({metric.name: mh_ratios}, index=conds)
+    res.index.name = self.condition_column
+    return res
+
+  def compute_slices(self, df, split_by):
+    child = self.children[0]
+    if isinstance(child, metrics.MetricList):
+      return pd.concat(
+          [self.compute_one_metric(m, df, split_by) for m in child],
+          axis=1,
+          sort=False)
+    else:
+      return self.compute_one_metric(child, df, split_by)
+
+  def flush_children(self,
+                     key=None,
+                     split_by=None,
+                     where=None,
+                     recursive=True,
+                     prune=True):
+    """Flushes the grandchildren as child is not computed."""
+    split_by = (split_by or []) + [self.condition_column] + self.stratified_by
+    if isinstance(self.children[0], metrics.MetricList):
+      for c in self.children[0]:
+        c.flush_children(key, split_by, where, recursive, prune)
+    else:
+      self.children[0].flush_children(key, split_by, where, recursive, prune)
+
+
+class MetricWithCI(Operation):
+  """Base class for Metrics that have confidence interval info in the return.
+
+  The return when melted, has columns like
+  Value  Jackknife SE
+  or if confidence specified,
+  Value  Jackknife CI-lower  Jackknife CI-upper
+  if not melted, the columns are pd.MultiIndex like
+  Metric1                                          Metric2...
+  Value  Jackknife SE (or CI-lower and CI-upper)   Value  Jackknife SE
+  The column for point estimate is usually "Value", but could be others like
+  "Percent Change" for comparison Metrics so don't rely on the name, but you can
+  assume what ever it's called, it's always the first column followed by
+  "... SE" or "... CI-lower" and "... CI-upper".
+  If confidence is speified, a display function will be bound to the returned
+  DataFrame so res.display() will display confidence interval and highlight
+  significant changes nicely in Colab and Jupyter notebook.
+  As the return has multiple columns even for one Metric, the default DataFrame
+  returned is in melted format, unlike vanilla Metric.
+  The main computation pipeline is used to compute stderr or confidence interval
+  bounds. We compute the point estimates in final_compute() and and combine it
+  with stderr or CI in the final_compute.
+  Similar to how you derive Metric, if you don't need vectorization, overwrite
+  compute(), or even simpler, get_samples(). See Bootstrap for an example. If
+  you need vectorization, overwrite compute_slices. See Jackknife for an
+  example.
+
+  Attributes:
+    unit: The column to go over (kackknife/bootstrap over) to get stderr.
+    confidence: The level of the confidence interval, must be in (0, 1). If
+      specified, we return confidence interval range instead of standard error.
+      Additionally, a display() function will be bound to the result so you can
+      visualize the confidence interval nicely in Colab and Jupyter notebook.
+    prefix: In the result, the column names will be like "{prefix} SE",
+      "{prefix} CI-upper". And all other attributes inherited from Operation.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               unit: Optional[Text],
+               child: Optional[metrics.Metric] = None,
+               confidence: Optional[float] = None,
+               name_tmpl: Optional[Text] = None,
+               prefix: Optional[Text] = None,
+               **kwargs):
+    if confidence and not 0 < confidence < 1:
+      raise ValueError('Confidence must be in (0, 1).')
+    self.unit = unit
+    self.confidence = confidence
+    super(MetricWithCI, self).__init__(child, name_tmpl, **kwargs)
+    self.prefix = prefix
+    if not self.prefix and self.name_tmpl:
+      self.prefix = prefix or self.name_tmpl.format('').strip()
+
+  def compute_on_samples(self,
+                         keyed_samples: Iterable[Tuple[Any, pd.DataFrame]],
+                         split_by=None):
+    """Iters through sample DataFrames and collects results.
+
+    Args:
+      keyed_samples: A tuple. The first element is the cache_key and the second
+        is the corresponding DataFrame. Remember a key should correspond to the
+        same data.
+      split_by: Something can be passed into DataFrame.group_by().
+
+    Returns:
+      List of results from samples.
+    """
+    estimates = []
+    for keyed_sample in keyed_samples:
+      try:
+        cache_key, sample = keyed_sample
+        res = self.compute_child(
+            sample, split_by, melted=True, cache_key=cache_key)
+        estimates.append(res)
+      except Exception as e:  # pylint: disable=broad-except
+        print(
+            'Warning: Failed on sample data for reason %s. If you see many such'
+            ' failures, your data might be too sparse.' % repr(e))
+      finally:
+        if cache_key is not None:
+          # In case errors occur so the top Metric was not computed, we don't
+          # want to prune because the leaf Metrics still need to be cleaned up.
+          self.flush_children(cache_key, split_by, prune=False)
+    return estimates
+
+  def compute(self, df):
+    estimates = self.compute_on_samples(self.get_samples(df))
+    return self.get_stderrs_or_ci_half_width(estimates)
+
+  def manipulate(self,
+                 res,
+                 melted: bool = False,
+                 return_dataframe: bool = True):
+    # Always return a melted df and don't add suffix like "Jackknife" because
+    # point_est won't have it.
+    del melted, return_dataframe  # unused
+    return super(Operation, self).manipulate(res, True, True)  # pylint: disable=bad-super-call
+
+  def final_compute(self,
+                    std,
+                    melted: bool = False,
+                    return_dataframe: bool = True,
+                    split_by: Optional[List[Text]] = None,
+                    df=None):
+    """Computes point estimates and returns it with stderrs or CI range."""
+    if self.where:
+      df = df.query(self.where)
+    point_est = self.compute_child(df, split_by, melted=True)
+    res = point_est.join(std)
+
+    if self.confidence:
+      res[self.prefix +
+          ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
+      res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
+
+    if not melted:
+      res = utils.unmelt(res)
+    return res
+
+  @staticmethod
+  def get_stderrs(replicates):
+    return pd.concat(replicates, 1, sort=False).std(1)
+
+  def get_ci_width(self, stderrs, dof):
+    """You can return asymmetrical confidence interval."""
+    half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)
+    return half_width, half_width
+
+  def get_stderrs_or_ci_half_width(self, replicates):
+    """Returns confidence interval infomation in an unmelted DataFrame."""
+    stderrs = self.get_stderrs(replicates)
+    if self.confidence:
+      res = pd.DataFrame(self.get_ci_width(stderrs, len(replicates) - 1)).T
+      res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']
+    else:
+      res = pd.DataFrame(stderrs, columns=[self.prefix + ' SE'])
+    res = utils.unmelt(res)
+    return res
+
+  def get_samples(self, df, split_by=None):
+    raise NotImplementedError
+
+
+def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
+  """Gets a function that can be monkey patched to Sum/Count.compute_slices.
+
+  Args:
+    unit: The column whose levels define the jackknife buckets.
+    original_split_by: The split_by passed to Jackknife().compute_on().
+    original_compute: The compute_slices() of Sum or Count. We will monkey patch
+      it.
+
+  Returns:
+    A function that can be monkey patched to Sum/Count.compute_slices().
+  """
+
+  def precompute_loo(self, df, split_by=None):
+    """Precomputes leave-one-out (LOO) results to make Jackknife faster.
+
+    For Sum, Count and Mean, it's possible to compute the LOO estimates in a
+    vectorized way. For Sum and Count, we can get the LOO estimates by
+    subtracting the sum/count of each bucket from the total. Here we precompute
+    and cache the LOO results.
+
+    Args:
+      self: The Sum or Count instance callling this function.
+      df: The DataFrame passed to Sum/Count.compute_slies().
+      split_by: The split_by passed to Sum/Count.compute_slies().
+
+    Returns:
+      Same as what normal Sum/Count.compute_slies() would have returned.
+    """
+    total = original_compute(self, df, split_by)
+    split_by_with_unit = [unit] + split_by if split_by else [unit]
+    each_bucket = original_compute(self, df, split_by_with_unit)
+    each_bucket = utils.adjust_slices_for_loo(each_bucket, original_split_by)
+    loo = total - each_bucket
+    if split_by:
+      # total - each_bucket might put the unit as the innermost level, but we
+      # want the unit as the outermost level.
+      loo = loo.reorder_levels(split_by_with_unit)
+    buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
+    for bucket in buckets:
+      key = self.wrap_cache_key(('_RESERVED', 'Jackknife', unit, bucket),
+                                split_by, self.cache_key.where)
+      self.save_to_cache(key, loo.loc[bucket])
+    return total
+  return precompute_loo
+
+
+def get_mean_monkey_patch_fn(unit, original_split_by):
+  """Gets a function that can be monkey patched to Mean.compute_slices.
+
+  Args:
+    unit: The column whose levels define the jackknife buckets.
+    original_split_by: The split_by passed to Jackknife().compute_on().
+
+  Returns:
+    A function that can be monkey patched to Sum/Count.compute_slices().
+  """
+
+  def precompute_loo(self, df, split_by=None):
+    """Precomputes leave-one-out (LOO) results to make Jackknife faster.
+
+    For Sum, Count and Mean, it's possible to compute the LOO estimates in a
+    vectorized way. LOO mean is just LOO sum / LOO count. Here we precompute
+    and cache the LOO results.
+
+    Args:
+      self: The Mean instance callling this function.
+      df: The DataFrame passed to Mean.compute_slies().
+      split_by: The split_by passed to Mean.compute_slies().
+
+    Returns:
+      Same as what normal Mean.compute_slies() would have returned.
+    """
+    data = df.copy()
+    split_by_with_unit = [unit] + split_by if split_by else [unit]
+    if self.weight:
+      data[self.var] *= data[self.weight]
+      total_sum = self.group(data, split_by)[self.var].sum()
+      total_weight = self.group(data, split_by)[self.weight].sum()
+      bucket_sum = self.group(data, split_by_with_unit)[self.var].sum()
+      bucket_sum = utils.adjust_slices_for_loo(bucket_sum, original_split_by)
+      bucket_weight = self.group(data, split_by_with_unit)[self.weight].sum()
+      bucket_weight = utils.adjust_slices_for_loo(bucket_weight,
+                                                  original_split_by)
+      loo_sum = total_sum - bucket_sum
+      loo_weight = total_weight - bucket_weight
+      if split_by:
+        # total - bucket_sum might put the unit as the innermost level, but we
+        # want the unit as the outermost level.
+        loo_sum = loo_sum.reorder_levels(split_by_with_unit)
+        loo_weight = loo_weight.reorder_levels(split_by_with_unit)
+      loo = loo_sum / loo_weight
+      mean = total_sum / total_weight
+    else:
+      total_sum = self.group(data, split_by)[self.var].sum()
+      bucket_sum = self.group(data, split_by_with_unit)[self.var].sum()
+      bucket_sum = utils.adjust_slices_for_loo(bucket_sum, original_split_by)
+      total_ct = self.group(data, split_by)[self.var].count()
+      bucket_ct = self.group(data, split_by_with_unit)[self.var].count()
+      bucket_ct = utils.adjust_slices_for_loo(bucket_ct, original_split_by)
+      loo_sum = total_sum - bucket_sum
+      loo_ct = total_ct - bucket_ct
+      loo = loo_sum / loo_ct
+      mean = total_sum / total_ct
+      if split_by:
+        loo = loo.reorder_levels(split_by_with_unit)
+
+    buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
+    for bucket in buckets:
+      key = utils.CacheKey(('_RESERVED', 'Jackknife', unit, bucket),
+                           self.cache_key.where, split_by)
+      self.save_to_cache(key, loo.loc[bucket])
+    return mean
+  return precompute_loo
+
+
+class Jackknife(MetricWithCI):
+  """Class for Jackknife estimates of standard errors.
+
+  Attributes:
+    unit: The column whose levels define the jackknife buckets.
+    confidence: The level of the confidence interval, must be in (0, 1). If
+      specified, we return confidence interval range instead of standard error.
+      Additionally, a display() function will be bound to the result so you can
+      visualize the confidence interval nicely in Colab and Jupyter notebook.
+    children: A tuple of a Metric whose result we jackknife on.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               unit: Text,
+               child: Optional[metrics.Metric] = None,
+               confidence: Optional[float] = None,
+               **kwargs):
+    super(Jackknife, self).__init__(unit, child, confidence, '{} Jackknife',
+                                    None, **kwargs)
+
+  def precompute(self, df, split_by=None):
+    """Caches point estimate and leave-one-out (LOO) results for Sum/Count/Mean.
+
+    For Sum, Count and Mean, it's possible to compute the LOO estimates in a
+    vectorized way. For Sum and Count, we can get the LOO estimates
+    by subtracting the sum/count of each bucket from the total. For Mean, LOO
+    mean is LOO sum / LOO count. So we can monkey patch the compute_slices() of
+    the Metrics to cache the LOO results under certain keys when we precompute
+    the point estimate.
+
+    Args:
+      df: The DataFrame passed from compute_on().
+      split_by: The split_by passed from compute_on().
+
+    Returns:
+      The input df. All we do here is saving precomputed stuff to cache.
+    """
+    original_sum_compute_slices = metrics.Sum.compute_slices
+    original_ct_compute_slices = metrics.Count.compute_slices
+    original_mean_compute_slices = metrics.Mean.compute_slices
+    try:
+      metrics.Sum.compute_slices = get_sum_ct_monkey_patch_fn(
+          self.unit, split_by, original_sum_compute_slices)
+      metrics.Count.compute_slices = get_sum_ct_monkey_patch_fn(
+          self.unit, split_by, original_ct_compute_slices)
+      metrics.Mean.compute_slices = get_mean_monkey_patch_fn(
+          self.unit, split_by)
+      self.compute_child(df, split_by)
+    finally:
+      metrics.Sum.compute_slices = original_sum_compute_slices
+      metrics.Count.compute_slices = original_ct_compute_slices
+      metrics.Mean.compute_slices = original_mean_compute_slices
+    return df
+
+  def get_samples(self, df, split_by=None):
+    """Yields leave-one-out (LOO) DataFrame with level value.
+
+    This step is the bottleneck of Jackknife so we have some tricks here.
+    1. If all leaf Metrics are Sum or Count, whose LOO results have already been
+    calculated, then we don't bother to get the right DataFrame. All we need is
+    the right cache_key to retrive the results. This saves lots of time.
+    2. If split_by is True, some slices may be missing buckets, so we only keep
+    the slices that appear in that bucket. In other words, if a slice doesn't
+    have bucket i, then the leave-i-out sample won't have the slice.
+    3. We yield the cache_key for bucket i together with the leave-i-out
+    DataFrame because we need the cache_key to retrieve results.
+
+    Args:
+      df: The DataFrame to compute on.
+      split_by: Something can be passed into df.group_by().
+
+    Yields:
+      ('_RESERVED', 'Jackknife', unit, i) and the leave-i-out DataFrame.
+    """
+    levels = df[self.unit].unique()
+    if len(levels) < 2:
+      raise ValueError('Too few %s to jackknife.' % self.unit)
+
+    all_cached = True
+    try:  # If suceeds, it means everything is in cache already.
+      self.compute_child(
+          None,
+          split_by,
+          cache_key=('_RESERVED', 'Jackknife', self.unit, levels[0]))
+    except:  # pylint: disable=bare-except
+      all_cached = False
+
+    if all_cached:
+      for lvl in levels:
+        yield ('_RESERVED', 'Jackknife', self.unit, lvl), None
+    else:
+      if not split_by:
+        for lvl in levels:
+          yield ('_RESERVED', 'Jackknife', self.unit,
+                 lvl), df[df[self.unit] != lvl]
+      else:
+        df = df.set_index(split_by)
+        max_slices = len(df.index.unique())
+        for lvl, idx in df.groupby(self.unit).groups.items():
+          df_rest = df[df[self.unit] != lvl]
+          unique_slice_val = idx.unique()
+          if len(unique_slice_val) != max_slices:
+            # Keep only the slices that appeared in the dropped bucket.
+            df_rest = df_rest[df_rest.index.isin(unique_slice_val)]
+          yield ('_RESERVED', 'Jackknife', self.unit,
+                 lvl), df_rest.reset_index()
+
+  def compute_slices(self, df, split_by=None):
+    """Tries to compute stderr in a vectorized way as much as possible.
+
+    For the slices that have all the units, jackknife and groupby are
+    interchangeable. We find those slices and compute them in a vectorized way.
+    Then for the slices missing some units, we recursively apply such method to
+    maximize the vectorization. When none of the slices are full, we fall back
+    to computing slice by slice.
+
+    Args:
+      df: The DataFrame to compute on.
+      split_by: A list of column names to be passed to df.group_by().
+
+    Returns:
+      A melted DataFrame of stderrs for all Metrics in self.children[0].
+    """
+    samples = self.get_samples(df, split_by)
+    estimates = self.compute_on_samples(samples, split_by)
+    return self.get_stderrs_or_ci_half_width(estimates)
+
+  @staticmethod
+  def get_stderrs(replicates):
+    bucket_estimates = pd.concat(replicates, axis=1, sort=False)
+    means = bucket_estimates.mean(axis=1)
+    # Some slices may be missing buckets so we can't just use len(replicates).
+    num_buckets = bucket_estimates.count(axis=1)
+    rss = (bucket_estimates.subtract(means, axis=0)**2).sum(axis=1, min_count=1)
+    return np.sqrt(rss * (1. - 1. / num_buckets))
+
+
+class Bootstrap(MetricWithCI):
+  """Class for Bootstrap estimates of standard errors.
+
+  Attributes:
+    unit: The column representing the level to be resampled. If sample the
+      slices in unit column, otherwise we sample rows.
+    n_replicates: The number of bootstrap replicates. In "What Teachers Should
+      Know About the Bootstrap" Tim Hesterberg recommends 10000 for routine use
+      https://amstat.tandfonline.com/doi/full/10.1080/00031305.2015.1089789.
+    confidence: The level of the confidence interval, must be in (0, 1). If
+      specified, we return confidence interval range instead of standard error.
+      Additionally, a display() function will be bound to the result so you can
+      visualize the confidence interval nicely in Colab and Jupyter notebook.
+    children: A tuple of a Metric whose result we bootstrap on.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               unit: Optional[Text] = None,
+               child: Optional[metrics.Metric] = None,
+               n_replicates: int = 10000,
+               confidence: Optional[float] = None,
+               **kwargs):
+    super(Bootstrap, self).__init__(unit, child, confidence, '{} Bootstrap',
+                                    None, **kwargs)
+    self.n_replicates = n_replicates
+
+  def get_samples(self, df):
+    if self.unit:
+      slices = df[self.unit].unique()
+      buckets = range(len(slices))
+      data_slices = [df[df[self.unit] == s] for s in slices]
+    else:
+      buckets = range(len(df))
+    for _ in range(self.n_replicates):
+      buckets_sampled = np.random.choice(buckets, size=len(buckets))
+      if self.unit is None:
+        yield ('_RESERVED', 'Bootstrap', self.unit), df.iloc[buckets_sampled]
+      else:
+        yield ('_RESERVED', 'Bootstrap',
+               self.unit), pd.concat(data_slices[i] for i in buckets_sampled)
