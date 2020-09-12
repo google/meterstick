@@ -17,7 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Text, Union
+from typing import Any, Callable, List, Optional, Sequence, Text, Union
 from meterstick import utils
 import numpy as np
 import pandas as pd
@@ -25,6 +25,26 @@ import pandas as pd
 
 def compute_on(df, split_by=None, **kwargs):
   return lambda x: x.compute_on(df, split_by, **kwargs)
+
+
+def get_extra_idx(metric):
+  """Collects the extra indexes added by Operations for the metric tree.
+
+  Args:
+    metric: A metrics.Metric instance.
+
+  Returns:
+    A tuple of column names which are just the index of metric.compute_on(df).
+  """
+  extra_idx = getattr(metric, 'extra_index', [])[:]
+  children_idx = [
+      get_extra_idx(c) for c in metric.children if isinstance(c, Metric)
+  ]
+  if len(set(children_idx)) > 1:
+    raise ValueError('Incompatible indexes!')
+  if children_idx:
+    extra_idx += list(children_idx[0])
+  return tuple(extra_idx)
 
 
 class Metric(object):
@@ -39,7 +59,7 @@ class Metric(object):
         <------------------------------compute_through---------------------------->                                              |
         |                              <-------compute_slices------->             |                                              |
         |                              |-> slice1 -> compute |      |             |                                              |
-  df -> df.query(where) -> precompute -|-> slice2 -> compute | -> concat  -> postcompute -> manipulate -> final_compute -> flush_tmp_cache # pylint: disable=line-too-long
+  df -> df.query(where) -> precompute -|-> slice2 -> compute | -> concat  -> postcompute -> manipulate -> final_compute -> flush_tmp_cache  # pylint: disable=line-too-long
                                        |-> ...
   In summary, compute() operates on a slice of data. precompute(),
   postcompute(), compute_slices(), compute_through() and final_compute() operate
@@ -97,7 +117,7 @@ class Metric(object):
   def __init__(self,
                name: Text,
                children: Optional[Union['Metric',
-                                        Iterable[Union['Metric', int,
+                                        Sequence[Union['Metric', int,
                                                        float]]]] = (),
                where: Optional[Text] = None,
                precompute=None,
@@ -174,7 +194,7 @@ class Metric(object):
     else:
       keys, indices = list(zip(*df.groupby(split_by).groups.items()))
       for i, idx in enumerate(indices):
-        yield df.loc[idx], keys[i]
+        yield df.loc[idx.unique()], keys[i]
 
   def compute_through(self, df, split_by: Optional[List[Text]] = None):
     """Precomputes df -> split df and apply compute() -> postcompute."""
@@ -297,10 +317,12 @@ class Metric(object):
   def wrap_cache_key(self, key, split_by=None, where=None, slice_val=None):
     if key is None:
       return None
+    if where is None and self.cache_key:
+      where = self.cache_key.where
     return utils.CacheKey(key, where or self.where, split_by, slice_val)
 
-  def save_to_cache(self, key, val, split_by=None, where=None):
-    key = self.wrap_cache_key(key, split_by, where)
+  def save_to_cache(self, key, val, split_by=None):
+    key = self.wrap_cache_key(key, split_by)
     val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
     self.cache[key] = val
 
@@ -370,14 +392,42 @@ class Metric(object):
     will have it assigned as RESERVED_KEY but the entry Metric's will be None.
     """
     if self.cache_key is None:  # Entry point of computation
-      descendants = list(self.children)
-      while descendants:
-        m = descendants.pop(0)
-        if isinstance(m, Metric):
-          descendants += list(m.children)
-          while m.tmp_cache_keys:
-            m.flush_cache(m.tmp_cache_keys.pop(), recursive=False)
+      for m in self.traverse():
+        while m.tmp_cache_keys:
+          m.flush_cache(m.tmp_cache_keys.pop(), recursive=False)
     self.cache_key = None
+
+  def traverse(self, include_self=True):
+    ms = [self] if include_self else list(self.children)
+    while ms:
+      m = ms.pop(0)
+      if isinstance(m, Metric):
+        ms += list(m.children)
+        yield m
+
+  def to_sql(self, table: Text, split_by=None):
+    raise NotImplementedError  # Will be monkey-patched in sql.py.
+
+  def compute_on_sql(
+      self,
+      table,
+      split_by=None,
+      execute=None,
+      melted=False):
+    """Generates SQL query and executes on the specified engine."""
+    query = str(self.to_sql(table, split_by))
+    split_by = [split_by] if isinstance(split_by, str) else split_by
+    extra_idx = list(get_extra_idx(self))
+    indexes = split_by + extra_idx if split_by else extra_idx
+    if execute:
+      res = execute(query)
+    else:
+      raise ValueError('Unrecognized SQL engine!')
+    if indexes:
+      res.set_index(indexes, inplace=True)
+    if split_by:
+      res.sort_values(split_by, inplace=True)
+    return utils.melt(res) if melted else res
 
   def __or__(self, fn):
     """Overwrites the '|' operator to enable pipeline chaining."""
@@ -466,12 +516,15 @@ class MetricList(Metric):
     res = []
     key = self.cache_key or self.RESERVED_KEY
     for m in self:
-      res.append(
-          m.compute_on(
-              df,
-              split_by,
-              return_dataframe=self.children_return_dataframe,
-              cache_key=key))
+      try:
+        res.append(
+            m.compute_on(
+                df,
+                split_by,
+                return_dataframe=self.children_return_dataframe,
+                cache_key=key))
+      except Exception as e:  # pylint: disable=broad-except
+        print('Warning: %s failed for reason %s.' % (m.name, repr(e)))
     return res
 
   def to_dataframe(self, res):
@@ -486,6 +539,9 @@ class MetricList(Metric):
 
   def __len__(self):
     return len(self.children)
+
+  def __getitem__(self, key):
+    return self.children[key]
 
 
 class CompositeMetric(Metric):
@@ -524,6 +580,9 @@ class CompositeMetric(Metric):
     if not isinstance(children[1], (Metric, int, float)):
       raise ValueError('%s is not a Metric or a number!' %
                        utils.get_name(children[1]))
+    if not isinstance(children[0], Metric) and not isinstance(
+        children[1], Metric):
+      raise ValueError('MetricList must take at least one Metric!')
 
     self.name_tmpl = name_tmpl
     name = name_tmpl.format(*map(utils.get_name, children))
@@ -580,46 +639,53 @@ class CompositeMetric(Metric):
       if isinstance(a, pd.DataFrame):
         if hasattr(self, 'name_tmpl'):
           a.columns = [self.name_tmpl.format(c, m2) for c in a.columns]
-      return self.op(a, m2)
-    if isinstance(m2, Metric) and not isinstance(m1, Metric):
+      res = self.op(a, m2)
+    elif isinstance(m2, Metric) and not isinstance(m1, Metric):
       b = m2.compute_on(df, split_by, return_dataframe=rd_b, cache_key=key)
       if isinstance(b, pd.DataFrame):
         if hasattr(self, 'name_tmpl'):
-          b.columns = [self.name_tmpl.format(c, m1) for c in b.columns]
-      return self.op(m1, b)
+          b.columns = [self.name_tmpl.format(m1, c) for c in b.columns]
+      res = self.op(m1, b)
+    else:
+      a = m1.compute_on(df, split_by, return_dataframe=rd_a, cache_key=key)
+      b = m2.compute_on(df, split_by, return_dataframe=rd_b, cache_key=key)
+      if not isinstance(a, pd.DataFrame) and not isinstance(b, pd.DataFrame):
+        res = self.op(a, b)
+      elif isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
+        if len(a.columns) == len(b.columns):
+          columns = [
+              self.name_tmpl.format(c1, c2)
+              for c1, c2 in zip(a.columns, b.columns)
+          ]
+          a.columns = columns
+          b.columns = columns
+        res = self.op(a, b)
+      elif isinstance(a, pd.DataFrame):
+        if not isinstance(b, pd.Series):
+          res = self.op(a, b)
+        else:
+          for col in a.columns:
+            a[col] = self.op(a[col], b)
+          res = a
+        res.columns = [self.name_tmpl.format(c, m2.name) for c in res.columns]
+      elif isinstance(b, pd.DataFrame):
+        if not isinstance(a, pd.Series):
+          res = self.op(a, b)
+        else:
+          for col in b.columns:
+            b[col] = self.op(a, b[col])
+          res = b
+        res.columns = [self.name_tmpl.format(m1.name, c) for c in res.columns]
 
-    a = m1.compute_on(df, split_by, return_dataframe=rd_a, cache_key=key)
-    b = m2.compute_on(df, split_by, return_dataframe=rd_b, cache_key=key)
-    if not isinstance(a, pd.DataFrame) and not isinstance(b, pd.DataFrame):
-      res = self.op(a, b)
-      if isinstance(res, pd.Series):
-        res.name = self.name
+    if isinstance(res, pd.Series):
+      res.name = self.name
+      return res
+    if not isinstance(res, pd.DataFrame):
       return res
 
     if self.columns is not None:
-      if isinstance(a, pd.DataFrame):
-        a.columns = self.columns
-      if isinstance(b, pd.DataFrame):
-        b.columns = self.columns
-
-    if isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
-      res = self.op(a, b)
-    elif isinstance(a, pd.DataFrame):
-      if not isinstance(b, pd.Series):
-        res = self.op(a, b)
-      else:
-        for col in a.columns:
-          a[col] = self.op(a[col], b)
-        res = a
-    elif isinstance(b, pd.DataFrame):
-      if not isinstance(a, pd.Series):
-        res = self.op(a, b)
-      else:
-        for col in b.columns:
-          b[col] = self.op(a, b[col])
-        res = b
-    else:
-      raise ValueError("Shoundn't reach here!")
+      if isinstance(res, pd.DataFrame):
+        res.columns = self.columns
 
     return res
 
@@ -968,6 +1034,16 @@ class Correlation(SimpleMetric):
     return cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1])
 
   def compute_slices(self, df, split_by=None):
+    # If there are duplicated index values and split_by is not None, the result
+    # will be wrong. For example,
+    # df = pd.DataFrame(
+    #     {'idx': (1, 2, 1, 2), 'a': range(4), 'grp': [1, 1, 2, 2]}
+    #   ).set_index('idx')
+    # df.groupby('grp').a.corr(df.a) returns 0.447 for both groups.
+    # It seems that pandas join the two series so if there are duplicated
+    # indexes the series from the grouped by part gets duplicated.
+    if isinstance(df, pd.DataFrame):
+      df = df.reset_index(drop=True)
     if self.weight:
       # When there is weight, just loop through slices.
       return super(Correlation, self).compute_slices(df, split_by)

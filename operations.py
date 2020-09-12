@@ -86,6 +86,7 @@ class Operation(metrics.Metric):
                     cache_key=None):
     child = self.children[0]
     cache_key = cache_key or self.cache_key or self.RESERVED_KEY
+    cache_key = self.wrap_cache_key(cache_key, split_by)
     return child.compute_on(df, split_by, melted, return_dataframe, cache_key)
 
   def manipulate(self, res, melted, return_dataframe=True):
@@ -162,7 +163,7 @@ class CumulativeDistribution(Operation):
     self.over = over
     self.order = order
     super(CumulativeDistribution,
-          self).__init__(child, 'Cumulative Distribution {}', over, **kwargs)
+          self).__init__(child, 'Cumulative Distribution of {}', over, **kwargs)
 
   def split_data(self, df, split_by=None):
     """Caches the result for the whole df instead of many slices."""
@@ -178,6 +179,8 @@ class CumulativeDistribution(Operation):
     if self.order:
       df = pd.concat((
           df.loc[[o]] for o in self.order if o in df.index.get_level_values(0)))
+    else:
+      df.sort_values(self.over, inplace=True)
     dist = df.cumsum()
     dist /= df.sum()
     return dist
@@ -281,6 +284,13 @@ class AbsoluteChange(Comparison):
 class MH(Comparison):
   """Cochran-Mantel-Haenszel statistics estimator on a Metric.
 
+  MH only takes a ratio of two single-column Metrics, or a MetricList of such
+  ratios.
+  So AbsoluteChange(MetricList([a, b])) / AbsoluteChange(MetricList([c, d]))
+  won't work. Instead please use
+  MetricList([AbsoluteChange(a) / AbsoluteChange(c),
+              AbsoluteChange(b) / AbsoluteChange(d)]).
+
   Attributes:
     condition_column: The column that contains the conditions.
     baseline_key: The value of the condition that represents the baseline (e.g.,
@@ -301,16 +311,22 @@ class MH(Comparison):
                **kwargs):
     self.stratified_by = stratified_by if isinstance(stratified_by,
                                                      list) else [stratified_by]
-    super(MH, self).__init__(condition_column, baseline_key, metric,
-                             include_base, '{} MH Ratio',
-                             [condition_column] + self.stratified_by, **kwargs)
+    super(MH,
+          self).__init__(condition_column, baseline_key, metric, include_base,
+                         '{} MH Ratio', condition_column, **kwargs)
+
+  def check_is_ratio(self, metric=None):
+    metric = metric or self.children[0]
+    if isinstance(metric, metrics.MetricList):
+      for m in metric:
+        self.check_is_ratio(m)
+    else:
+      if not isinstance(metric,
+                        metrics.CompositeMetric) or metric.op(2.0, 2) != 1:
+        raise ValueError('MH only makes sense on ratio Metrics.')
 
   def compute_one_metric(self, metric, df, split_by=None):
     """Computes MH statistics for one Metric."""
-    if not isinstance(metric,
-                      metrics.CompositeMetric) or metric.op(2.0, 2) != 1:
-      raise ValueError('MH only makes sense on ratio metrics.')
-
     mh_metric = metrics.MetricList(metric.children)
     numer = metric.children[0].name
     denom = metric.children[1].name
@@ -321,31 +337,35 @@ class MH(Comparison):
     df_baseline = df_all.xs(self.baseline_key, level=self.condition_column)
     mh_ratios = []
     conds = []
-    for cond in df[self.condition_column].unique():
+    for cond in df_all.index.get_level_values(self.condition_column).unique():
       if cond == self.baseline_key and not self.include_base:
         continue
       df_cond = df_all.xs(cond, level=self.condition_column)
       ka, na = df_cond[numer], df_cond[denom]
       kb, nb = df_baseline[numer], df_baseline[denom]
       weights = 1. / (na + nb)
-      if split_by:
-        mh_ratio = ((ka * nb * weights).groupby(split_by).sum() /
-                    (kb * na * weights).groupby(split_by).sum() - 1) * 100
+      to_split = [i for i in ka.index.names if i not in self.stratified_by]
+      if to_split:
+        mh_ratio = ((ka * nb * weights).groupby(to_split).sum() /
+                    (kb * na * weights).groupby(to_split).sum() - 1) * 100
       else:
         mh_ratio = ((ka * nb * weights).sum() /
                     (kb * na * weights).sum() - 1) * 100
       mh_ratios.append(mh_ratio)
       conds.append(cond)
-    if split_by:
+    if to_split:
       res = pd.concat(mh_ratios, keys=conds, names=[self.condition_column])
       res.name = metric.name
-      res = res.reorder_levels(split_by + [self.condition_column])
+      split_by = split_by or []
+      extra_idx = [i for i in to_split if i not in split_by]
+      res = res.reorder_levels(split_by + [self.condition_column] + extra_idx)
       return res
     res = pd.DataFrame({metric.name: mh_ratios}, index=conds)
     res.index.name = self.condition_column
     return res
 
   def compute_slices(self, df, split_by):
+    self.check_is_ratio()
     child = self.children[0]
     if isinstance(child, metrics.MetricList):
       return pd.concat(
@@ -450,7 +470,9 @@ class MetricWithCI(Operation):
             'Warning: Failed on sample data for reason %s. If you see many such'
             ' failures, your data might be too sparse.' % repr(e))
       finally:
-        if cache_key is not None:
+        # Jackknife keys are unique so can be kept longer.
+        if isinstance(self, Bootstrap) and cache_key is not None:
+          cache_key = self.wrap_cache_key(cache_key, split_by)
           # In case errors occur so the top Metric was not computed, we don't
           # want to prune because the leaf Metrics still need to be cleaned up.
           self.flush_children(cache_key, split_by, prune=False)
@@ -492,7 +514,9 @@ class MetricWithCI(Operation):
 
   @staticmethod
   def get_stderrs(replicates):
-    return pd.concat(replicates, 1, sort=False).std(1)
+    bucket_estimates = pd.concat(replicates, axis=1, sort=False)
+    num_buckets = bucket_estimates.count(axis=1)
+    return bucket_estimates.std(1), num_buckets - 1
 
   def get_ci_width(self, stderrs, dof):
     """You can return asymmetrical confidence interval."""
@@ -501,9 +525,9 @@ class MetricWithCI(Operation):
 
   def get_stderrs_or_ci_half_width(self, replicates):
     """Returns confidence interval infomation in an unmelted DataFrame."""
-    stderrs = self.get_stderrs(replicates)
+    stderrs, dof = self.get_stderrs(replicates)
     if self.confidence:
-      res = pd.DataFrame(self.get_ci_width(stderrs, len(replicates) - 1)).T
+      res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
       res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']
     else:
       res = pd.DataFrame(stderrs, columns=[self.prefix + ' SE'])
@@ -512,6 +536,50 @@ class MetricWithCI(Operation):
 
   def get_samples(self, df, split_by=None):
     raise NotImplementedError
+
+  def compute_on_sql(
+      self,
+      table,
+      split_by=None,
+      execute=None,
+      melted=False):
+    res = super(MetricWithCI, self).compute_on_sql(table, split_by, engine,
+                                                   execute)
+    sub_dfs = []
+    if self.confidence:
+      if len(res.columns) % 3:
+        raise ValueError('Wrong shape for a MetricWithCI with confidence!')
+
+      # The columns are like metric1, metric1 jackknife SE, metric1 dof, ...
+      metric_names = res.columns[::3]
+      sub_dfs = []
+      ci_lower = self.prefix + ' CI-lower'
+      ci_upper = self.prefix + ' CI-upper'
+      for i in range(0, len(res.columns), 3):
+        pt_est = res.iloc[:, i]
+        half_width = self.get_ci_width(res.iloc[:, i + 1], res.iloc[:, i + 2])
+        sub_df = pd.DataFrame(
+            {
+                'Value': res.iloc[:, i],
+                ci_lower: pt_est - half_width[0],
+                ci_upper: pt_est + half_width[0]
+            },
+            columns=['Value', ci_lower, ci_upper])
+        sub_dfs.append(sub_df)
+    else:
+      if len(res.columns) % 2:
+        raise ValueError('Wrong shape for a MetricWithCI!')
+
+      # The columns are like metric1, metric1 jackknife SE, ...
+      metric_names = res.columns[::2]
+      for i in range(0, len(res.columns), 2):
+        sub_df = res.iloc[:, [i, i+1]]
+        sub_df.columns = ['Value', self.prefix + ' SE']
+        sub_dfs.append(sub_df)
+
+    res = pd.concat((sub_dfs), 1, keys=metric_names, names=['Metric'])
+    res = utils.melt(res) if melted else res
+    return res
 
 
 def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
@@ -557,6 +625,7 @@ def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
       key = self.wrap_cache_key(('_RESERVED', 'Jackknife', unit, bucket),
                                 split_by, self.cache_key.where)
       self.save_to_cache(key, loo.loc[bucket])
+      self.tmp_cache_keys.add(key)
     return total
   return precompute_loo
 
@@ -590,10 +659,11 @@ def get_mean_monkey_patch_fn(unit, original_split_by):
     data = df.copy()
     split_by_with_unit = [unit] + split_by if split_by else [unit]
     if self.weight:
-      data[self.var] *= data[self.weight]
-      total_sum = self.group(data, split_by)[self.var].sum()
+      weighted_var = '_weighted_%s' % self.var
+      data[weighted_var] = data[self.var] * data[self.weight]
+      total_sum = self.group(data, split_by)[weighted_var].sum()
       total_weight = self.group(data, split_by)[self.weight].sum()
-      bucket_sum = self.group(data, split_by_with_unit)[self.var].sum()
+      bucket_sum = self.group(data, split_by_with_unit)[weighted_var].sum()
       bucket_sum = utils.adjust_slices_for_loo(bucket_sum, original_split_by)
       bucket_weight = self.group(data, split_by_with_unit)[self.weight].sum()
       bucket_weight = utils.adjust_slices_for_loo(bucket_weight,
@@ -626,8 +696,45 @@ def get_mean_monkey_patch_fn(unit, original_split_by):
       key = utils.CacheKey(('_RESERVED', 'Jackknife', unit, bucket),
                            self.cache_key.where, split_by)
       self.save_to_cache(key, loo.loc[bucket])
+      self.tmp_cache_keys.add(key)
     return mean
   return precompute_loo
+
+
+def save_to_cache_for_jackknife(self, key, val, split_by=None):
+  """Used to monkey patch the save_to_cache() during Jackknife.precompute().
+
+  What cache_key to use for the point estimate of Jackknife is tricky because we
+  want to support two use cases at the same time.
+  1. We want sumx to be computed only once in
+    MetricList([Jackknife(sumx), sumx]).compute_on(df, return_dataframe=False),
+    so the key for point estimate should be the same sumx uses.
+  2. But then it will fail when multiple Jackknifes are involved. For example,
+    (Jackknife(unit1, sumx) - Jackknife(unit2, sumx)).compute_on(df)
+  will fail because two Jackknifes share point estimate but not LOO estimates.
+  When the 2nd Jackknife precomputes its point esitmate, as it uses the same key
+  as the 1st one, it will mistakenly assume LOO has been cached, but
+  unfortunately it's not true.
+  The solution here is we use different keys for different Jackknifes, so LOO
+  will always be precomputed. Additionally we cache the point estimate again
+  with the key other Metrics like Sum would use so they can reuse it.
+
+  Args:
+    self: An instance of metrics.Metric.
+    key: The cache key currently being used in computation.
+    val: The value to cache.
+    split_by: Something can be passed into df.group_by().
+  """
+  key = self.wrap_cache_key(key, split_by)
+  if isinstance(key.key, tuple) and key.key[:2] == ('_RESERVED', 'jk'):
+    val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
+    base_key = key.key[2]
+    base_key = utils.CacheKey(base_key, key.where, key.split_by, key.slice_val)
+    self.cache[base_key] = val
+    if utils.is_tmp_key(base_key):
+      self.tmp_cache_keys.add(base_key)
+  val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
+  self.cache[key] = val
 
 
 class Jackknife(MetricWithCI):
@@ -640,6 +747,8 @@ class Jackknife(MetricWithCI):
       Additionally, a display() function will be bound to the result so you can
       visualize the confidence interval nicely in Colab and Jupyter notebook.
     children: A tuple of a Metric whose result we jackknife on.
+    can_precompute: If all leaf Metrics are Sum, Count, and Mean, then we can
+      cut the corner to compute leave-one-out estimates.
     And all other attributes inherited from Operation.
   """
 
@@ -650,6 +759,12 @@ class Jackknife(MetricWithCI):
                **kwargs):
     super(Jackknife, self).__init__(unit, child, confidence, '{} Jackknife',
                                     None, **kwargs)
+    self.can_precompute = self.can_be_precomputed()
+
+  def __call__(self, child: metrics.Metric):
+    jk = super(Jackknife, self).__call__(child)
+    jk.can_precompute = jk.can_be_precomputed()
+    return jk
 
   def precompute(self, df, split_by=None):
     """Caches point estimate and leave-one-out (LOO) results for Sum/Count/Mean.
@@ -671,6 +786,7 @@ class Jackknife(MetricWithCI):
     original_sum_compute_slices = metrics.Sum.compute_slices
     original_ct_compute_slices = metrics.Count.compute_slices
     original_mean_compute_slices = metrics.Mean.compute_slices
+    original_save_to_cache = metrics.Metric.save_to_cache
     try:
       metrics.Sum.compute_slices = get_sum_ct_monkey_patch_fn(
           self.unit, split_by, original_sum_compute_slices)
@@ -678,11 +794,15 @@ class Jackknife(MetricWithCI):
           self.unit, split_by, original_ct_compute_slices)
       metrics.Mean.compute_slices = get_mean_monkey_patch_fn(
           self.unit, split_by)
-      self.compute_child(df, split_by)
+      metrics.Metric.save_to_cache = save_to_cache_for_jackknife
+      cache_key = self.cache_key or self.RESERVED_KEY
+      cache_key = ('_RESERVED', 'jk', cache_key, self.unit)
+      self.compute_child(df, split_by, cache_key=cache_key)
     finally:
       metrics.Sum.compute_slices = original_sum_compute_slices
       metrics.Count.compute_slices = original_ct_compute_slices
       metrics.Mean.compute_slices = original_mean_compute_slices
+      metrics.Metric.save_to_cache = original_save_to_cache
     return df
 
   def get_samples(self, df, split_by=None):
@@ -709,16 +829,7 @@ class Jackknife(MetricWithCI):
     if len(levels) < 2:
       raise ValueError('Too few %s to jackknife.' % self.unit)
 
-    all_cached = True
-    try:  # If suceeds, it means everything is in cache already.
-      self.compute_child(
-          None,
-          split_by,
-          cache_key=('_RESERVED', 'Jackknife', self.unit, levels[0]))
-    except:  # pylint: disable=bare-except
-      all_cached = False
-
-    if all_cached:
+    if self.can_precompute:
       for lvl in levels:
         yield ('_RESERVED', 'Jackknife', self.unit, lvl), None
     else:
@@ -765,7 +876,15 @@ class Jackknife(MetricWithCI):
     # Some slices may be missing buckets so we can't just use len(replicates).
     num_buckets = bucket_estimates.count(axis=1)
     rss = (bucket_estimates.subtract(means, axis=0)**2).sum(axis=1, min_count=1)
-    return np.sqrt(rss * (1. - 1. / num_buckets))
+    return np.sqrt(rss * (1. - 1. / num_buckets)), num_buckets - 1
+
+  def can_be_precomputed(self):
+    """If all leaf Metrics are Sum, Count or Mean, LOO can be precomputed."""
+    for m in self.traverse():
+      if not m.children and not isinstance(
+          m, (metrics.Sum, metrics.Count, metrics.Mean)):
+        return False
+    return True
 
 
 class Bootstrap(MetricWithCI):

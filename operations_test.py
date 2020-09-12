@@ -137,10 +137,10 @@ class NormalizeTests(unittest.TestCase):
 
   def test_normalize_with_jackknife_internal_caching_cleaned_up(self):
     df = pd.DataFrame({
-      'X': [1, 1, 1, 5],
-      'grp': ['A', 'A', 'B', 'B'],
-      'country': ['US', 'US', 'US', 'EU'],
-    'cookie': [1, 2, 1, 2]
+        'X': [1, 1, 1, 5],
+        'grp': ['A', 'A', 'B', 'B'],
+        'country': ['US', 'US', 'US', 'EU'],
+        'cookie': [1, 2, 1, 2]
     })
     sum_x = metrics.Sum('X')
     m = operations.Normalize('grp', sum_x)
@@ -166,7 +166,7 @@ class CumulativeDistributionTests(unittest.TestCase):
 
   def test_cumulative_distribution(self):
     output = self.metric.compute_on(self.df)
-    expected = pd.DataFrame({'Cumulative Distribution sum(X)': [0.75, 1.]},
+    expected = pd.DataFrame({'Cumulative Distribution of sum(X)': [0.75, 1.]},
                             index=['A', 'B'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
@@ -176,7 +176,7 @@ class CumulativeDistributionTests(unittest.TestCase):
     expected = pd.DataFrame({
         'Value': [0.75, 1.],
         'grp': ['A', 'B'],
-        'Metric': ['Cumulative Distribution sum(X)'] * 2
+        'Metric': ['Cumulative Distribution of sum(X)'] * 2
     })
     expected.set_index(['Metric', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
@@ -184,7 +184,7 @@ class CumulativeDistributionTests(unittest.TestCase):
   def test_cumulative_distribution_splitby(self):
     output = self.metric.compute_on(self.df, 'country')
     expected = pd.DataFrame({
-        'Cumulative Distribution sum(X)': [1., 1. / 3, 1.],
+        'Cumulative Distribution of sum(X)': [1., 1. / 3, 1.],
         'grp': ['A', 'A', 'B'],
         'country': ['EU', 'US', 'US']
     })
@@ -196,7 +196,7 @@ class CumulativeDistributionTests(unittest.TestCase):
     expected = pd.DataFrame({
         'Value': [1., 1. / 3, 1.],
         'grp': ['A', 'A', 'B'],
-        'Metric': ['Cumulative Distribution sum(X)'] * 3,
+        'Metric': ['Cumulative Distribution of sum(X)'] * 3,
         'country': ['EU', 'US', 'US']
     })
     expected.set_index(['Metric', 'country', 'grp'], inplace=True)
@@ -220,7 +220,7 @@ class CumulativeDistributionTests(unittest.TestCase):
   def test_cumulative_distribution_order(self):
     metric = operations.CumulativeDistribution('grp', self.sum_x, ('B', 'A'))
     output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'Cumulative Distribution sum(X)': [0.25, 1.]},
+    expected = pd.DataFrame({'Cumulative Distribution of sum(X)': [0.25, 1.]},
                             index=['B', 'A'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
@@ -229,7 +229,7 @@ class CumulativeDistributionTests(unittest.TestCase):
     metric = operations.CumulativeDistribution('grp', self.sum_x, ('B', 'A'))
     output = metric.compute_on(self.df, 'country')
     expected = pd.DataFrame({
-        'Cumulative Distribution sum(X)': [1., 2. / 3, 1.],
+        'Cumulative Distribution of sum(X)': [1., 2. / 3, 1.],
         'grp': ['A', 'B', 'A'],
         'country': ['EU', 'US', 'US']
     })
@@ -242,12 +242,13 @@ class CumulativeDistributionTests(unittest.TestCase):
     output = metric.compute_on(self.df)
     expected = pd.DataFrame(
         {
-            'Cumulative Distribution sum(X)': [0.75, 1.],
-            'Cumulative Distribution count(X)': [0.5, 1.]
+            'Cumulative Distribution of sum(X)': [0.75, 1.],
+            'Cumulative Distribution of count(X)': [0.5, 1.]
         },
         index=['A', 'B'],
         columns=[
-            'Cumulative Distribution sum(X)', 'Cumulative Distribution count(X)'
+            'Cumulative Distribution of sum(X)',
+            'Cumulative Distribution of count(X)'
         ])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
@@ -264,7 +265,7 @@ class CumulativeDistributionTests(unittest.TestCase):
   def test_cumulative_distribution_pipeline(self):
     output = self.sum_x | operations.CumulativeDistribution(
         'grp') | metrics.compute_on(self.df)
-    expected = pd.DataFrame({'Cumulative Distribution sum(X)': [0.75, 1.]},
+    expected = pd.DataFrame({'Cumulative Distribution of sum(X)': [0.75, 1.]},
                             index=['A', 'B'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
@@ -769,9 +770,30 @@ class MHTests(unittest.TestCase):
     expected = operations.MH('Condition', 0, 'id_platform', cvr).compute_on(df)
     testing.assert_frame_equal(output, expected)
 
+  def test_mh_on_operations(self):
+    df = pd.DataFrame({
+        'clicks': np.random.random(24),
+        'conversions': np.random.random(24),
+        'Id': [1, 2, 1, 2] * 6,
+        'Condition': [0, 0, 0, 1, 1, 1] * 4,
+        'grp': list('AABBCCBC') * 3,
+    })
+    sum_clicks = metrics.Sum('clicks')
+    ab = operations.AbsoluteChange('grp', 'A', sum_clicks)
+    pct = operations.PercentChange('grp', 'A', sum_clicks)
+    metric = operations.MH('Condition', 0, 'Id', ab / pct)
+    output = metric.compute_on(df)
+    d = (metrics.MetricList(
+        (ab, pct))).compute_on(df, ['Condition', 'Id']).reset_index()
+    m = metric(metrics.Sum(ab.name) / metrics.Sum(pct.name))
+    expected = m.compute_on(d, 'grp')
+    expected.columns = output.columns
+    expected = expected.reorder_levels(output.index.names)
+    testing.assert_frame_equal(output, expected)
+
   def test_mh_fail_on_nonratio_metric(self):
     with self.assertRaisesRegex(ValueError,
-                                'MH only makes sense on ratio metrics.'):
+                                'MH only makes sense on ratio Metrics.'):
       operations.MH('Condition', 0, 'Id', self.sum_click).compute_on(self.df)
 
   def test_mh_pipeline(self):
@@ -901,6 +923,20 @@ class JackknifeTests(unittest.TestCase):
       self.jk.compute_on(df)
     self.assertEqual(str(cm.exception), 'Too few cookie to jackknife.')
 
+  def test_jackknife_one_metric_fail_on_one_unit(self):
+    df = pd.DataFrame({
+        'X': range(1, 7),
+        'cookie': [1, 2, 2, 1, 2, 3],
+        'grp': ['B'] * 3 + ['A'] * 3
+    })
+    sum1 = metrics.Sum('X', where='X > 2')
+    sum2 = metrics.Sum('X', 'foo', where='X > 4')
+    ms = metrics.MetricList((sum1, sum2))
+    m = operations.Jackknife('cookie', ms)
+    output = m.compute_on(df)
+    expected = pd.concat((m(sum1).compute_on(df), m(sum2).compute_on(df)), 1)
+    testing.assert_frame_equal(output, expected)
+
   def test_jackknife_splitby_partial_overlap(self):
     df = pd.DataFrame({
         'X': range(1, 7),
@@ -917,6 +953,21 @@ class JackknifeTests(unittest.TestCase):
 
     melted = self.jk.compute_on(df, 'grp', melted=True)
     testing.assert_frame_equal(melted, utils.melt(expected))
+
+  def test_jackknife_unequal_slice_length_with_confidence(self):
+    df = pd.DataFrame({
+        'X': range(1, 7),
+        'cookie': [1, 2, 2, 1, 2, 3],
+        'grp': ['B'] * 3 + ['A'] * 3
+    })
+    jk = operations.Jackknife('cookie', self.metric, 0.9)
+    output = jk.compute_on(df, 'grp')
+    expected = []
+    for g in ['A', 'B']:
+      expected.append(jk.compute_on(df[df.grp == g]))
+    expected = pd.concat(expected, keys=['A', 'B'], names=['grp'])
+    expected = expected.droplevel(-1)
+    testing.assert_frame_equal(output, expected)
 
   def test_jackknife_splitby_partial_no_overlap(self):
     df = pd.DataFrame({
@@ -989,6 +1040,16 @@ class JackknifeTests(unittest.TestCase):
     expected.index.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
+  def test_filter_passed_down(self):
+    df = pd.DataFrame({'x': range(0, 6), 'u': [1, 2, 3, 1, 2, 3]})
+    jk = operations.Jackknife('u', metrics.Sum('x', where='x>2'), where='x>3')
+    s = metrics.MetricList([metrics.Sum('x', where='x>3')], where='x>5')
+    m = metrics.MetricList([jk, s])
+    output = m.compute_on(df, return_dataframe=False)
+    expected = [jk.compute_on(df[df.x > 3]), s.compute_on(df[df.x > 5])]
+    testing.assert_frame_equal(output[0], expected[0])
+    testing.assert_frame_equal(output[1], expected[1])
+
   def test_cache_key(self):
     df = pd.DataFrame({
         'X': range(6),
@@ -1019,6 +1080,35 @@ class JackknifeTests(unittest.TestCase):
       jk.compute_on(df)
       self.assertEqual(1, mock_fn.call_count)
       mock_fn.assert_has_calls([mock.call(df, [])])
+
+  def test_internal_caching_with_two_identical_jackknifes(self):
+    df = pd.DataFrame({
+        'X': range(6),
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    sum_x = metrics.Sum('X')
+    jk1 = operations.Jackknife('cookie', sum_x)
+    jk2 = operations.Jackknife('cookie', sum_x)
+    m = (jk1 - jk2)
+    with mock.patch.object(
+        sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
+      m.compute_on(df)
+      self.assertEqual(1, mock_fn.call_count)
+
+  def test_internal_caching_with_two_different_jackknifes(self):
+    df = pd.DataFrame({
+        'X': range(6),
+        'cookie': [1, 2, 3, 1, 2, 3],
+        'cookie2': [1, 2, 2, 3, 2, 3],
+    })
+    sum_x = metrics.Sum('X')
+    jk1 = operations.Jackknife('cookie', sum_x)
+    jk2 = operations.Jackknife('cookie2', sum_x)
+    m = (jk1 - jk2)
+    with mock.patch.object(
+        sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
+      m.compute_on(df)
+      self.assertEqual(2, mock_fn.call_count)
 
   def test_internal_caching_cleaned_up(self):
     df = pd.DataFrame({
@@ -1107,6 +1197,29 @@ class JackknifeTests(unittest.TestCase):
     expected.set_index(['Metric', 'condition'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
+  def test_operation_with_jackknife(self):
+    df = pd.DataFrame({
+        'X': range(1, 11),
+        'cookie': [1, 1, 2, 3, 4] * 2,
+        'condition': ['foo', 'foo', 'bar', 'bar', 'bar'] * 2,
+        'grp': ['A'] * 6 + ['B'] * 4
+    })
+    ms = metrics.MetricList(
+        [metrics.Sum('X', where='X > 3'),
+         metrics.Mean('X', where='X > 5')])
+    jk = operations.Jackknife('cookie', ms, where='X > 4')
+    m = operations.AbsoluteChange('grp', 'A', jk, where='X > 2')
+    output = m.compute_on(df)
+
+    sumx = metrics.Sum('X')
+    meanx = metrics.Mean('X')
+    jk = operations.Jackknife('cookie')
+    ab = operations.AbsoluteChange('grp', 'A')
+    expected_sum = ab(jk(sumx)).compute_on(df[df.X > 4])
+    expected_mean = ab(jk(meanx)).compute_on(df[df.X > 5])
+    expected = pd.concat((expected_sum, expected_mean), 1)
+    testing.assert_frame_equal(output, expected)
+
   def test_cache_key_with_operation(self):
     df = pd.DataFrame({
         'X': range(1, 11),
@@ -1136,7 +1249,7 @@ class JackknifeTests(unittest.TestCase):
     count_x = sum_x / metrics.Mean('X')
     metric = metrics.MetricList((sum_x, count_x))
     pct = operations.PercentChange('condition', 0, metric)
-    jk = operations.Jackknife('cookie', pct)
+    jk = operations.Jackknife('cookie', pct, 0.9)
     # Don't use autospec=True. It conflicts with wraps.
     # https://bugs.python.org/issue31807
     with mock.patch.object(

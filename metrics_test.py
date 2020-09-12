@@ -996,6 +996,7 @@ class CompositeMetric(unittest.TestCase):
     pct = operations.PercentChange('Condition', 0)
     output = (pct(suma) - pct(sumb)).compute_on(df)
     expected = pct(suma).compute_on(df) - pct(sumb).compute_on(df)
+    expected.columns = ['%s - %s' % (c, c) for c in expected.columns]
     testing.assert_frame_equal(output, expected)
 
   def test_between_operations_where(self):
@@ -1009,6 +1010,7 @@ class CompositeMetric(unittest.TestCase):
     pctb = operations.PercentChange('Condition', 0, sumx, where='grp == "B"')
     output = (pcta - pctb).compute_on(df)
     expected = pcta.compute_on(df) - pctb.compute_on(df)
+    expected.columns = ['%s - %s' % (c, c) for c in expected.columns]
     testing.assert_frame_equal(output, expected)
 
   def test_between_stderr_operations_where(self):
@@ -1183,9 +1185,9 @@ class TestMetricList(unittest.TestCase):
     output = m.compute_on(df)
     expected = pd.DataFrame(
         data={
-            'sum(X)': [1.],
-            'foo': [3.]
-        }, columns=['sum(X)', 'foo'])
+            'sum(X) / sum(X)': [1.],
+            'sum(X) / foo': [3.]
+        }, columns=['sum(X) / sum(X)', 'sum(X) / foo'])
     testing.assert_frame_equal(output, expected)
 
 
