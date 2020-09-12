@@ -19,3 +19,4 @@
 from meterstick import utils
 from meterstick.v2.metrics import *
 from meterstick.v2.operations import *
+from meterstick.v2.sql import *
