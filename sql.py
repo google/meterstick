@@ -330,7 +330,7 @@ def get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
       continue
     order = list(metrics.get_extra_idx(metric))
     order[0] = Column(
-        get_order_for_cum_dist(order[0], metric.order), auto_alias=False)
+        get_order_for_cum_dist(order[0], metric), auto_alias=False)
 
     col = Column(
         c.alias,
@@ -344,15 +344,14 @@ def get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
   return Sql(Columns(indexes).add(columns), child_table_alias), with_data
 
 
-def get_order_for_cum_dist(over, order):
-  if order:
-    res = 'CASE %s\n' % over
-    tmpl = 'WHEN "%s" THEN %s' if isinstance(order[0],
+def get_order_for_cum_dist(over, metric):
+  if metric.order:
+    over = 'CASE %s\n' % over
+    tmpl = 'WHEN "%s" THEN %s' if isinstance(metric.order[0],
                                              str) else 'WHEN %s THEN %s'
-    res += '\n'.join(tmpl % (o, i) for i, o in enumerate(order))
-    res += '\nELSE %s\nEND' % len(order)
-    return res
-  return over
+    over += '\n'.join(tmpl % (o, i) for i, o in enumerate(metric.order))
+    over += '\nELSE %s\nEND' % len(metric.order)
+  return over if metric.ascending else over + ' DESC'
 
 
 def get_sql_for_weighted_var_and_sd(metric, table, split_by, global_filter,

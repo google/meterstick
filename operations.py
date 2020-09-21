@@ -117,6 +117,7 @@ class Operation(metrics.Metric):
     op = copy.deepcopy(self) if self.children else self
     op.name = op.name_tmpl.format(utils.get_name(child))
     op.children = (child,)
+    op.cache = {}
     return op
 
 
@@ -152,6 +153,7 @@ class CumulativeDistribution(Operation):
       distribution on.
     order: An iterable. The over column will be ordered by it before computing
       cumsum.
+    ascending: Sort ascending or descending.
     And all other attributes inherited from Operation.
   """
 
@@ -159,9 +161,11 @@ class CumulativeDistribution(Operation):
                over: Text,
                child: Optional[metrics.Metric] = None,
                order=None,
+               ascending: bool = True,
                **kwargs):
     self.over = over
     self.order = order
+    self.ascending = ascending
     super(CumulativeDistribution,
           self).__init__(child, 'Cumulative Distribution of {}', over, **kwargs)
 
@@ -180,7 +184,7 @@ class CumulativeDistribution(Operation):
       df = pd.concat((
           df.loc[[o]] for o in self.order if o in df.index.get_level_values(0)))
     else:
-      df.sort_values(self.over, inplace=True)
+      df.sort_values(self.over, ascending=self.ascending, inplace=True)
     dist = df.cumsum()
     dist /= df.sum()
     return dist
@@ -229,7 +233,7 @@ class PercentChange(Comparison):
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     if split_by:
-      to_split = split_by + [self.condition_column]
+      to_split = list(split_by) + [self.condition_column]
       level = self.condition_column
     else:
       to_split = [self.condition_column]
@@ -266,7 +270,7 @@ class AbsoluteChange(Comparison):
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     if split_by:
-      to_split = split_by + [self.condition_column]
+      to_split = list(split_by) + [self.condition_column]
       level = self.condition_column
     else:
       to_split = [self.condition_column]

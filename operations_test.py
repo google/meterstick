@@ -225,6 +225,15 @@ class CumulativeDistributionTests(unittest.TestCase):
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
 
+  def test_cumulative_distribution_ascending(self):
+    metric = operations.CumulativeDistribution(
+        'grp', self.sum_x, ascending=False)
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame({'Cumulative Distribution of sum(X)': [0.25, 1.]},
+                            index=['B', 'A'])
+    expected.index.name = 'grp'
+    testing.assert_frame_equal(output, expected)
+
   def test_cumulative_distribution_order_splitby(self):
     metric = operations.CumulativeDistribution('grp', self.sum_x, ('B', 'A'))
     output = metric.compute_on(self.df, 'country')
