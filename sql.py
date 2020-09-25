@@ -1656,7 +1656,7 @@ class Column(SqlComponent):
   def alias(self):
     alias = self.alias_raw
     if not alias and self.auto_alias:
-      alias = self.fn.format(*self.column).lower()
+      alias = self.fn.lower().format(*self.column)
     return sql_name_sanitize(alias)
 
   @alias.setter
