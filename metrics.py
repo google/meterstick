@@ -800,6 +800,50 @@ class Mean(SimpleMetric):
     return self.group(df, split_by)[self.var].mean(**self.kwargs)
 
 
+class Max(SimpleMetric):
+  """Max estimator.
+
+  Attributes:
+    var: Column to compute on.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.max().
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var: Text,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    super(Max, self).__init__(var, name, 'max({})', where, **kwargs)
+
+  def compute_slices(self, df, split_by=None):
+    return self.group(df, split_by)[self.var].max(**self.kwargs)
+
+
+class Min(SimpleMetric):
+  """Min estimator.
+
+  Attributes:
+    var: Column to compute on.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.min().
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var: Text,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    super(Min, self).__init__(var, name, 'min({})', where, **kwargs)
+
+  def compute_slices(self, df, split_by=None):
+    return self.group(df, split_by)[self.var].min(**self.kwargs)
+
+
 class Quantile(SimpleMetric):
   """Quantile estimator.
 

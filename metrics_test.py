@@ -244,6 +244,18 @@ class SimpleMetricTest(unittest.TestCase):
     expected.set_index('grp', append=True, inplace=True)
     testing.assert_frame_equal(output, expected)
 
+  def test_max(self):
+    metric = metrics.Max('X')
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame({'max(X)': [4]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_min(self):
+    metric = metrics.Min('X')
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame({'min(X)': [1]})
+    testing.assert_frame_equal(output, expected)
+
   def test_weighted_mean_not_df(self):
     df = pd.DataFrame({'X': [1, 2], 'Y': [3, 1]})
     metric = metrics.Mean('X', 'Y')

@@ -168,6 +168,10 @@ def get_column(metric, global_filter=None, local_filter=None):
     return Column(metric.jackknife_fast_col, 'SUM({})', metric.name)
   if isinstance(metric, metrics.Sum):
     return Column(metric.var, 'SUM({})', metric.name, where)
+  if isinstance(metric, metrics.Max):
+    return Column(metric.var, 'MAX({})', metric.name, where)
+  if isinstance(metric, metrics.Min):
+    return Column(metric.var, 'MIN({})', metric.name, where)
   if isinstance(metric, metrics.Mean):
     if not metric.weight:
       return Column(metric.var, 'AVG({})', metric.name, where)
