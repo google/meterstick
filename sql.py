@@ -281,8 +281,7 @@ def get_sql_for_normalize(metric, table, split_by, global_filter, indexes,
   child_sql, with_data = get_sql_for_metric(metric.children[0], table, groupby,
                                             global_filter, indexes,
                                             local_filter, with_data)
-  child_table = Datasource(child_sql,
-                           'NormalizeOver%s' % metric.over.capitalize())
+  child_table = Datasource(child_sql, 'NormalizeRaw')
   child_table_alias = with_data.add(child_table)
   columns = Columns()
   for c in child_sql.columns:
@@ -322,10 +321,9 @@ def get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
     raise ValueError('Not a CumulativeDistribution!')
 
   child_sql, with_data = get_sql_for_metric(
-      operations.Normalize(metric.over, metric.children[0]), table, split_by,
-      global_filter, indexes, local_filter, with_data)
-  child_table = Datasource(child_sql,
-                           'CumulateOver%s' % metric.over.capitalize())
+      operations.Normalize(metric.extra_index, metric.children[0]), table,
+      split_by, global_filter, indexes, local_filter, with_data)
+  child_table = Datasource(child_sql, 'CumulativeDistributionRaw')
   child_table_alias = with_data.add(child_table)
   columns = Columns()
   for c in child_sql.columns:
@@ -390,9 +388,7 @@ def get_sql_for_weighted_var_and_sd(metric, table, split_by, global_filter,
   if not split_by:
     diffs = Column(metric.var, filters=local_filter) - '(%s)' % weighted_mean
   else:
-    weighted_mean_table = Datasource(
-        weighted_mean, '%sWeightedMean%s' %
-        (metric.weight.capitalize(), metric.var.capitalize()))
+    weighted_mean_table = Datasource(weighted_mean, 'WeightedMean')
     weighted_mean_alias = with_data.add(weighted_mean_table)
     diffs = Column(
         metric.var,
@@ -605,7 +601,7 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
   will look like this:
 
   WITH
-  RawValueForConditionComparison AS (SELECT
+  MHRaw AS (SELECT
     split_by,
     condition,
     stratified,
@@ -613,28 +609,23 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
     SUM(impression) AS sum_impression
   FROM $DATA
   GROUP BY split_by, condition, stratified),
-  BaseValueWhereConditionEqualsBase_value AS (SELECT
+  MHBase AS (SELECT
     * EXCEPT (condition)
-  FROM RawValueForConditionComparison
+  FROM MHRaw
   WHERE
   condition = "base_value")
   SELECT
     split_by,
     condition,
     100 * SAFE_DIVIDE(
-      SUM(SAFE_DIVIDE(
-        RawValueForConditionComparison.sum_click
-        * BaseValueWhereConditionEqualsBase_value.sum_impression,
-        BaseValueWhereConditionEqualsBase_value.sum_impression
-        + RawValueForConditionComparison.sum_impression)),
-      SUM(SAFE_DIVIDE(
-        BaseValueWhereConditionEqualsBase_value.sum_click
-        * RawValueForConditionComparison.sum_impression,
-        BaseValueWhereConditionEqualsBase_value.sum_impression
-        + RawValueForConditionComparison.sum_impression))) - 100 AS ctr_mh_ratio
-  FROM RawValueForConditionComparison
+      SUM(SAFE_DIVIDE(MHRaw.sum_click * MHBase.sum_impression,
+          MHBase.sum_impression + MHRaw.sum_impression)),
+      SUM(SAFE_DIVIDE(MHBase.sum_click * MHRaw.sum_impression,
+          MHBase.sum_impression + MHRaw.sum_impression))) - 100
+      AS ctr_mh_ratio
+  FROM MHRaw
   JOIN
-  BaseValueWhereConditionEqualsBase_value
+  MHBase
   USING (split_by, stratified)
   WHERE
   condition != "base_value"
@@ -666,28 +657,29 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
   else:
     grandchildren = child.children
 
-  cond_col = metric.condition_column
-  groupby = Columns(split_by).add(cond_col).add(metric.stratified_by)
-  base = metric.baseline_key
-  base_cond = ('%s = "%s"' if isinstance(base, str) else '%s = %s') % (cond_col,
-                                                                       base)
-  exclude_base_condition = ('%s != "%s"' if isinstance(base, str) else
-                            '%s != %s') % (cond_col, base)
+  cond_cols = metric.extra_index
+  groupby = Columns(split_by).add(cond_cols).add(metric.stratified_by)
+  base = metric.baseline_key if isinstance(metric.baseline_key,
+                                           tuple) else [metric.baseline_key]
+  base_cond = (('%s = "%s"' if isinstance(b, str) else '%s = %s') % (c, b)
+               for c, b in zip(cond_cols, base))
+  base_cond = ' AND '.join(base_cond)
+  exclude_base_condition = (
+      ('%s != "%s"' if isinstance(b, str) else '%s != %s') % (c, b)
+      for c, b in zip(cond_cols, base))
+  exclude_base_condition = ' OR '.join(exclude_base_condition)
   alias_tmpl = metric.name_tmpl.lower()
   raw_table_sql, with_data = get_sql_for_metric(
       metrics.MetricList(grandchildren), table, groupby, global_filter, indexes,
       local_filter, with_data)
 
-  raw_table = Datasource(raw_table_sql,
-                         'RawValueFor%sComparison' % cond_col.capitalize())
+  raw_table = Datasource(raw_table_sql, 'MHRaw')
   raw_table_alias = with_data.add(raw_table)
   base_value = Sql(
-      Columns([Column('* EXCEPT (%s)' % cond_col, auto_alias=False)]),
+      Columns(
+          [Column('* EXCEPT (%s)' % ', '.join(cond_cols), auto_alias=False)]),
       raw_table_alias, base_cond)
-  base_table = Datasource(
-      base_value, 'BaseValueWhere%sEquals%s' %
-      (cond_col.capitalize(),
-       base.capitalize() if isinstance(base, str) else base))
+  base_table = Datasource(base_value, 'MHBase')
   base_table_alias = with_data.add(base_table)
   cond = None if metric.include_base else Filters([exclude_base_condition])
   col_tmpl = """100 * SAFE_DIVIDE(
@@ -716,7 +708,7 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
         },
         alias=alias_tmpl.format(child.name.lower()))
 
-  using = Columns([c for c in indexes if c != cond_col
+  using = Columns([c for c in Columns(indexes) if c not in Columns(cond_cols)
                   ]).add(metric.stratified_by)
   return Sql(
       columns,
@@ -741,26 +733,25 @@ def get_sql_for_change(metric, table, split_by, global_filter, indexes,
   will look like this:
 
   WITH
-  RawValueForConditionComparison AS (SELECT
+  ChangeRaw AS (SELECT
     split_by,
     condition,
     AVG(click) AS mean_click
   FROM $DATA
   GROUP BY split_by, condition),
-  BaseValueWhereConditionEqualsBase_value AS (SELECT
+  ChangeBase AS (SELECT
     * EXCEPT (condition)
-  FROM RawValueForConditionComparison
+  FROM ChangeRaw
   WHERE
   condition = "base_value")
   SELECT
     split_by,
     condition,
-    RawValueForConditionComparison.mean_click
-    - BaseValueWhereConditionEqualsBase_value.mean_click
+    ChangeRaw.mean_click - ChangeBase.mean_click
       AS mean_click_absolute_change
-  FROM RawValueForConditionComparison
+  FROM ChangeRaw
   JOIN
-  BaseValueWhereConditionEqualsBase_value
+  ChangeBase
   USING (split_by)
   WHERE
   condition != "base_value"
@@ -784,27 +775,28 @@ def get_sql_for_change(metric, table, split_by, global_filter, indexes,
     raise ValueError('Not a PercentChange nor AbsoluteChange!')
 
   child = metric.children[0]
-  cond_col = metric.condition_column
-  groupby = Columns(split_by).add(cond_col)
-  base = metric.baseline_key
-  base_cond = ('%s = "%s"' if isinstance(base, str) else '%s = %s') % (cond_col,
-                                                                       base)
-  exclude_base_condition = ('%s != "%s"' if isinstance(base, str) else
-                            '%s != %s') % (cond_col, base)
+  cond_cols = metric.extra_index
+  groupby = Columns(split_by).add(cond_cols)
+  base = metric.baseline_key if isinstance(metric.baseline_key,
+                                           tuple) else [metric.baseline_key]
+  base_cond = (('%s = "%s"' if isinstance(b, str) else '%s = %s') % (c, b)
+               for c, b in zip(cond_cols, base))
+  base_cond = ' AND '.join(base_cond)
+  exclude_base_condition = (
+      ('%s != "%s"' if isinstance(b, str) else '%s != %s') % (c, b)
+      for c, b in zip(cond_cols, base))
+  exclude_base_condition = ' OR '.join(exclude_base_condition)
   alias_tmpl = metric.name_tmpl.lower()
   raw_table_sql, with_data = get_sql_for_metric(child, table, groupby,
                                                 global_filter, indexes,
                                                 local_filter, with_data)
-  raw_table = Datasource(raw_table_sql,
-                         'RawValueFor%sComparison' % cond_col.capitalize())
+  raw_table = Datasource(raw_table_sql, 'ChangeRaw')
   raw_table_alias = with_data.add(raw_table)
   base_value = Sql(
-      Columns([Column('* EXCEPT (%s)' % cond_col, auto_alias=False)]),
+      Columns(
+          [Column('* EXCEPT (%s)' % ', '.join(cond_cols), auto_alias=False)]),
       raw_table_alias, base_cond)
-  base_table = Datasource(
-      base_value, 'BaseValueWhere%sEquals%s' %
-      (cond_col.capitalize(),
-       base.capitalize() if isinstance(base, str) else base))
+  base_table = Datasource(base_value, 'ChangeBase')
   base_table_alias = with_data.add(base_table)
   cond = None if metric.include_base else Filters([exclude_base_condition])
   col_tmp = '%s.{c} - %s.{c}' if isinstance(
@@ -817,7 +809,7 @@ def get_sql_for_change(metric, table, split_by, global_filter, indexes,
           col_tmp.format(c=c.alias) % (raw_table_alias, base_table_alias),
           alias=alias_tmpl.format(c.alias))
       columns.add(col)
-  using = Columns([c for c in Columns(indexes) if c != cond_col])
+  using = Columns([c for c in Columns(indexes) if c not in Columns(cond_cols)])
   join = '' if using else 'CROSS'
   return Sql(
       Columns(indexes).add(columns),

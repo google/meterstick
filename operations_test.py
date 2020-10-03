@@ -45,6 +45,26 @@ class NormalizeTests(unittest.TestCase):
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
 
+  def test_normalize_over_multiple_columns(self):
+    df = pd.DataFrame({
+        'X': [2, 1, 1, 5],
+        'grp': ['A', 'A', 'B', 'B'],
+        'country': ['US', 'US', 'US', 'EU'],
+        'platform': ['desktop', 'mobile', 'desktop', 'mobile']
+    })
+    sum_x = metrics.Sum('X')
+    normalize = operations.Normalize(['grp', 'platform'], sum_x)
+
+    output = normalize.compute_on(df, 'country')
+    expected = pd.DataFrame({
+        'sum(X) Normalized': [1., 0.5, 0.25, 0.25],
+        'country': ['EU', 'US', 'US', 'US'],
+        'grp': ['B', 'A', 'A', 'B'],
+        'platform': ['mobile', 'desktop', 'mobile', 'desktop']
+    })
+    expected.set_index(['country', 'grp', 'platform'], inplace=True)
+    testing.assert_frame_equal(output, expected)
+
   def test_normalize_melted(self):
     output = self.normalize.compute_on(self.df, melted=True)
     expected = pd.DataFrame({
@@ -169,6 +189,26 @@ class CumulativeDistributionTests(unittest.TestCase):
     expected = pd.DataFrame({'Cumulative Distribution of sum(X)': [0.75, 1.]},
                             index=['A', 'B'])
     expected.index.name = 'grp'
+    testing.assert_frame_equal(output, expected)
+
+  def test_cumulative_distribution_over_multiple_columns(self):
+    df = pd.DataFrame({
+        'X': [2, 1, 1, 5],
+        'grp': ['A', 'A', 'B', 'B'],
+        'country': ['US', 'US', 'US', 'EU'],
+        'platform': ['desktop', 'mobile', 'desktop', 'mobile']
+    })
+    sum_x = metrics.Sum('X')
+    cum_dict = operations.CumulativeDistribution(['grp', 'platform'], sum_x)
+
+    output = cum_dict.compute_on(df, 'country')
+    expected = pd.DataFrame({
+        'Cumulative Distribution of sum(X)': [1., 0.5, 0.75, 1],
+        'country': ['EU', 'US', 'US', 'US'],
+        'grp': ['B', 'A', 'A', 'B'],
+        'platform': ['mobile', 'desktop', 'mobile', 'desktop']
+    })
+    expected.set_index(['country', 'grp', 'platform'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
   def test_cumulative_distribution_melted(self):
@@ -415,6 +455,69 @@ class PercentChangeTests(unittest.TestCase):
     expected.sort_index(level=['grp0', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
+  def test_percent_change_multiple_condition_columns(self):
+    df = self.df.copy()
+    metric = operations.PercentChange(['Condition', 'grp'], (0, 'A'),
+                                      self.metric_lst)
+    output = metric.compute_on(df)
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.PercentChange('Condition_and_grp', (0, 'A'),
+                                               self.metric_lst)
+    expected = expected_metric.compute_on(df)
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_percent_change_multiple_condition_columns_include_baseline(self):
+    df = self.df.copy()
+    metric = operations.PercentChange(['Condition', 'grp'], (0, 'A'),
+                                      self.metric_lst, True)
+    output = metric.compute_on(df)
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.PercentChange('Condition_and_grp', (0, 'A'),
+                                               self.metric_lst, True)
+    expected = expected_metric.compute_on(df)
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_percent_change_multiple_condition_columns_splitby(self):
+    df = pd.DataFrame({
+        'X': [1, 2, 3, 4, 5, 6],
+        'Condition': [0, 0, 0, 1, 1, 1],
+        'grp': ['A', 'A', 'B', 'A', 'B', 'B'],
+        'grp2': ['foo', 'bar', 'foo', 'bar', 'foo', 'bar']
+    })
+    metric = operations.PercentChange(['Condition', 'grp'], (0, 'A'),
+                                      self.metric_lst)
+    output = metric.compute_on(df, 'grp2')
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.PercentChange('Condition_and_grp', (0, 'A'),
+                                               self.metric_lst)
+    expected = expected_metric.compute_on(df, 'grp2')
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_percent_change_multiple_condition_columns_include_baseline_splitby(
+      self):
+    df = pd.DataFrame({
+        'X': [1, 2, 3, 4, 5, 6],
+        'Condition': [0, 0, 0, 1, 1, 1],
+        'grp': ['A', 'A', 'B', 'A', 'B', 'B'],
+        'grp2': ['foo', 'bar', 'foo', 'bar', 'foo', 'bar']
+    })
+    metric = operations.PercentChange(['Condition', 'grp'], (0, 'A'),
+                                      self.metric_lst, True)
+    output = metric.compute_on(df, 'grp2')
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.PercentChange('Condition_and_grp', (0, 'A'),
+                                               self.metric_lst, True)
+    expected = expected_metric.compute_on(df, 'grp2')
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
   def test_percent_change_where(self):
     metric = operations.PercentChange(
         'Condition', 0, metrics.Sum('X'), where='grp == "A"')
@@ -569,6 +672,69 @@ class AbsoluteChangeTests(unittest.TestCase):
     expected.sort_index(level=['grp0', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
+  def test_absolute_change_multiple_condition_columns(self):
+    df = self.df.copy()
+    metric = operations.AbsoluteChange(['Condition', 'grp'], (0, 'A'),
+                                       self.metric_lst)
+    output = metric.compute_on(df)
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.AbsoluteChange('Condition_and_grp', (0, 'A'),
+                                                self.metric_lst)
+    expected = expected_metric.compute_on(df)
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_absolute_change_multiple_condition_columns_include_baseline(self):
+    df = self.df.copy()
+    metric = operations.AbsoluteChange(['Condition', 'grp'], (0, 'A'),
+                                       self.metric_lst, True)
+    output = metric.compute_on(df)
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.AbsoluteChange('Condition_and_grp', (0, 'A'),
+                                                self.metric_lst, True)
+    expected = expected_metric.compute_on(df)
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_absolute_change_multiple_condition_columns_splitby(self):
+    df = pd.DataFrame({
+        'X': [1, 2, 3, 4, 5, 6],
+        'Condition': [0, 0, 0, 1, 1, 1],
+        'grp': ['A', 'A', 'B', 'A', 'B', 'B'],
+        'grp2': ['foo', 'bar', 'foo', 'bar', 'foo', 'bar']
+    })
+    metric = operations.AbsoluteChange(['Condition', 'grp'], (0, 'A'),
+                                       self.metric_lst)
+    output = metric.compute_on(df, 'grp2')
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.AbsoluteChange('Condition_and_grp', (0, 'A'),
+                                                self.metric_lst)
+    expected = expected_metric.compute_on(df, 'grp2')
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_absolute_change_multiple_condition_columns_include_baseline_splitby(
+      self):
+    df = pd.DataFrame({
+        'X': [1, 2, 3, 4, 5, 6],
+        'Condition': [0, 0, 0, 1, 1, 1],
+        'grp': ['A', 'A', 'B', 'A', 'B', 'B'],
+        'grp2': ['foo', 'bar', 'foo', 'bar', 'foo', 'bar']
+    })
+    metric = operations.AbsoluteChange(['Condition', 'grp'], (0, 'A'),
+                                       self.metric_lst, True)
+    output = metric.compute_on(df, 'grp2')
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.AbsoluteChange('Condition_and_grp', (0, 'A'),
+                                                self.metric_lst, True)
+    expected = expected_metric.compute_on(df, 'grp2')
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
   def test_absolute_change_where(self):
     metric = operations.AbsoluteChange(
         'Condition', 0, metrics.Sum('X'), where='grp == "A"')
@@ -594,7 +760,7 @@ class AbsoluteChangeTests(unittest.TestCase):
     ab = operations.AbsoluteChange('Condition', 0, sum_x)
     metric = metrics.MetricList((pct, ab))
     with mock.patch.object(
-        sum_x, 'compute_through', return_value=1, autospec=True) as mock_fn:
+        sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
       metric.compute_on(self.df)
       mock_fn.assert_called_once()
 
@@ -644,16 +810,13 @@ class MHTests(unittest.TestCase):
   })
   sum_click = metrics.Sum('clicks')
   sum_conv = metrics.Sum('conversions')
-  metric_lst = metrics.MetricList(
-      (sum_conv / sum_click, metrics.Ratio('conversions', 'clicks', 'cvr')))
+  cvr = metrics.Ratio('conversions', 'clicks', 'cvr')
+  metric_lst = metrics.MetricList((sum_conv / sum_click, cvr))
 
   def test_mh(self):
-    metric = operations.MH('Condition', 0, 'Id', self.metric_lst)
+    metric = operations.MH('Condition', 0, 'Id', self.cvr)
     output = metric.compute_on(self.df)
-    expected = pd.DataFrame(
-        [[40., 40.]],
-        columns=['sum(conversions) / sum(clicks) MH Ratio', 'cvr MH Ratio'],
-        index=[1])
+    expected = pd.DataFrame([[40.]], columns=['cvr MH Ratio'], index=[1])
     expected.index.name = 'Condition'
     testing.assert_frame_equal(output, expected)
 
@@ -734,6 +897,68 @@ class MHTests(unittest.TestCase):
         'grp': ['A', 'A', 'B', 'B'] * 2
     })
     expected.set_index(['Metric', 'grp', 'Condition'], inplace=True)
+    testing.assert_frame_equal(output, expected)
+
+  def test_mh_multiple_condition_columns(self):
+    df = pd.DataFrame({
+        'clicks': [1, 3, 2, 3, 1, 2] * 2,
+        'conversions': [1, 0, 1, 2, 1, 1] * 2,
+        'Id': [1, 2, 3, 1, 2, 3] * 2,
+        'Condition': [0, 0, 0, 1, 1, 1] * 2,
+        'grp': ['A', 'B'] * 6,
+    })
+    metric = operations.MH(['Condition', 'grp'], (0, 'A'), 'Id',
+                           self.metric_lst)
+    output = metric.compute_on(df)
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.MH('Condition_and_grp', (0, 'A'), 'Id',
+                                    self.metric_lst)
+    expected = expected_metric.compute_on(df)
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_mh_multiple_condition_columns_include_baseline(self):
+    df = pd.DataFrame({
+        'clicks': [1, 3, 2, 3, 1, 2] * 2,
+        'conversions': [1, 0, 1, 2, 1, 1] * 2,
+        'Id': [1, 2, 3, 1, 2, 3] * 2,
+        'Condition': [0, 0, 0, 1, 1, 1] * 2,
+        'grp': ['A', 'B'] * 6,
+    })
+    metric = operations.MH(['Condition', 'grp'], (0, 'A'), 'Id',
+                           self.metric_lst, True)
+    output = metric.compute_on(df)
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.MH('Condition_and_grp', (0, 'A'), 'Id',
+                                    self.metric_lst, True)
+    expected = expected_metric.compute_on(df)
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_mh_multiple_condition_columns_splitby(self):
+    df = pd.DataFrame({
+        'clicks': [1, 3, 2, 3, 1, 2] * 2,
+        'conversions': [1, 0, 1, 2, 1, 1] * 2,
+        'Id': [1, 2, 3, 1, 2, 3] * 2,
+        'Condition': [0, 0, 0, 1, 1, 1] * 2,
+        'grp': ['A', 'B'] * 6,
+        'grp2': ['foo', 'foo', 'bar'] * 4,
+    })
+    sum_click = metrics.Sum('clicks')
+    sum_conv = metrics.Sum('conversions')
+    self.metric_lst = metrics.MetricList(
+        (sum_conv / sum_click, metrics.Ratio('conversions', 'clicks', 'cvr')))
+    metric = operations.MH(['Condition', 'grp'], (0, 'A'), 'Id',
+                           self.metric_lst)
+    output = metric.compute_on(df, 'grp2')
+    df['Condition_and_grp'] = df[['Condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.MH('Condition_and_grp', (0, 'A'), 'Id',
+                                    self.metric_lst)
+    expected = expected_metric.compute_on(df, 'grp2')
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
     testing.assert_frame_equal(output, expected)
 
   def test_mh_where(self):
@@ -1161,7 +1386,7 @@ class JackknifeTests(unittest.TestCase):
     count_x.compute_slices(df)
     self.assertEqual(count_x.cache, {})
 
-  def test_internal_caching_split_by(self):
+  def test_internal_caching_splitby(self):
     df = pd.DataFrame({
         'X': range(12),
         'cookie': [1, 2, 3, 1, 2, 3] * 2,
@@ -1205,6 +1430,20 @@ class JackknifeTests(unittest.TestCase):
     expected['condition'] = 'bar'
     expected.set_index(['Metric', 'condition'], inplace=True)
     testing.assert_frame_equal(output, expected)
+
+  def test_jackknife_with_operation_with_multiple_columns_display(self):
+    df = pd.DataFrame({
+        'X': range(1, 6),
+        'cookie': [1, 1, 2, 3, 4],
+        'condition': ['foo', 'foo', 'bar', 'bar', 'bar'],
+        'grp': ['A', 'A', 'A', 'B', 'B'],
+    })
+    sum_x = metrics.Sum('X')
+    change = operations.AbsoluteChange(['condition', 'grp'], ('foo', 'A'),
+                                       sum_x)
+    jk_change = operations.Jackknife('cookie', change, 0.9)
+    output = jk_change.compute_on(df)
+    output.display()
 
   def test_operation_with_jackknife(self):
     df = pd.DataFrame({
@@ -1303,7 +1542,7 @@ class JackknifeTests(unittest.TestCase):
     expected = pd.concat(expected, keys=['A', 'B'], names=['grp'])
     testing.assert_frame_equal(output, expected)
 
-  def test_internal_caching_with_operation_split_by(self):
+  def test_internal_caching_with_operation_splitby(self):
     df = pd.DataFrame({
         'X': np.arange(0, 6, 0.5),
         'cookie': [1, 2, 3, 1, 2, 3] * 2,

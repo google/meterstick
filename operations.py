@@ -122,23 +122,22 @@ class Operation(metrics.Metric):
 
 
 class Normalize(Operation):
-  """Computes the normalized values of a Metric over a column.
+  """Computes the normalized values of a Metric over column(s).
 
   Attributes:
-    over: The column to normalize over.
+    extra_index: A list of column(s) to normalize over.
     children: A tuple of a Metric whose result we normalize on.
     And all other attributes inherited from Operation.
   """
 
   def __init__(self,
-               over: Text,
+               over: Union[Text, List[Text]],
                child: Optional[metrics.Metric] = None,
                **kwargs):
-    self.over = over
     super(Normalize, self).__init__(child, '{} Normalized', over, **kwargs)
 
   def compute_slices(self, df, split_by=None):
-    lvls = split_by + [self.over] if split_by else self.over
+    lvls = split_by + self.extra_index if split_by else self.extra_index
     res = self.compute_child(df, lvls)
     total = res.groupby(level=split_by).sum() if split_by else res.sum()
     return res / total
@@ -148,7 +147,7 @@ class CumulativeDistribution(Operation):
   """Computes the normalized cumulative sum.
 
   Attributes:
-    over: The column to normalize over.
+    extra_index: A list of column(s) to normalize over.
     children: A tuple of a Metric whose result we compute the cumulative
       distribution on.
     order: An iterable. The over column will be ordered by it before computing
@@ -163,7 +162,6 @@ class CumulativeDistribution(Operation):
                order=None,
                ascending: bool = True,
                **kwargs):
-    self.over = over
     self.order = order
     self.ascending = ascending
     super(CumulativeDistribution,
@@ -172,9 +170,9 @@ class CumulativeDistribution(Operation):
   def split_data(self, df, split_by=None):
     """Caches the result for the whole df instead of many slices."""
     if not split_by:
-      yield self.compute_child(df, self.over), None
+      yield self.compute_child(df, self.extra_index), None
     else:
-      child = self.compute_child(df, split_by + [self.over])
+      child = self.compute_child(df, split_by + self.extra_index)
       keys, indices = list(zip(*child.groupby(split_by).groups.items()))
       for i, idx in enumerate(indices):
         yield child.loc[idx.unique()].droplevel(split_by), keys[i]
@@ -184,7 +182,7 @@ class CumulativeDistribution(Operation):
       df = pd.concat((
           df.loc[[o]] for o in self.order if o in df.index.get_level_values(0)))
     else:
-      df.sort_values(self.over, ascending=self.ascending, inplace=True)
+      df.sort_values(self.extra_index, ascending=self.ascending, inplace=True)
     dist = df.cumsum()
     dist /= df.sum()
     return dist
@@ -199,22 +197,22 @@ class Comparison(Operation):
                child: Optional[metrics.Metric] = None,
                include_base: bool = False,
                name_tmpl: Optional[Text] = None,
-               extra_index=None,
                **kwargs):
-    self.condition_column = condition_column
     self.baseline_key = baseline_key
     self.include_base = include_base
-    super(Comparison, self).__init__(child, name_tmpl, extra_index or
-                                     condition_column, **kwargs)
+    super(Comparison, self).__init__(child, name_tmpl, condition_column,
+                                     **kwargs)
 
 
 class PercentChange(Comparison):
   """Percent change estimator on a Metric.
 
   Attributes:
-    condition_column: The column that contains the conditions.
+    extra_index: The column(s) that contains the conditions.
     baseline_key: The value of the condition that represents the baseline (e.g.,
-      "Control"). All conditions will be compared to this baseline.
+      "Control"). All conditions will be compared to this baseline. If
+      contidion_column contains multiple columns, then baseline_key should be a
+      tuple.
     children: A tuple of a Metric whose result we compute percentage change on.
     include_base: A boolean for whether the baseline condition should be
       included in the output.
@@ -233,15 +231,18 @@ class PercentChange(Comparison):
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     if split_by:
-      to_split = list(split_by) + [self.condition_column]
-      level = self.condition_column
+      to_split = list(split_by) + self.extra_index
+      level = self.extra_index[0] if len(
+          self.extra_index) == 1 else self.extra_index
     else:
-      to_split = [self.condition_column]
+      to_split = self.extra_index
       level = None
     res = self.compute_child(df, to_split)
     res = (res / res.xs(self.baseline_key, level=level) - 1) * 100
     if not self.include_base:
-      res = res.drop(self.baseline_key, level=level)
+      to_drop = [i for i in res.index.names if i not in self.extra_index]
+      idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
+      res = res[~idx_to_match.isin([self.baseline_key])]
     return res
 
 
@@ -249,9 +250,11 @@ class AbsoluteChange(Comparison):
   """Absolute change estimator on a Metric.
 
   Attributes:
-    condition_column: The column that contains the conditions.
+    extra_index: The column(s) that contains the conditions.
     baseline_key: The value of the condition that represents the baseline (e.g.,
-      "Control"). All conditions will be compared to this baseline.
+      "Control"). All conditions will be compared to this baseline. If
+      contidion_column contains multiple columns, then baseline_key should be a
+      tuple.
     children: A tuple of a Metric whose result we compute absolute change on.
     include_base: A boolean for whether the baseline condition should be
       included in the output.
@@ -270,10 +273,11 @@ class AbsoluteChange(Comparison):
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     if split_by:
-      to_split = list(split_by) + [self.condition_column]
-      level = self.condition_column
+      to_split = list(split_by) + self.extra_index
+      level = self.extra_index[0] if len(
+          self.extra_index) == 1 else self.extra_index
     else:
-      to_split = [self.condition_column]
+      to_split = self.extra_index
       level = None
     res = self.compute_child(df, to_split)
     # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
@@ -281,7 +285,9 @@ class AbsoluteChange(Comparison):
     # to reindex to update in place which sometimes lead to lots of NAs.
     res = res - res.xs(self.baseline_key, level=level)
     if not self.include_base:
-      res = res.drop(self.baseline_key, level=level)
+      to_drop = [i for i in res.index.names if i not in self.extra_index]
+      idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
+      res = res[~idx_to_match.isin([self.baseline_key])]
     return res
 
 
@@ -296,9 +302,11 @@ class MH(Comparison):
               AbsoluteChange(b) / AbsoluteChange(d)]).
 
   Attributes:
-    condition_column: The column that contains the conditions.
+    extra_index: The column(s) that contains the conditions.
     baseline_key: The value of the condition that represents the baseline (e.g.,
-      "Control"). All conditions will be compared to this baseline.
+      "Control"). All conditions will be compared to this baseline. If
+      contidion_column contains multiple columns, then baseline_key should be a
+      tuple.
     stratified_by: The stratification column(s) in the DataFrame.
     children: A tuple of a Metric whose result we compute the MH on.
     include_base: A boolean for whether the baseline condition should be
@@ -315,9 +323,8 @@ class MH(Comparison):
                **kwargs):
     self.stratified_by = stratified_by if isinstance(stratified_by,
                                                      list) else [stratified_by]
-    super(MH,
-          self).__init__(condition_column, baseline_key, metric, include_base,
-                         '{} MH Ratio', condition_column, **kwargs)
+    super(MH, self).__init__(condition_column, baseline_key, metric,
+                             include_base, '{} MH Ratio', **kwargs)
 
   def check_is_ratio(self, metric=None):
     metric = metric or self.children[0]
@@ -336,37 +343,31 @@ class MH(Comparison):
     denom = metric.children[1].name
     df_all = mh_metric.compute_on(
         df,
-        split_by + [self.condition_column] + self.stratified_by,
+        split_by + self.extra_index + self.stratified_by,
         cache_key=self.cache_key or self.RESERVED_KEY)
-    df_baseline = df_all.xs(self.baseline_key, level=self.condition_column)
-    mh_ratios = []
-    conds = []
-    for cond in df_all.index.get_level_values(self.condition_column).unique():
-      if cond == self.baseline_key and not self.include_base:
-        continue
-      df_cond = df_all.xs(cond, level=self.condition_column)
-      ka, na = df_cond[numer], df_cond[denom]
-      kb, nb = df_baseline[numer], df_baseline[denom]
-      weights = 1. / (na + nb)
-      to_split = [i for i in ka.index.names if i not in self.stratified_by]
-      if to_split:
-        mh_ratio = ((ka * nb * weights).groupby(to_split).sum() /
-                    (kb * na * weights).groupby(to_split).sum() - 1) * 100
-      else:
-        mh_ratio = ((ka * nb * weights).sum() /
-                    (kb * na * weights).sum() - 1) * 100
-      mh_ratios.append(mh_ratio)
-      conds.append(cond)
+    level = self.extra_index[0] if len(
+        self.extra_index) == 1 else self.extra_index
+    df_baseline = df_all.xs(self.baseline_key, level=level)
+    suffix = '_base'
+    df_mh = df_all.join(df_baseline, rsuffix=suffix)
+    ka, na = df_mh[numer], df_mh[denom]
+    kb, nb = df_mh[numer + suffix], df_mh[denom + suffix]
+    weights = 1. / (na + nb)
+    to_split = [i for i in ka.index.names if i not in self.stratified_by]
+    res = ((ka * nb * weights).groupby(to_split).sum() /
+           (kb * na * weights).groupby(to_split).sum() - 1) * 100
+    res.name = metric.name
+    to_split = [i for i in to_split if i not in self.extra_index]
     if to_split:
-      res = pd.concat(mh_ratios, keys=conds, names=[self.condition_column])
-      res.name = metric.name
       split_by = split_by or []
       extra_idx = [i for i in to_split if i not in split_by]
-      res = res.reorder_levels(split_by + [self.condition_column] + extra_idx)
-      return res
-    res = pd.DataFrame({metric.name: mh_ratios}, index=conds)
-    res.index.name = self.condition_column
-    return res
+      res = res.reorder_levels(split_by + self.extra_index + extra_idx)
+
+    if not self.include_base:
+      to_drop = [i for i in res.index.names if i not in self.extra_index]
+      idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
+      res = res[~idx_to_match.isin([self.baseline_key])]
+    return pd.DataFrame(res.sort_index(level=split_by + self.extra_index))
 
   def compute_slices(self, df, split_by):
     self.check_is_ratio()
@@ -386,7 +387,7 @@ class MH(Comparison):
                      recursive=True,
                      prune=True):
     """Flushes the grandchildren as child is not computed."""
-    split_by = (split_by or []) + [self.condition_column] + self.stratified_by
+    split_by = (split_by or []) + self.extra_index + self.stratified_by
     if isinstance(self.children[0], metrics.MetricList):
       for c in self.children[0]:
         c.flush_children(key, split_by, where, recursive, prune)
@@ -428,7 +429,7 @@ class MetricWithCI(Operation):
       Additionally, a display() function will be bound to the result so you can
       visualize the confidence interval nicely in Colab and Jupyter notebook.
     prefix: In the result, the column names will be like "{prefix} SE",
-      "{prefix} CI-upper". And all other attributes inherited from Operation.
+      "{prefix} CI-upper".
     And all other attributes inherited from Operation.
   """
 
@@ -577,7 +578,7 @@ class MetricWithCI(Operation):
       # The columns are like metric1, metric1 jackknife SE, ...
       metric_names = res.columns[::2]
       for i in range(0, len(res.columns), 2):
-        sub_df = res.iloc[:, [i, i+1]]
+        sub_df = res.iloc[:, [i, i + 1]]
         sub_df.columns = ['Value', self.prefix + ' SE']
         sub_dfs.append(sub_df)
 
@@ -631,6 +632,7 @@ def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
       self.save_to_cache(key, loo.loc[bucket])
       self.tmp_cache_keys.add(key)
     return total
+
   return precompute_loo
 
 
@@ -702,6 +704,7 @@ def get_mean_monkey_patch_fn(unit, original_split_by):
       self.save_to_cache(key, loo.loc[bucket])
       self.tmp_cache_keys.add(key)
     return mean
+
   return precompute_loo
 
 

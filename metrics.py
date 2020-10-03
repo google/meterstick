@@ -147,8 +147,8 @@ class Metric(object):
   def compute_with_split_by(self,
                             df,
                             split_by: Optional[List[Text]] = None,
-                            slice_name=None):
-    del split_by, slice_name  # In case users need them in derived classes.
+                            slice_value=None):
+    del split_by, slice_value  # In case users need them in derived classes.
     return self.compute(df)
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
