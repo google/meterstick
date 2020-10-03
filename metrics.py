@@ -23,8 +23,15 @@ import numpy as np
 import pandas as pd
 
 
-def compute_on(df, split_by=None, **kwargs):
-  return lambda x: x.compute_on(df, split_by, **kwargs)
+def compute_on(df,
+               split_by=None,
+               melted=False,
+               return_dataframe=True,
+               cache_key=None):
+  # pylint: disable=g-long-lambda
+  return lambda x: x.compute_on(df, split_by, melted, return_dataframe,
+                                cache_key)
+  # pylint: enable=g-long-lambda
 
 
 def get_extra_idx(metric):
@@ -424,9 +431,10 @@ class Metric(object):
     else:
       raise ValueError('Unrecognized SQL engine!')
     if indexes:
-      res.set_index(indexes, inplace=True)
-    if split_by:
-      res.sort_values(split_by, inplace=True)
+      res.set_index(list(map(utils.sql_name_sanitize, indexes)), inplace=True)
+      res.index.names = indexes
+    if split_by:  # Use a stable sort.
+      res.sort_values(split_by, kind='mergesort', inplace=True)
     return utils.melt(res) if melted else res
 
   def __or__(self, fn):
