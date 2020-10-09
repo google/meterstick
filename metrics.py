@@ -84,12 +84,8 @@ class Metric(object):
   3. As compute() operates on a slice of data, it doesn't have access to the
   columns to split_by and the index value of the slice. If you need them, check
   out compute_with_split_by(). See Jackknife for a real example.
-  4. By default, the data passed into manipulate() is in wide/unmelted format,
-  namely, the outermost column level is metric name. If your compute or
-  compute_slices obey this contract, you don't need to worry about
-  manipulate(). If your fucntion returns long/melted DataFrame instead, set
-  the attribute manipulate_input_type to 'melted' then manipulate() would
-  know how to handle it.
+  4. The data passed into manipulate() should be a number, a pd.Series, or a
+    wide/unmelted pd.DataFrame.
 
   It's possible to cache your result. However, as DataFrame is mutable, it's
   slow to hash it (O(shape) complexity). To avoid hashing, for most cases you'd
@@ -131,8 +127,7 @@ class Metric(object):
                compute: Optional[Callable[[pd.DataFrame], Any]] = None,
                postcompute=None,
                compute_slices=None,
-               final_compute=None,
-               manipulate_input_type='unmelted'):
+               final_compute=None):
     self.name = name
     self.cache = {}
     self.cache_key = None
@@ -148,7 +143,6 @@ class Metric(object):
       self.compute_slices = compute_slices
     if final_compute:
       self.final_compute = final_compute
-    self.manipulate_input_type = manipulate_input_type
     self.tmp_cache_keys = set()
 
   def compute_with_split_by(self,
@@ -304,10 +298,8 @@ class Metric(object):
     if isinstance(res, pd.Series):
       res.name = self.name
     res = self.to_dataframe(res) if return_dataframe else res
-    if self.manipulate_input_type == 'unmelted' and melted:
+    if melted:
       res = utils.melt(res)
-    elif self.manipulate_input_type == 'melted' and not melted:
-      res = utils.unmelt(res)
     return utils.remove_empty_level(res)
 
   @staticmethod
@@ -569,7 +561,6 @@ class CompositeMetric(Metric):
     where: A string that will be passed to df.query() as a prefilter.
     cache: A dict to store cached results.
     cache_key: The key currently being used in computation.
-    manipulate_input_type: Whether the input df is 'melted' or 'unmelted'.
     And all other attributes inherited from Metric.
   """
 
@@ -578,8 +569,7 @@ class CompositeMetric(Metric):
                name_tmpl: Text,
                children: Sequence[Union[Metric, int, float]],
                rename_columns=None,
-               where: Optional[Text] = None,
-               manipulate_input_type: Text = 'unmelted'):
+               where: Optional[Text] = None):
     if len(children) != 2:
       raise ValueError('CompositeMetric must take two children!')
     if not isinstance(children[0], (Metric, int, float)):
@@ -594,8 +584,7 @@ class CompositeMetric(Metric):
 
     self.name_tmpl = name_tmpl
     name = name_tmpl.format(*map(utils.get_name, children))
-    super(CompositeMetric, self).__init__(
-        name, children, where, manipulate_input_type=manipulate_input_type)
+    super(CompositeMetric, self).__init__(name, children, where)
     self.op = op
     self.columns = rename_columns
 

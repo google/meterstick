@@ -54,7 +54,6 @@ class Operation(metrics.Metric):
     where: A string that will be passed to df.query() as a prefilter.
     cache_key: What key to use to cache the df. You can use anything that can be
       a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ...).
-    manipulate_input_type: Whether the input df is 'melted' or 'unmelted'.
     And all other attributes inherited from Metric.
   """
 
@@ -64,16 +63,10 @@ class Operation(metrics.Metric):
                extra_index: Optional[Union[Text, Iterable[Text]]] = None,
                name: Optional[Text] = None,
                where: Optional[Text] = None,
-               manipulate_input_type: Text = 'unmelted',
                **kwargs):
     if name_tmpl and not name:
       name = name_tmpl.format(utils.get_name(child))
-    super(Operation, self).__init__(
-        name,
-        child or (),
-        where,
-        manipulate_input_type=manipulate_input_type,
-        **kwargs)
+    super(Operation, self).__init__(name, child or (), where, **kwargs)
     self.name_tmpl = name_tmpl
     self.extra_index = [extra_index] if isinstance(extra_index,
                                                    str) else extra_index or []
