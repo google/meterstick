@@ -725,7 +725,8 @@ class Count(SimpleMetric):
     var: Column to compute on.
     name: Name of the Metric.
     where: A string that will be passed to df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.count().
+    distinct: Whether to count distinct values.
+    kwargs: Other kwargs passed to pd.DataFrame.count() or nunique().
     And all other attributes inherited from Metric.
   """
 
@@ -733,11 +734,17 @@ class Count(SimpleMetric):
                var: Text,
                name: Optional[Text] = None,
                where: Optional[Text] = None,
+               distinct: bool = False,
                **kwargs):
+    self.distinct = distinct
+    if distinct:
+      name = name or 'count(distinct %s)' % var
     super(Count, self).__init__(var, name, 'count({})', where, **kwargs)
 
   def compute_slices(self, df, split_by=None):
-    return self.group(df, split_by)[self.var].count(**self.kwargs)
+    grped = self.group(df, split_by)[self.var]
+    return grped.nunique(**self.kwargs) if self.distinct else grped.count(
+        **self.kwargs)
 
 
 class Sum(SimpleMetric):

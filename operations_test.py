@@ -1404,6 +1404,20 @@ class JackknifeTests(unittest.TestCase):
       self.assertEqual(1, mock_fn.call_count)
       mock_fn.assert_has_calls([mock.call(df, ['grp'])])
 
+  def test_jackknife_with_count_distinct(self):
+    df = pd.DataFrame({
+        'X': [1, 2, 2],
+        'cookie': [1, 2, 3],
+    })
+    m = operations.Jackknife('cookie', metrics.Count('X', distinct=True))
+    output = m.compute_on(df)
+    expected = pd.DataFrame({
+        ('count(distinct X)', 'Value'): [2.],
+        ('count(distinct X)', 'Jackknife SE'): [2. / 3]
+    })
+    expected.columns.names = ['Metric', None]
+    testing.assert_frame_equal(output, expected)
+
   def test_jackknife_with_operation(self):
     df = pd.DataFrame({
         'X': range(1, 6),

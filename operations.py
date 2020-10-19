@@ -632,6 +632,9 @@ def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
       Same as what normal Sum/Count.compute_slies() would have returned.
     """
     total = original_compute(self, df, split_by)
+    if isinstance(self, metrics.Count) and self.distinct:
+      # For Count distinct, we cannot cut the corner.
+      return total
     split_by_with_unit = [unit] + split_by if split_by else [unit]
     each_bucket = original_compute(self, df, split_by_with_unit)
     each_bucket = utils.adjust_slices_for_loo(each_bucket, original_split_by)
@@ -905,6 +908,8 @@ class Jackknife(MetricWithCI):
     for m in self.traverse():
       if not m.children and not isinstance(
           m, (metrics.Sum, metrics.Count, metrics.Mean)):
+        return False
+      if isinstance(m, metrics.Count) and m.distinct:
         return False
     return True
 

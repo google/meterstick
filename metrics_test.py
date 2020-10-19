@@ -144,6 +144,12 @@ class SimpleMetricTest(unittest.TestCase):
     expected.set_index('grp', append=True, inplace=True)
     testing.assert_frame_equal(output, expected)
 
+  def test_count_distinct(self):
+    df = pd.DataFrame({'X': [1, 1, np.nan, 2, 2, 3]})
+    metric = metrics.Count('X', distinct=True)
+    output = metric.compute_on(df, return_dataframe=False)
+    self.assertEqual(output, 3)
+
   def test_sum_not_df(self):
     metric = metrics.Sum('X')
     output = metric.compute_on(self.df, return_dataframe=False)

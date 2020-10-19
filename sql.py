@@ -158,7 +158,10 @@ def get_column(metric, global_filter=None, local_filter=None):
       res /= Column(metric.weight, 'SUM({})', 'total_weight', where)
       return res.set_alias(metric.name)
   if isinstance(metric, metrics.Count):
-    return Column(metric.var, 'COUNT({})', metric.name, where)
+    if metric.distinct:
+      return Column(metric.var, 'COUNT(DISTINCT {})', metric.name, where)
+    else:
+      return Column(metric.var, 'COUNT({})', metric.name, where)
   if isinstance(metric, metrics.Quantile):
     if metric.weight:
       raise ValueError('SQL for weighted quantile is not supported!')
