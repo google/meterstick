@@ -559,7 +559,7 @@ def get_sql_for_metriclist(metric, table, split_by, global_filter, indexes,
 
   columns = Columns(indexes.aliases)
   for i, table in enumerate(incompatible_sqls):
-    data = Datasource(table, 'MetricListChildTable%s' % i)
+    data = Datasource(table, 'MetricListChildTable')
     alias = with_data.add(data)
     for c in table.columns:
       if c not in columns:
@@ -806,6 +806,12 @@ def get_sql_for_jackknife_or_bootstrap(metric, table, split_by, global_filter,
   3. Compute the standard error from #2.
   4. Compute the point estimate from original table.
   5. Join #3 and #4.
+  6. If metric has confidence level specified, we also get the degrees of
+    freedom so we can later compute the critical value of t distribution in
+    Python.
+  7. If metric only has one child and it's PercentChange or AbsoluteChange, we
+    also get the base values for comparison. They will be used in the
+    res.display().
 
   Args:
     metric: An instance of operations.Jackknife or operations.Bootstrap.
@@ -848,10 +854,27 @@ def get_sql_for_jackknife_or_bootstrap(metric, table, split_by, global_filter,
       if metric.confidence:
         columns.add(
             Column('%s.%s_dof' % (se_alias, c.alias), alias='%s_dof' % c.alias))
+
+  has_base_vals = False
+  if metric.confidence:
+    child = metric.children[0]
+    if len(metric.children) == 1 and isinstance(
+        child, (operations.PercentChange, operations.AbsoluteChange)):
+      has_base_vals = True
+      base, with_data = get_sql_for_metric(
+          child.children[0], table,
+          Columns(split_by).add(child.extra_index), global_filter, indexes,
+          local_filter, with_data)
+      base_alias = with_data.add(Datasource(base, '_ShouldAlreadyExists'))
+      columns.add(
+          Column('%s.%s' % (base_alias, c.alias), alias=c.alias)
+          for c in base.columns.difference(indexes))
+
   join = 'LEFT' if using else 'CROSS'
-  return Sql(
-      columns.add(using), Join(pt_est_alias, se_alias, join=join,
-                               using=using)), with_data
+  from_data = Join(pt_est_alias, se_alias, join=join, using=using)
+  if has_base_vals:
+    from_data = from_data.join(base_alias, join=join, using=using)
+  return Sql(using.add(columns), from_data), with_data
 
 
 def get_se(metric, table, split_by, global_filter, indexes, local_filter,

@@ -204,7 +204,7 @@ class PercentChange(Comparison):
     extra_index: The column(s) that contains the conditions.
     baseline_key: The value of the condition that represents the baseline (e.g.,
       "Control"). All conditions will be compared to this baseline. If
-      contidion_column contains multiple columns, then baseline_key should be a
+      condition_column contains multiple columns, then baseline_key should be a
       tuple.
     children: A tuple of a Metric whose result we compute percentage change on.
     include_base: A boolean for whether the baseline condition should be
@@ -246,7 +246,7 @@ class AbsoluteChange(Comparison):
     extra_index: The column(s) that contains the conditions.
     baseline_key: The value of the condition that represents the baseline (e.g.,
       "Control"). All conditions will be compared to this baseline. If
-      contidion_column contains multiple columns, then baseline_key should be a
+      condition_column contains multiple columns, then baseline_key should be a
       tuple.
     children: A tuple of a Metric whose result we compute absolute change on.
     include_base: A boolean for whether the baseline condition should be
@@ -298,7 +298,7 @@ class MH(Comparison):
     extra_index: The column(s) that contains the conditions.
     baseline_key: The value of the condition that represents the baseline (e.g.,
       "Control"). All conditions will be compared to this baseline. If
-      contidion_column contains multiple columns, then baseline_key should be a
+      condition_column contains multiple columns, then baseline_key should be a
       tuple.
     stratified_by: The stratification column(s) in the DataFrame.
     children: A tuple of a Metric whose result we compute the MH on.
@@ -508,6 +508,7 @@ class MetricWithCI(Operation):
 
     if not melted:
       res = utils.unmelt(res)
+
     return res
 
   @staticmethod
@@ -545,6 +546,27 @@ class MetricWithCI(Operation):
                                                    execute)
     sub_dfs = []
     if self.confidence:
+      # raw contains the base values passed to comparison.
+      raw = None
+      split_by = [split_by] if isinstance(split_by, str) else split_by
+      extra_idx = list(metrics.get_extra_idx(self))
+      indexes = split_by + extra_idx if split_by else extra_idx
+      if len(self.children) == 1 and isinstance(
+          self.children[0], (PercentChange, AbsoluteChange)):
+        if len(res.columns) % 4:
+          raise ValueError('Wrong shape for a MetricWithCI with confidence!')
+        n_metrics = len(res.columns) // 4
+        raw = res.iloc[:, -n_metrics:]
+        res = res.iloc[:, :3 * n_metrics]
+        change = self.children[0]
+        raw.columns = [
+            utils.sql_name_sanitize(change.name_tmpl.lower().format(c))
+            for c in raw.columns
+        ]
+        raw = utils.melt(raw)
+        raw.columns = ['_base_value']
+        indexes = [i for i in indexes if i not in change.extra_index]
+
       if len(res.columns) % 3:
         raise ValueError('Wrong shape for a MetricWithCI with confidence!')
 
