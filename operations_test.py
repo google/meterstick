@@ -28,7 +28,7 @@ from scipy import stats
 import unittest
 
 
-class NormalizeTests(unittest.TestCase):
+class DistributionTests(unittest.TestCase):
 
   df = pd.DataFrame({
       'X': [1, 1, 1, 5],
@@ -36,16 +36,23 @@ class NormalizeTests(unittest.TestCase):
       'country': ['US', 'US', 'US', 'EU']
   })
   sum_x = metrics.Sum('X')
-  normalize = operations.Normalize('grp', sum_x)
+  distribution = operations.Distribution('grp', sum_x)
 
-  def test_normalize(self):
-    output = self.normalize.compute_on(self.df)
-    expected = pd.DataFrame({'sum(X) Normalized': [0.25, 0.75]},
+  def test_distribution(self):
+    output = self.distribution.compute_on(self.df)
+    expected = pd.DataFrame({'Distribution of sum(X)': [0.25, 0.75]},
                             index=['A', 'B'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_over_multiple_columns(self):
+  def test_normalize(self):
+    output = operations.Normalize('grp', self.sum_x).compute_on(self.df)
+    expected = pd.DataFrame({'Distribution of sum(X)': [0.25, 0.75]},
+                            index=['A', 'B'])
+    expected.index.name = 'grp'
+    testing.assert_frame_equal(output, expected)
+
+  def test_distribution_over_multiple_columns(self):
     df = pd.DataFrame({
         'X': [2, 1, 1, 5],
         'grp': ['A', 'A', 'B', 'B'],
@@ -53,11 +60,11 @@ class NormalizeTests(unittest.TestCase):
         'platform': ['desktop', 'mobile', 'desktop', 'mobile']
     })
     sum_x = metrics.Sum('X')
-    normalize = operations.Normalize(['grp', 'platform'], sum_x)
+    dist = operations.Distribution(['grp', 'platform'], sum_x)
 
-    output = normalize.compute_on(df, 'country')
+    output = dist.compute_on(df, 'country')
     expected = pd.DataFrame({
-        'sum(X) Normalized': [1., 0.5, 0.25, 0.25],
+        'Distribution of sum(X)': [1., 0.5, 0.25, 0.25],
         'country': ['EU', 'US', 'US', 'US'],
         'grp': ['B', 'A', 'A', 'B'],
         'platform': ['mobile', 'desktop', 'mobile', 'desktop']
@@ -65,97 +72,97 @@ class NormalizeTests(unittest.TestCase):
     expected.set_index(['country', 'grp', 'platform'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_melted(self):
-    output = self.normalize.compute_on(self.df, melted=True)
+  def test_distribution_melted(self):
+    output = self.distribution.compute_on(self.df, melted=True)
     expected = pd.DataFrame({
         'Value': [0.25, 0.75],
         'grp': ['A', 'B'],
-        'Metric': ['sum(X) Normalized', 'sum(X) Normalized']
+        'Metric': ['Distribution of sum(X)', 'Distribution of sum(X)']
     })
     expected.set_index(['Metric', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_splitby(self):
-    output = self.normalize.compute_on(self.df, 'country')
+  def test_distribution_splitby(self):
+    output = self.distribution.compute_on(self.df, 'country')
     expected = pd.DataFrame({
-        'sum(X) Normalized': [1., 2. / 3, 1. / 3],
+        'Distribution of sum(X)': [1., 2. / 3, 1. / 3],
         'grp': ['B', 'A', 'B'],
         'country': ['EU', 'US', 'US']
     })
     expected.set_index(['country', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_splitby_melted(self):
-    output = self.normalize.compute_on(self.df, 'country', melted=True)
+  def test_distribution_splitby_melted(self):
+    output = self.distribution.compute_on(self.df, 'country', melted=True)
     expected = pd.DataFrame({
         'Value': [1., 2. / 3, 1. / 3],
         'grp': ['B', 'A', 'B'],
-        'Metric': ['sum(X) Normalized'] * 3,
+        'Metric': ['Distribution of sum(X)'] * 3,
         'country': ['EU', 'US', 'US']
     })
     expected.set_index(['Metric', 'country', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_splitby_multiple(self):
+  def test_distribution_splitby_multiple(self):
     df = pd.DataFrame({
         'X': [1, 1, 1, 5, 0, 1, 2, 3.5],
         'grp': ['A', 'A', 'B', 'B'] * 2,
         'country': ['US', 'US', 'US', 'EU'] * 2,
         'grp0': ['foo'] * 4 + ['bar'] * 4
     })
-    output = self.normalize.compute_on(df, ['grp0', 'country'])
-    bar = self.normalize.compute_on(df[df.grp0 == 'bar'], 'country')
-    foo = self.normalize.compute_on(df[df.grp0 == 'foo'], 'country')
+    output = self.distribution.compute_on(df, ['grp0', 'country'])
+    bar = self.distribution.compute_on(df[df.grp0 == 'bar'], 'country')
+    foo = self.distribution.compute_on(df[df.grp0 == 'foo'], 'country')
     expected = pd.concat([bar, foo], keys=['bar', 'foo'], names=['grp0'])
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_multiple_metrics(self):
+  def test_distribution_multiple_metrics(self):
     metric = metrics.MetricList((self.sum_x, metrics.Count('X')))
-    metric = operations.Normalize('grp', metric)
+    metric = operations.Distribution('grp', metric)
     output = metric.compute_on(self.df)
     expected = pd.DataFrame(
         {
-            'sum(X) Normalized': [0.25, 0.75],
-            'count(X) Normalized': [0.5, 0.5]
+            'Distribution of sum(X)': [0.25, 0.75],
+            'Distribution of count(X)': [0.5, 0.5]
         },
         index=['A', 'B'],
-        columns=['sum(X) Normalized', 'count(X) Normalized'])
+        columns=['Distribution of sum(X)', 'Distribution of count(X)'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_where(self):
-    metric = operations.Normalize('grp', self.sum_x, where='country == "US"')
-    metric_no_filter = operations.Normalize('grp', self.sum_x)
+  def test_distribution_where(self):
+    metric = operations.Distribution('grp', self.sum_x, where='country == "US"')
+    metric_no_filter = operations.Distribution('grp', self.sum_x)
     output = metric.compute_on(self.df)
     expected = metric_no_filter.compute_on(self.df[self.df.country == 'US'])
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_pipeline(self):
-    output = self.sum_x | operations.Normalize('grp') | metrics.compute_on(
+  def test_distribution_pipeline(self):
+    output = self.sum_x | operations.Distribution('grp') | metrics.compute_on(
         self.df)
-    expected = pd.DataFrame({'sum(X) Normalized': [0.25, 0.75]},
+    expected = pd.DataFrame({'Distribution of sum(X)': [0.25, 0.75]},
                             index=['A', 'B'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
 
-  def test_normalize_cache_key(self):
+  def test_distribution_cache_key(self):
     sum_x = metrics.Sum('X', 'X')
-    metric = operations.Normalize('grp', sum_x)
+    metric = operations.Distribution('grp', sum_x)
     metric.compute_on(self.df, cache_key=42)
     testing.assert_series_equal(
         self.df.groupby('grp').X.sum(), sum_x.get_cached(42, 'grp'))
     self.assertTrue(metric.in_cache(42))
 
-  def test_normalize_internal_caching_cleaned_up(self):
+  def test_distribution_internal_caching_cleaned_up(self):
     sum_x = metrics.Sum('X')
-    m = operations.Normalize('grp', sum_x)
+    m = operations.Distribution('grp', sum_x)
     m.compute_on(self.df)
     self.assertEqual(m.cache, {})
     self.assertEqual(sum_x.cache, {})
     self.assertIsNone(sum_x.cache_key)
     self.assertIsNone(m.cache_key)
 
-  def test_normalize_with_jackknife_internal_caching_cleaned_up(self):
+  def test_distribution_with_jackknife_internal_caching_cleaned_up(self):
     df = pd.DataFrame({
         'X': [1, 1, 1, 5],
         'grp': ['A', 'A', 'B', 'B'],
@@ -163,7 +170,7 @@ class NormalizeTests(unittest.TestCase):
         'cookie': [1, 2, 1, 2]
     })
     sum_x = metrics.Sum('X')
-    m = operations.Normalize('grp', sum_x)
+    m = operations.Distribution('grp', sum_x)
     jk = operations.Jackknife('cookie', m)
     jk.compute_on(df)
     self.assertEqual(jk.cache, {})

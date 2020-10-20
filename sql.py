@@ -23,7 +23,7 @@ def to_sql(table, split_by=None):
 
 def compute_on_sql(table,
                    split_by=None,
-                   engine='dremel',
+                   engine='f1',
                    execute=None,
                    melted=False):
   return lambda m: m.compute_on_sql(table, split_by, engine, execute, melted)
@@ -64,8 +64,8 @@ def get_sql_for_metric(metric, table, split_by, global_filter, indexes,
     table: The table we want to query from, like 'babyname'.
     split_by: The columns that we use to split the data. Note it could be
       different to the split_by passed to the root Metric. For example, in the
-      call of get_sql(AbsoluteChange('platform', 'tablet', Normalize(...)),
-      'country') the split_by Normalize gets will be ('country', 'platform')
+      call of get_sql(AbsoluteChange('platform', 'tablet', Distribution(...)),
+      'country') the split_by Distribution gets will be ('country', 'platform')
       because AbsoluteChange adds an extra index.
     global_filter: The filters that can be applied to the whole Metric tree.It
       will be passed down all the way to the leaf Metrics and become the WHERE
@@ -103,8 +103,8 @@ def get_sql_for_metric(metric, table, split_by, global_filter, indexes,
   if isinstance(metric, metrics.MetricList):
     return get_sql_for_metriclist(metric, table, split_by, global_filter,
                                   indexes, local_filter, with_data)
-  if isinstance(metric, operations.Normalize):
-    return get_sql_for_normalize(metric, table, split_by, global_filter,
+  if isinstance(metric, operations.Distribution):
+    return get_sql_for_distribution(metric, table, split_by, global_filter,
                                  indexes, local_filter, with_data)
   if isinstance(metric, operations.CumulativeDistribution):
     return get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
@@ -233,9 +233,9 @@ def get_column(metric, global_filter=None, local_filter=None):
   raise ValueError('SQL for %s is not supported!' % metric.name)
 
 
-def get_sql_for_normalize(metric, table, split_by, global_filter, indexes,
+def get_sql_for_distribution(metric, table, split_by, global_filter, indexes,
                           local_filter, with_data):
-  """Gets the SQL for operations.Normalize.
+  """Gets the SQL for operations.Distribution.
 
   The query is constructed by
   1. Get the query for the child metric.
@@ -243,7 +243,7 @@ def get_sql_for_normalize(metric, table, split_by, global_filter, indexes,
   3. For all value columns, get value / SUM(value) OVER (PARTITION BY split_by).
 
   Args:
-    metric: An instance of operations.Normalize.
+    metric: An instance of operations.Distribution.
     table: The table we want to query from.
     split_by: The columns that we use to split the data.
     global_filter: The filters that can be applied to the whole Metric tree.
@@ -255,13 +255,13 @@ def get_sql_for_normalize(metric, table, split_by, global_filter, indexes,
     The SQL instance for metric, without the WITH clause component.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  if not isinstance(metric, operations.Normalize):
-    raise ValueError('Not a Normalize!')
+  if not isinstance(metric, operations.Distribution):
+    raise ValueError('Not a Distribution!')
 
   child_sql, with_data = get_sql_for_metric(metric.children[0], table, indexes,
                                             global_filter, indexes,
                                             local_filter, with_data)
-  child_table = Datasource(child_sql, 'NormalizeRaw')
+  child_table = Datasource(child_sql, 'DistributionRaw')
   child_table_alias = with_data.add(child_table)
   groupby = Columns(indexes.aliases, distinct=True)
   columns = Columns()
@@ -270,7 +270,7 @@ def get_sql_for_normalize(metric, table, split_by, global_filter, indexes,
       continue
     col = Column(c.alias) / Column(
         c.alias, 'SUM({})', partition=split_by.aliases)
-    col.set_alias('%s_normalized' % c.alias)
+    col.set_alias('distribution of %s' % c.alias)
     columns.add(col)
   return Sql(groupby.add(columns), child_table_alias), with_data
 
@@ -280,7 +280,7 @@ def get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
   """Gets the SQL for operations.CumulativeDistribution.
 
   The query is constructed by
-  1. Get the query for the Normalize of the child Metric.
+  1. Get the query for the Distribution of the child Metric.
   2. Keep all indexing/groupby columns unchanged.
   3. For all value columns, get the cumulative sum by summing over
     'ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW'.
@@ -302,7 +302,7 @@ def get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
     raise ValueError('Not a CumulativeDistribution!')
 
   child_sql, with_data = get_sql_for_metric(
-      operations.Normalize(metric.extra_index, metric.children[0]), table,
+      operations.Distribution(metric.extra_index, metric.children[0]), table,
       split_by, global_filter, indexes, local_filter, with_data)
   child_table = Datasource(child_sql, 'CumulativeDistributionRaw')
   child_table_alias = with_data.add(child_table)
@@ -320,8 +320,7 @@ def get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
         partition=split_by.aliases,
         order=order,
         window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')
-    col.set_alias('cumulative distribution of %s' %
-                  c.alias[:-len('_normalized')])
+    col.set_alias('cumulative %s' % c.alias)
     columns.add(col)
   return Sql(columns, child_table_alias), with_data
 
@@ -1269,7 +1268,7 @@ def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
     affect the metric used in point estimate computation.
   4. For Operations, their extra_index columns appear in indexes. If any of them
     has forbidden character in the name, it will be renamed in LOO so we have to
-    change extra_index. For example, Normalize('$Foo') will generate a column
+    change extra_index. For example, Distribution('$Foo') will generate a column
     $Foo AS macro_Foo in LOO so we need to replace '$Foo' with 'macro_Foo'.
 
   We need to make a copy for the Metric or in

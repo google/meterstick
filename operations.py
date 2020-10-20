@@ -114,7 +114,7 @@ class Operation(metrics.Metric):
     return op
 
 
-class Normalize(Operation):
+class Distribution(Operation):
   """Computes the normalized values of a Metric over column(s).
 
   Attributes:
@@ -127,13 +127,17 @@ class Normalize(Operation):
                over: Union[Text, List[Text]],
                child: Optional[metrics.Metric] = None,
                **kwargs):
-    super(Normalize, self).__init__(child, '{} Normalized', over, **kwargs)
+    super(Distribution, self).__init__(child, 'Distribution of {}', over,
+                                       **kwargs)
 
   def compute_slices(self, df, split_by=None):
     lvls = split_by + self.extra_index if split_by else self.extra_index
     res = self.compute_child(df, lvls)
     total = res.groupby(level=split_by).sum() if split_by else res.sum()
     return res / total
+
+
+Normalize = Distribution  # An alias.
 
 
 class CumulativeDistribution(Operation):
