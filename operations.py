@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import copy
 from typing import Any, Iterable, List, Optional, Text, Tuple, Union
+from meterstick import confidence_interval_display
 from meterstick import metrics
 from meterstick import utils
 import numpy as np
@@ -392,6 +393,139 @@ class MH(Comparison):
       self.children[0].flush_children(key, split_by, where, recursive, prune)
 
 
+def get_display_fn(name,
+                   split_by=None,
+                   melted=False,
+                   value='Value',
+                   raw=None,
+                   condition_column: Optional[List[Text]] = None,
+                   ctrl_id=None,
+                   default_metric_formats=None):
+  """Returns a function that displays confidence interval nicely.
+
+  Args:
+    name: 'Jackknife' or 'Bootstrap'.
+    split_by: The split_by passed to Jackknife().compute_on().
+    melted: Whether the input res is in long format.
+    value: The name of the value column.
+    raw: Present if the child is PercentChange or AbsoluteChange. It's the base
+      values for comparison. We will use it in the display.
+    condition_column: Present if the child is PercentChange or AbsoluteChange.
+    ctrl_id: Present if the child is PercentChange or AbsoluteChange. It's the
+      baseline_key of the comparison.
+    default_metric_formats: How to format the numbers in the display.
+
+  Returns:
+    A funtion that takes a DataFrame and displays confidence intervals.
+  """
+
+  def display(res,
+              aggregate_dimensions=True,
+              show_control=None,
+              metric_formats=None,
+              sort_by=None,
+              metric_order=None,
+              flip_color=None,
+              hide_null_ctrl=True,
+              display_expr_info=False,
+              auto_add_description=False,
+              return_pre_agg_df=False,
+              return_formatted_df=False):
+    """Displays confidence interval nicely in Colab/Jupyter notebook.
+
+    Args:
+      res: The DataFrame returned by Jackknife or Bootstrap with confidence
+        level specified.
+      aggregate_dimensions: Whether to aggregate all dimensions in to one
+        column.
+      show_control: If False, only ratio values in non-control rows are shown.
+      metric_formats: A dict specifying how to display metric values. Keys can
+        be 'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp' or a
+        formatting string. For example, '{:.2%}' would have the same effect as
+          'percent'. By default, Value is in absolute form and Ratio in percent.
+      sort_by: In the form of
+        [{'column': ('CI_Lower', 'Metric Foo'), 'ascending': False}},
+         {'column': 'Dim Bar': 'order': ['Logged-in', 'Logged-out']}]. 'column'
+           is the column to sort by. If you want to sort by a metric, use
+           (field, metric name) where field could be 'Ratio', 'Value',
+           'CI_Lower' and 'CI_Upper'. 'order' is optional and for categorical
+           column. 'ascending' is optional and default True. The result will be
+           displayed in the order specified by sort_by from top to bottom.
+      metric_order: An iterable. The metric will be displayed by the order from
+        left to right.
+      flip_color: A iterable of metric names that positive changes will be
+        displayed in red and negative changes in green.
+      hide_null_ctrl: If to hide control value or use '-' to represent it when
+        it is null,
+      display_expr_info: If to display 'Control_id', 'Is_Control' and
+        'Description' columns. Only has effect when aggregate_dimensions is
+        False.
+      auto_add_description: If add Control/Not Control as descriptions.
+      return_pre_agg_df: If to return the pre-aggregated df.
+      return_formatted_df: If to return raw HTML df to be rendered.
+
+    Returns:
+      Displays confidence interval nicely for df, or aggregated/formatted if
+      return_pre_agg_df/return_formatted_df is True.
+    """
+    if not melted:
+      res = utils.melt(res)
+    if raw is not None:
+      res = raw.join(res)  # raw always has the baseline so needs to be at left.
+      comparison_suffix = [
+          AbsoluteChange('', '').name_tmpl.format(''),
+          PercentChange('', '').name_tmpl.format('')
+      ]
+      comparison_suffix += [
+          utils.sql_name_sanitize(c.lower()) for c in comparison_suffix
+      ]
+      comparison_suffix = '(%s)$' % '|'.join(comparison_suffix)
+      # Don't use inplace=True. It will change the index of 'raw' too.
+      res.index = res.index.set_levels(
+          res.index.levels[0].str.replace(comparison_suffix, ''), 0)
+      show_control = True if show_control is None else show_control
+    metric_order = list(res.index.get_level_values(
+        0).unique()) if metric_order is None else metric_order
+    res = res.reset_index()
+    control = ctrl_id
+    condition_col = condition_column
+    if condition_column:
+      if len(condition_column) == 1:
+        condition_col = condition_column[0]
+      else:
+        res['_expr_id'] = res[condition_column].agg(', '.join, axis=1)
+        control = ', '.join(ctrl_id)
+        condition_col = '_expr_id'
+
+    metric_formats = (
+        default_metric_formats if metric_formats is None else metric_formats)
+    formatted_df = confidence_interval_display.get_formatted_df(
+        res,
+        split_by,
+        aggregate_dimensions,
+        show_control,
+        metric_formats,
+        ratio=value,
+        value='_base_value',
+        ci_upper=name + ' CI-upper',
+        ci_lower=name + ' CI-lower',
+        expr_id=condition_col,
+        ctrl_id=control,
+        sort_by=sort_by,
+        metric_order=metric_order,
+        flip_color=flip_color,
+        hide_null_ctrl=hide_null_ctrl,
+        display_expr_info=display_expr_info,
+        auto_add_description=auto_add_description,
+        return_pre_agg_df=return_pre_agg_df)
+    if return_pre_agg_df or return_formatted_df:
+      return formatted_df
+    display_formatted_df = confidence_interval_display.display_formatted_df
+    return display_formatted_df(formatted_df)
+
+  return display
+
+
 class MetricWithCI(Operation):
   """Base class for Metrics that have confidence interval info in the return.
 
@@ -513,6 +647,42 @@ class MetricWithCI(Operation):
     if not melted:
       res = utils.unmelt(res)
 
+    if self.confidence:
+      raw = None
+      extra_idx = list(metrics.get_extra_idx(self))
+      indexes = split_by + extra_idx if split_by else extra_idx
+      if len(self.children) == 1 and isinstance(
+          self.children[0], (PercentChange, AbsoluteChange)):
+        change = self.children[0]
+        to_split = (
+            split_by + change.extra_index if split_by else change.extra_index)
+        indexes = [i for i in indexes if i not in change.extra_index]
+        raw = change.compute_child(df, to_split)
+        raw.columns = [change.name_tmpl.format(c) for c in raw.columns]
+        raw = utils.melt(raw)
+        raw.columns = ['_base_value']
+      res = self.add_display_fn(res, indexes, melted, raw)
+    return res
+
+  def add_display_fn(self, res, split_by, melted, raw=None):
+    """Bounds a display function to res so res.display() works."""
+    value = res.columns[0] if melted else res.columns[0][1]
+    ctrl_id = None
+    condition_col = None
+    metric_formats = None
+    if len(self.children) == 1 and isinstance(self.children[0],
+                                              (PercentChange, AbsoluteChange)):
+      change = self.children[0]
+      ctrl_id = change.baseline_key
+      condition_col = change.extra_index
+      if isinstance(self.children[0], AbsoluteChange):
+        metric_formats = {'Ratio': 'absolute'}
+
+    fn = get_display_fn(self.prefix, split_by, melted, value, raw,
+                        condition_col, ctrl_id, metric_formats)
+    # pylint: disable=no-value-for-parameter
+    res.display = fn.__get__(res)  # pytype: disable=attribute-error
+    # pylint: enable=no-value-for-parameter
     return res
 
   @staticmethod
@@ -603,6 +773,8 @@ class MetricWithCI(Operation):
 
     res = pd.concat((sub_dfs), 1, keys=metric_names, names=['Metric'])
     res = utils.melt(res) if melted else res
+    if self.confidence:
+      res = self.add_display_fn(res, indexes, melted, raw)
     return res
 
 
