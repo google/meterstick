@@ -1,3 +1,16 @@
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Module to generate SQL scripts for Metrics."""
 
 from __future__ import absolute_import
@@ -23,10 +36,14 @@ def to_sql(table, split_by=None):
 
 def compute_on_sql(table,
                    split_by=None,
-                   engine='f1',
                    execute=None,
                    melted=False):
-  return lambda m: m.compute_on_sql(table, split_by, engine, execute, melted)
+  # pylint: disable=g-long-lambda
+  return lambda m: m.compute_on_sql(table,
+                                    split_by,
+                                    execute,
+                                    melted)
+  # pylint: enable=g-long-lambda
 
 
 def get_sql(metric, table: Text, split_by=None):
@@ -105,7 +122,7 @@ def get_sql_for_metric(metric, table, split_by, global_filter, indexes,
                                   indexes, local_filter, with_data)
   if isinstance(metric, operations.Distribution):
     return get_sql_for_distribution(metric, table, split_by, global_filter,
-                                 indexes, local_filter, with_data)
+                                    indexes, local_filter, with_data)
   if isinstance(metric, operations.CumulativeDistribution):
     return get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
                                 local_filter, with_data)
@@ -234,7 +251,7 @@ def get_column(metric, global_filter=None, local_filter=None):
 
 
 def get_sql_for_distribution(metric, table, split_by, global_filter, indexes,
-                          local_filter, with_data):
+                             local_filter, with_data):
   """Gets the SQL for operations.Distribution.
 
   The query is constructed by

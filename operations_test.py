@@ -23,7 +23,7 @@ from meterstick import utils
 import mock
 import numpy as np
 import pandas as pd
-import pandas.util.testing as testing
+from pandas import testing
 from scipy import stats
 import unittest
 

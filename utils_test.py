@@ -20,7 +20,7 @@ from __future__ import print_function
 from meterstick import utils
 import numpy as np
 import pandas as pd
-import pandas.util.testing as testing
+from pandas import testing
 import unittest
 
 
