@@ -116,7 +116,6 @@ def _sorted_long_to_wide(df, dims, sort_by):
 
   Args:
     df: A dataframe in long format, could just be metrics_types.as_dataframe().
-      Example https://screenshot.googleplex.com/Y4BWcHWh5z6
     dims: The column name of slicing dimesions, can be a list or a string.
     sort_by: In the form of [{'column': 'CI-lower', 'ascending': False}},
       {'column': 'Dim_2': 'order': ['Logged-in', 'Logged-out']}]. The 'column'
@@ -211,7 +210,6 @@ def _pre_aggregate_df(df,
 
   Args:
     df: A dataframe similar to the one returned by metrics_types.as_dataframe().
-      Example https://screenshot.googleplex.com/Y4BWcHWh5z6
     dims: The column name of slicing dimesions, can be a list or a string.
     aggregate_dimensions: If True, all dimension columns are collected into a
       'Dimensions' column, and original dimension columns are dropped.
@@ -300,9 +298,7 @@ class MetricFormatter(object):
     metric_formats: A dict specifying how to display metric values. Keys can be
       'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp' or a
       formatting string. For example, '{:.2%}' would have the same effect as
-      'percent'. By default, Value is in absolute form and Ratio in percent. For
-      the effect of different options, see
-      https://screenshot.googleplex.com/NTghj5F49wj for an example.
+      'percent'. By default, Value is in absolute form and Ratio in percent.
     if_flip_color: A boolean indicating if to flip green/red coloring scheme.
     hide_null_ctrl: If to hide control value or use '-' to represent it when it
       is null,
@@ -460,9 +456,7 @@ def _get_formatter(df,
     metric_formats: A dict specifying how to display metric values. Keys can be
       'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp' or a
       formatting string. For example, '{:.2%}' would have the same effect as
-      'percent'. By default, Value is in absolute form and Ratio in percent. For
-      the effect of different options, see
-      https://screenshot.googleplex.com/NTghj5F49wj for an example.
+      'percent'. By default, Value is in absolute form and Ratio in percent.
 
   Returns:
     A dict which can be used as a custom formatter for
@@ -519,7 +513,6 @@ def _add_is_control_and_control_id(df, ctrl_id):
 
   Args:
     df: A dataframe similar to the one returned by metrics_types.as_dataframe().
-      Example https://screenshot.googleplex.com/Y4BWcHWh5z6
     ctrl_id: The control experiment id(s). For single control case, it can be
       basically any type that can be used as an experiment key except dict. For
       multiple controls, it should be a dict, with keys being control ids,
