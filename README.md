@@ -135,7 +135,7 @@ Built-in comparisons include:
 +   `AbsoluteChange(condition_column, baseline)` : Computes the absolute change
     (other - baseline).
 +   `MH(condition_column, baseline, stratified_by)` : Computes the
-    [Mantel-Haenszel estimator](https://wiki.corp.google.com/twiki/bin/view/Main/MantelHaenszel).
+    [Mantel-Haenszel estimator](https://en.wikipedia.org/wiki/Cochran%E2%80%93Mantel%E2%80%93Haenszel_statistics).
     The metric being computed must be a `Ratio` or a `MetricList` of `Ratio`s.
     The `stratified_by` argument specifies the strata over which the MH
     estimator is computed.
