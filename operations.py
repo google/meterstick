@@ -34,7 +34,7 @@ class Operation(metrics.Metric):
   1. Operation must take another Metric as the child to operate on.
   2. The name of Operation is reflected in the result differently. A Metric
     usually returns a 1D data and its name could just be used as the column.
-    However, Operation ofern operates on MetricList and one name doesn't fit
+    However, Operation often operates on MetricList and one name doesn't fit
     all. What we do is we apply the name_tmpl of Operation to all Metric names
 
   Attributes:
@@ -52,6 +52,17 @@ class Operation(metrics.Metric):
       extra_index records what columns need to be added to children Metrics so
       we can flush the cache correctly. The convention is extra_index comes
       after split_by. If not, you need to overwrite flush_children().
+    precomputable_in_jk: Indicates whether it is possible to cut corners to
+      obtain leave-one-out (LOO) estimates for the Jackknife. This attribute
+      is True if the input df is only used in compute_on() and compute_child().
+      This is necessary because Jackknife emits None as the input df for LOO
+      estimation when cutting corners. The compute_on() and compute_child()
+      functions know to read from cache but other functions may not know what to
+      do. If your Operation uses df outside the compute_on() and compute_child()
+      functions, you have either to
+      1. ensure that your computation doesn't break when df is None.
+      2. set attribute 'precomputable_in_jk' to False (which will force the
+         jackknife to be computed the manual way, which is slower).
     where: A string that will be passed to df.query() as a prefilter.
     cache_key: What key to use to cache the df. You can use anything that can be
       a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ...).
@@ -71,6 +82,7 @@ class Operation(metrics.Metric):
     self.name_tmpl = name_tmpl
     self.extra_index = [extra_index] if isinstance(extra_index,
                                                    str) else extra_index or []
+    self.precomputable_in_jk = True
 
   def compute_child(self,
                     df: pd.DataFrame,
@@ -1082,6 +1094,8 @@ class Jackknife(MetricWithCI):
   def can_be_precomputed(self):
     """If all leaf Metrics are Sum, Count or Mean, LOO can be precomputed."""
     for m in self.traverse():
+      if isinstance(m, Operation) and not m.precomputable_in_jk:
+        return False
       if not m.children and not isinstance(
           m, (metrics.Sum, metrics.Count, metrics.Mean)):
         return False
