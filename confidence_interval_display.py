@@ -316,7 +316,7 @@ class MetricFormatter(object):
                hide_null_ctrl=False):
     metric_formats = metric_formats or {}
     metric_formats.setdefault('Value', 'absolute')
-    metric_formats.setdefault('Ratio', 'percent')
+    metric_formats.setdefault('Ratio', 'absolute')
     self.if_flip_color = if_flip_color
     self.hide_null_ctrl = hide_null_ctrl
     self.metric_formats = metric_formats

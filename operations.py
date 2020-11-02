@@ -687,8 +687,8 @@ class MetricWithCI(Operation):
       change = self.children[0]
       ctrl_id = change.baseline_key
       condition_col = change.extra_index
-      if isinstance(self.children[0], AbsoluteChange):
-        metric_formats = {'Ratio': 'absolute'}
+      if isinstance(self.children[0], PercentChange):
+        metric_formats = {'Ratio': 'percent'}
 
     fn = get_display_fn(self.prefix, split_by, melted, value, raw,
                         condition_col, ctrl_id, metric_formats)
