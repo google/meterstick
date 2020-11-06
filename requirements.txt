@@ -1,4 +1,4 @@
-six==1.14.0
-numpy==1.16.4
-scipy==1.2.1
-pandas==1.0.5
+six
+numpy
+scipy
+pandas

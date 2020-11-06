@@ -30,12 +30,7 @@ setup(
     authoremail="meterstick-external@google.com",
     license="Apache License 2.0",
     packages=["meterstick"],
-    installrequires=[
-        "six>=1.14.0",
-        "numpy>=1.16.4",
-        "scipy>=1.2.1",
-        "pandas>=1.0.5",
-    ],
+    installrequires=["six", "numpy", "scipy", "pandas"],
     classifiers=[
         "License :: OSI Approved :: Apache Software License",
         "Development Status :: 5 - Production/Stable",
@@ -46,5 +41,4 @@ setup(
         "Programming Language :: Python :: 2",
         "Programming Language :: Python :: 3",
         "Programming Language :: SQL",
-    ]
-)
+    ])
