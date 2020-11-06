@@ -728,8 +728,10 @@ class MetricWithCI(Operation):
       split_by=None,
       execute=None,
       melted=False):
-    res = super(MetricWithCI, self).compute_on_sql(table, split_by, engine,
-                                                   execute)
+    res = super(MetricWithCI, self).compute_on_sql(
+        table,
+        split_by,
+        execute)
     sub_dfs = []
     if self.confidence:
       # raw contains the base values passed to comparison.
