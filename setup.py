@@ -24,7 +24,7 @@ setup(
     version="1.0.0",
     description="A grammar of data analysis",
     long_description=README,
-    long_description_content="text/markdown",
+    long_description_content_type="text/markdown",
     URL="https://github.com/google/meterstick",
     author="Xunmo Yang, Dennis Sun, Taylor Pospisil",
     authoremail="meterstick-external@google.com",
