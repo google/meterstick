@@ -206,8 +206,7 @@ Example Usage: `compute_on(df, ["Country", "Device"])`
 
 Example Usage:
 
-`compute_on_sql("SELECT * FROM table WHERE date = '20200101'", ["Country",
-"Device"])`
+`compute_on_sql("SELECT * FROM table WHERE date = '20200101'", "Country")`
 
 #### Customizing the Output Format
 
