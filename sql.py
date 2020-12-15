@@ -613,7 +613,10 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
   FROM $DATA
   GROUP BY split_by, condition, stratified),
   MHBase AS (SELECT
-    * EXCEPT (condition)
+    split_by,
+    stratified,
+    sum_click,
+    sum_impression
   FROM MHRaw
   WHERE
   condition = "base_value")
@@ -676,7 +679,8 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
                for c, b in zip(cond_cols.aliases, base))
   base_cond = ' AND '.join(base_cond)
   base_value = Sql(
-      Column('* EXCEPT (%s)' % ', '.join(cond_cols.aliases), auto_alias=False),
+      Columns(raw_table_sql.groupby.aliases).add(
+          raw_table_sql.columns.aliases).difference(cond_cols.aliases),
       raw_table_alias, base_cond)
   base_table = Datasource(base_value, 'MHBase')
   base_table_alias = with_data.add(base_table)
@@ -739,7 +743,8 @@ def get_sql_for_change(metric, table, split_by, global_filter, indexes,
   FROM $DATA
   GROUP BY split_by, condition),
   ChangeBase AS (SELECT
-    * EXCEPT (condition)
+    split_by,
+    mean_click
   FROM ChangeRaw
   WHERE
   condition = "base_value")
@@ -789,7 +794,8 @@ def get_sql_for_change(metric, table, split_by, global_filter, indexes,
                for c, b in zip(cond_cols.aliases, base))
   base_cond = ' AND '.join(base_cond)
   base_value = Sql(
-      Column('* EXCEPT (%s)' % ', '.join(cond_cols.aliases), auto_alias=False),
+      Columns(raw_table_sql.groupby.aliases).add(
+          raw_table_sql.columns.aliases).difference(cond_cols.aliases),
       raw_table_alias, base_cond)
   base_table = Datasource(base_value, 'ChangeBase')
   base_table_alias = with_data.add(base_table)
@@ -1412,7 +1418,9 @@ def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
     BootstrapRandomChoices AS (SELECT
       b.* EXCEPT (_bs_row_number, _bs_filter)
     FROM (SELECT
-      * EXCEPT (_bs_row_number),
+      split_by,
+      _resample_idx,
+      _bs_filter,
       _bs_random_row_number AS _bs_row_number
     FROM BootstrapRandomRows) AS a
     JOIN
@@ -1487,15 +1495,16 @@ def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
     random_choice_table_alias = with_data.add(
         Datasource(random_choice_table, 'BootstrapRandomRows'))
 
-    random_rows = Sql((Column('* EXCEPT (_bs_row_number)', auto_alias=False),
-                       Column('_bs_random_row_number', alias='_bs_row_number')),
-                      random_choice_table_alias)
     using = Columns(partition).add('_bs_row_number').difference(str(where))
-    random_rows = Datasource(random_rows, 'a')
     excludes = ['_bs_row_number']
     if where:
       excludes.append('_bs_filter')
       using.add('_bs_filter')
+    random_rows = Sql(
+        Columns(using).difference('_bs_row_number').add(
+            Column('_bs_random_row_number', alias='_bs_row_number')),
+        random_choice_table_alias)
+    random_rows = Datasource(random_rows, 'a')
     resampled = random_rows.join(
         Datasource(random_choice_table_alias, 'b'), using=using)
     table = Sql(
