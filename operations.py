@@ -488,9 +488,6 @@ def get_display_fn(name,
           AbsoluteChange('', '').name_tmpl.format(''),
           PercentChange('', '').name_tmpl.format('')
       ]
-      comparison_suffix += [
-          utils.sql_name_sanitize(c.lower()) for c in comparison_suffix
-      ]
       comparison_suffix = '(%s)$' % '|'.join(comparison_suffix)
       # Don't use inplace=True. It will change the index of 'raw' too.
       res.index = res.index.set_levels(
@@ -747,10 +744,7 @@ class MetricWithCI(Operation):
         raw = res.iloc[:, -n_metrics:]
         res = res.iloc[:, :3 * n_metrics]
         change = self.children[0]
-        raw.columns = [
-            utils.sql_name_sanitize(change.name_tmpl.lower().format(c))
-            for c in raw.columns
-        ]
+        raw.columns = [change.name_tmpl.format(c) for c in raw.columns]
         raw = utils.melt(raw)
         raw.columns = ['_base_value']
         indexes = [i for i in indexes if i not in change.extra_index]

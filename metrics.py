@@ -422,9 +422,16 @@ class Metric(object):
       res = execute(query)
     else:
       raise ValueError('Unrecognized SQL engine!')
+    # We replace '$' with 'macro_' in the generated SQL. To recover the names,
+    # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
+    # orignal names. So we set index using the replaced names then reset index
+    # names, which recovers all indexes. Unfortunately it's not as easy to
+    # recover metric/column names, so for the remaining columns we just replace
+    # 'macro_' with '$'.
     if indexes:
-      res.set_index(list(map(utils.sql_name_sanitize, indexes)), inplace=True)
+      res.set_index([k.replace('$', 'macro_') for k in indexes], inplace=True)
       res.index.names = indexes
+    res.columns = [c.replace('macro_', '$') for c in res.columns]
     if split_by:  # Use a stable sort.
       res.sort_values(split_by, kind='mergesort', inplace=True)
     return utils.melt(res) if melted else res

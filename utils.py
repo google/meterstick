@@ -297,32 +297,3 @@ def remove_empty_level(df):
     if not level.name and len(level.values) == 1 and not level.values[0]:
       drop.append(i)
   return df.droplevel(drop)
-
-
-def sql_name_sanitize(name, hyphen_to='_'):
-  """Removes SQL syntax from column/table names."""
-  if not name:
-    return name
-  # pylint: disable=bad-continuation
-  res = name.replace('(', '_'
-      ).replace(')', ''
-      ).replace('"', ''
-      ).replace("'", ''
-      ).replace('.', '_point_'
-      ).replace(',', '_comma_'
-      ).replace(' - ', '_minus_'
-      ).replace(' + ', '_plus_'
-      ).replace(' / ', '_divides_'
-      ).replace(' * ', '_times_'
-      ).replace(' ^ ', '_to_the_power_'
-      ).replace('-', hyphen_to
-      ).replace('>', '_greater_than_'
-      ).replace('<', '_smaller_than_'
-      ).replace('=', '_equals_'
-      ).replace('$', 'macro_'
-      ).replace(' ', '_'
-      ).replace('__', '_')
-  # pylint: enable=bad-continuation
-  if res[0] in map(str, range(10)):
-    return '_' + res
-  return res

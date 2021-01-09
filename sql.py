@@ -27,7 +27,6 @@ from typing import Iterable, Optional, Text, Union
 
 from meterstick import metrics
 from meterstick import operations
-from meterstick import utils
 
 
 def to_sql(table, split_by=None):
@@ -183,9 +182,7 @@ def get_column(metric, global_filter=None, local_filter=None):
     if metric.weight:
       raise ValueError('SQL for weighted quantile is not supported!')
     if metric.one_quantile:
-      alias = '%s_quantile_of_%s' % (float(metric.quantile), metric.var)
-      if alias.startswith('0.'):
-        alias = 'point_' + alias[2:]
+      alias = 'quantile(%s, %s)' % (metric.var, metric.quantile)
       return Column(
           metric.var,
           'APPROX_QUANTILES({}, 100)[OFFSET(%s)]' % int(100 * metric.quantile),
@@ -194,7 +191,7 @@ def get_column(metric, global_filter=None, local_filter=None):
     query = 'APPROX_QUANTILES({}, 100)[OFFSET(%s)]'
     quantiles = []
     for q in metric.quantile:
-      alias = '%s_quantile_of_%s' % (float(q), metric.var)
+      alias = 'quantile(%s, %s)' % (metric.var, q)
       if alias.startswith('0.'):
         alias = 'point_' + alias[2:]
       quantiles.append(Column(metric.var, query % int(100 * q), alias, where))
@@ -287,7 +284,7 @@ def get_sql_for_distribution(metric, table, split_by, global_filter, indexes,
       continue
     col = Column(c.alias) / Column(
         c.alias, 'SUM({})', partition=split_by.aliases)
-    col.set_alias('distribution of %s' % c.alias)
+    col.set_alias('Distribution of %s' % c.alias_raw)
     columns.add(col)
   return Sql(groupby.add(columns), child_table_alias), with_data
 
@@ -337,7 +334,7 @@ def get_sql_for_cum_dist(metric, table, split_by, global_filter, indexes,
         partition=split_by.aliases,
         order=order,
         window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')
-    col.set_alias('cumulative %s' % c.alias)
+    col.set_alias('Cumulative %s' % c.alias_raw)
     columns.add(col)
   return Sql(columns, child_table_alias), with_data
 
@@ -486,14 +483,14 @@ def get_sql_for_composite_metric(metric, table, split_by, global_filter,
         if c0 in indexes.aliases:
           columns.add(c0)
         else:
-          alias = metric.name_tmpl.format(c0.alias, c1.alias)
+          alias = metric.name_tmpl.format(c0.alias_raw, c1.alias_raw)
           columns.add(op(c0, c1).set_alias(alias))
       sql = sql0
       sql.columns = columns
       sql.from_data = larger_from
     else:
-      tbl0 = with_data.add(Datasource(sql0, '%sTable0' % metric.name))
-      tbl1 = with_data.add(Datasource(sql1, '%sTable1' % metric.name))
+      tbl0 = with_data.add(Datasource(sql0, 'CompositeMetricTable0'))
+      tbl1 = with_data.add(Datasource(sql1, 'CompositeMetricTable1'))
       join = 'FULL' if indexes else 'CROSS'
       from_data = Join(tbl0, tbl1, join=join, using=indexes)
       columns = Columns()
@@ -503,8 +500,8 @@ def get_sql_for_composite_metric(metric, table, split_by, global_filter,
       for c0, c1 in col0_col1:
         if c0 not in indexes.aliases:
           col = op(
-              Column('%s.%s' % (tbl0, c0.alias), alias=c0.alias),
-              Column('%s.%s' % (tbl1, c1.alias), alias=c1.alias))
+              Column('%s.%s' % (tbl0, c0.alias), alias=c0.alias_raw),
+              Column('%s.%s' % (tbl1, c1.alias), alias=c1.alias_raw))
           columns.add(col)
       sql = Sql(Columns(indexes.aliases).add(columns), from_data)
 
@@ -512,8 +509,6 @@ def get_sql_for_composite_metric(metric, table, split_by, global_filter,
       metric.children[0], operations.Operation) and not isinstance(
           metric.children[1], operations.Operation) and len(sql.columns) == 1:
     sql.columns[0].set_alias(metric.name)
-    if metric.name_tmpl == '-{}':
-      sql.columns[0].set_alias('neg_' + metric.name[1:])
 
   if metric.columns:
     columns = sql.columns.difference(indexes)
@@ -582,7 +577,7 @@ def get_sql_for_metriclist(metric, table, split_by, global_filter, indexes,
     alias = with_data.add(data)
     for c in table.columns:
       if c not in columns:
-        columns.add(Column('%s.%s' % (alias, c.alias), alias=c.alias))
+        columns.add(Column('%s.%s' % (alias, c.alias), alias=c.alias_raw))
     if i == 0:
       from_data = Datasource(alias)
     else:
@@ -608,15 +603,15 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
     split_by,
     condition,
     stratified,
-    SUM(click) AS sum_click,
-    SUM(impression) AS sum_impression
+    SUM(click) AS `sum(click)`,
+    SUM(impression) AS `sum(impression)`
   FROM $DATA
   GROUP BY split_by, condition, stratified),
   MHBase AS (SELECT
     split_by,
     stratified,
-    sum_click,
-    sum_impression
+    `sum(click)`,
+    `sum(impression)`
   FROM MHRaw
   WHERE
   condition = "base_value")
@@ -624,11 +619,11 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
     split_by,
     condition,
     100 * SAFE_DIVIDE(
-      SUM(SAFE_DIVIDE(MHRaw.sum_click * MHBase.sum_impression,
-          MHBase.sum_impression + MHRaw.sum_impression)),
-      SUM(SAFE_DIVIDE(MHBase.sum_click * MHRaw.sum_impression,
-          MHBase.sum_impression + MHRaw.sum_impression))) - 100
-      AS ctr_mh_ratio
+      SUM(SAFE_DIVIDE(MHRaw.`sum(click)` * MHBase.`sum(impression)`,
+          MHBase.`sum(impression)` + MHRaw.`sum(impression)`)),
+      SUM(SAFE_DIVIDE(MHBase.`sum(click)` * MHRaw.`sum(impression)`,
+          MHBase.`sum(impression)` + MHRaw.`sum(impression)`))) - 100
+      AS `ctr MH Ratio`
   FROM MHRaw
   JOIN
   MHBase
@@ -665,7 +660,7 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
 
   cond_cols = Columns(metric.extra_index)
   groupby = Columns(split_by).add(cond_cols).add(metric.stratified_by)
-  alias_tmpl = metric.name_tmpl.lower()
+  alias_tmpl = metric.name_tmpl
   raw_table_sql, with_data = get_sql_for_metric(
       metrics.MetricList(grandchildren), table, groupby, global_filter, indexes,
       local_filter, with_data)
@@ -706,14 +701,14 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
                   'numer': Column(c.children[0].name).alias,
                   'denom': Column(c.children[1].name).alias
               },
-              alias=alias_tmpl.format(c.name.lower())))
+              alias=alias_tmpl.format(c.name)))
   else:
     columns = Column(
         col_tmpl % {
             'numer': Column(child.children[0].name).alias,
             'denom': Column(child.children[1].name).alias
         },
-        alias=alias_tmpl.format(child.name.lower()))
+        alias=alias_tmpl.format(child.name))
 
   using = indexes.difference(cond_cols).add(metric.stratified_by)
   return Sql(columns, Join(raw_table_alias, base_table_alias, using=using),
@@ -739,20 +734,20 @@ def get_sql_for_change(metric, table, split_by, global_filter, indexes,
   ChangeRaw AS (SELECT
     split_by,
     condition,
-    AVG(click) AS mean_click
+    AVG(click) AS `mean(click)`
   FROM $DATA
   GROUP BY split_by, condition),
   ChangeBase AS (SELECT
     split_by,
-    mean_click
+    `mean(click)`
   FROM ChangeRaw
   WHERE
   condition = "base_value")
   SELECT
     split_by,
     condition,
-    ChangeRaw.mean_click - ChangeBase.mean_click
-      AS mean_click_absolute_change
+    ChangeRaw.`mean(click)` - ChangeBase.`mean(click)`
+      AS `mean(click) Absolute Change`
   FROM ChangeRaw
   JOIN
   ChangeBase
@@ -781,7 +776,7 @@ def get_sql_for_change(metric, table, split_by, global_filter, indexes,
   child = metric.children[0]
   cond_cols = Columns(metric.extra_index)
   groupby = Columns(split_by).add(cond_cols)
-  alias_tmpl = metric.name_tmpl.lower()
+  alias_tmpl = metric.name_tmpl
   raw_table_sql, with_data = get_sql_for_metric(child, table, groupby,
                                                 global_filter, indexes,
                                                 local_filter, with_data)
@@ -811,7 +806,7 @@ def get_sql_for_change(metric, table, split_by, global_filter, indexes,
   for c in raw_table_sql.columns.difference(indexes.aliases):
     col = Column(
         col_tmp.format(c=c.alias) % (raw_table_alias, base_table_alias),
-        alias=alias_tmpl.format(c.alias))
+        alias=alias_tmpl.format(c.alias_raw))
     columns.add(col)
   using = indexes.difference(cond_cols)
   join = '' if using else 'CROSS'
@@ -871,14 +866,14 @@ def get_sql_for_jackknife_or_bootstrap(metric, table, split_by, global_filter,
     if c in indexes.aliases:
       using.add(c)
     else:
-      pt_est_col = Column('%s.%s' % (pt_est_alias, c.alias), alias=c.alias)
-      alias = '%s_%s_se' % (c.alias, name.lower())
-      se_col = Column('%s.%s' % (se_alias, alias), alias=alias)
+      pt_est_col = Column('%s.%s' % (pt_est_alias, c.alias), alias=c.alias_raw)
+      alias = '%s %s SE' % (c.alias_raw, name)
+      se_col = Column('%s.%s' % (se_alias, escape_alias(alias)), alias=alias)
       columns.add(pt_est_col)
       columns.add(se_col)
       if metric.confidence:
-        columns.add(
-            Column('%s.%s_dof' % (se_alias, c.alias), alias='%s_dof' % c.alias))
+        dof = '%s dof' % c.alias_raw
+        columns.add(Column('%s.%s' % (se_alias, escape_alias(dof)), alias=dof))
 
   has_base_vals = False
   if metric.confidence:
@@ -940,14 +935,14 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
     elif c in indexes.aliases:
       groupby.add(c.alias)
     else:
-      se = Column(c.alias, 'STDDEV_SAMP({})', '%s bootstrap se' % c.alias)
+      se = Column(c.alias, 'STDDEV_SAMP({})', '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, operations.Jackknife):
         adjustment = Column(
             'SAFE_DIVIDE((COUNT({c}) - 1), SQRT(COUNT({c})))'.format(c=c.alias))
-        se = (se * adjustment).set_alias('%s jackknife se' % c.alias)
+        se = (se * adjustment).set_alias('%s Jackknife SE' % c.alias_raw)
       columns.add(se)
       if metric.confidence:
-        columns.add(Column(c.alias, 'COUNT({}) - 1', '%s_dof' % c.alias))
+        columns.add(Column(c.alias, 'COUNT({}) - 1', '%s dof' % c.alias_raw))
   return Sql(
       columns, samples_alias, groupby=groupby), with_data
 
@@ -1159,20 +1154,20 @@ def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
     $RenamedSplitByIfAny AS renamed_split_by,
     unit AS _resample_idx,
     SUM(X) OVER (PARTITION BY split_by) -
-      SUM(X) OVER (PARTITION BY split_by, unit) AS sum_X,
+      SUM(X) OVER (PARTITION BY split_by, unit) AS `sum(X)`,
     SAFE_DIVIDE(
       SUM(X) OVER (PARTITION BY split_by) -
         SUM(X) OVER (PARTITION BY split_by, unit),
       COUNT(X) OVER (PARTITION BY split_by) -
-        COUNT(X) OVER (PARTITION BY split_by, unit)) AS mean_X
+        COUNT(X) OVER (PARTITION BY split_by, unit)) AS `mean(X)`
   FROM $DATA
   WHERE
   filters),
   ResampledResults AS (SELECT
     split_by,
     _resample_idx,
-    SUM(sum_X) AS sum_X,
-    SUM(mean_X) AS mean_X
+    SUM(`sum(X)`) AS `sum(X)`,
+    SUM(`mean(X)`) AS `mean(X)`
   FROM LOO
   GROUP BY unrenamed_split_by, renamed_split_by, _resample_idx)
 
@@ -1193,9 +1188,10 @@ def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
     unit AS _resample_idx,
     SUM(click) OVER (PARTITION BY split_by, platform) -
       COALESCE(SUM(click) OVER (PARTITION BY split_by, platform, unit), 0)
-    AS sum_click,
+    AS `sum(click)`,
     COUNT(click) OVER (PARTITION BY split_by, platform) -
-      COUNT(click) OVER (PARTITION BY split_by, platform, unit) AS count_click
+      COUNT(click) OVER (PARTITION BY split_by, platform, unit)
+    AS `count(click)`
   FROM AllSlices
   JOIN
   UNNEST (extra_index) AS extra_index
@@ -1282,10 +1278,10 @@ def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
     to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
     but as we precompute LOO estimates, we need to query from a table that has
     "SUM(X) OVER (PARTITION BY split_by) -
-      SUM(X) OVER (PARTITION BY split_by, unit) AS sum_X". So the expression of
-    Sum('X') should now become 'SUM(sum_x) AS sum_x'. We add the new column we
-    need to query from as an attribute "jackknife_fast_col" to the metric so
-    get_column() could handle it correctly.
+      SUM(X) OVER (PARTITION BY split_by, unit) AS `sum(X)`". So the expression
+    of Sum('X') should now become 'SUM(`sum(X)`) AS `sum(X)`'. We add the new
+    column we need to query from as an attribute "jackknife_fast_col" to the
+    metric so get_column() could handle it correctly.
   3. Removes filters that have already been applied in the LOO table from leaf
     Metrics. Note that we made a copy in get_se for metric so the removal won't
     affect the metric used in point estimate computation.
@@ -1622,7 +1618,18 @@ def add_suffix(alias):
 
 
 def get_alias(c):
-  return getattr(c, 'alias', c)
+  return getattr(c, 'alias_raw', c)
+
+
+def escape_alias(alias):
+  # Macro still gets parsed inside backquotes.
+  if alias and '$' in alias:
+    alias = alias.replace('$', 'macro_')
+  # Don't escape if alias is already escaped.
+  if alias and set(r""" `~!@#$%^&*()-=+[]{}\|;:'",.<>/?""").intersection(
+      alias) and not (alias.startswith('`') and alias.endswith('`')):
+    return '`%s`' % alias.replace('\\', '\\\\')
+  return alias
 
 
 def format_to_condition(val):
@@ -1735,11 +1742,11 @@ class Column(SqlComponent):
   the input and representation.
 
   Input => Representation
-  Column('click', 'SUM({})') => SUM(click) AS sum_click
+  Column('click', 'SUM({})') => SUM(click) AS `sum(click)`
   Column('click * weight', 'SUM({})', 'foo') => SUM(click * weight) AS foo
   Column('click', 'SUM({})', auto_alias=False) => SUM(click)
   Column('click', 'SUM({})', filters='region = "US"') =>
-    SUM(IF(region = "US", click, NULL)) AS sum_click
+    SUM(IF(region = "US", click, NULL)) AS `sum(click)`
   Column('region') => region  # No alias because it's same as the column.
   Column('* EXCEPT (click)', auto_alias=False) => * EXCEPT (click)
   Column(('click', 'impression'), 'SAFE_DIVIDE({}, {})', 'ctr') =>
@@ -1778,6 +1785,8 @@ class Column(SqlComponent):
     self.fn = fn
     self.filters = Filters(filters)
     self.alias_raw = alias
+    if not alias and auto_alias:
+      self.alias_raw = fn.lower().format(*self.column)
     self.partition = partition
     self.order = order
     self.window_frame = window_frame
@@ -1785,10 +1794,7 @@ class Column(SqlComponent):
 
   @property
   def alias(self):
-    alias = self.alias_raw
-    if not alias and self.auto_alias:
-      alias = self.fn.lower().format(*self.column)
-    return utils.sql_name_sanitize(alias)
+    return escape_alias(self.alias_raw)
 
   @alias.setter
   def alias(self, alias):
@@ -1827,57 +1833,49 @@ class Column(SqlComponent):
   def __add__(self, other):
     return Column(
         '{} + {}'.format(*add_parenthesis_if_needed(self, other)),
-        alias='%s_plus_%s' % (self.alias, get_alias(other)))
+        alias='%s + %s' % (self.alias_raw, get_alias(other)))
 
   def __radd__(self, other):
-    alias = '%s_plus_%s' % (get_alias(other), self.alias)
-    if alias[0] == '-':
-      alias = 'neg_' + alias[1:]
+    alias = '%s + %s' % (get_alias(other), self.alias_raw)
     return Column(
         '{} + {}'.format(*add_parenthesis_if_needed(other, self)), alias=alias)
 
   def __sub__(self, other):
     return Column(
         '{} - {}'.format(*add_parenthesis_if_needed(self, other)),
-        alias='%s_minus_%s' % (self.alias, get_alias(other)))
+        alias='%s - %s' % (self.alias_raw, get_alias(other)))
 
   def __rsub__(self, other):
-    alias = '%s_minus_%s' % (get_alias(other), self.alias)
-    if alias[0] == '-':
-      alias = 'neg_' + alias[1:]
+    alias = '%s - %s' % (get_alias(other), self.alias_raw)
     return Column(
         '{} - {}'.format(*add_parenthesis_if_needed(other, self)), alias=alias)
 
   def __mul__(self, other):
     return Column(
         '{} * {}'.format(*add_parenthesis_if_needed(self, other)),
-        alias='%s_times_%s' % (self.alias, get_alias(other)))
+        alias='%s * %s' % (self.alias_raw, get_alias(other)))
 
   def __rmul__(self, other):
-    alias = '%s_times_%s' % (get_alias(other), self.alias)
-    if alias[0] == '-':
-      alias = 'neg_' + alias[1:]
+    alias = '%s * %s' % (get_alias(other), self.alias_raw)
     return Column(
         '{} * {}'.format(*add_parenthesis_if_needed(other, self)), alias=alias)
 
   def __neg__(self):
     return Column(
         '-{}'.format(*add_parenthesis_if_needed(self)),
-        alias='neg_%s' % self.alias)
+        alias='-%s' % self.alias_raw)
 
   def __div__(self, other):
     return Column(
         'SAFE_DIVIDE({}, {})'.format(self.expression,
                                      getattr(other, 'expression', other)),
-        alias='%s_divides_%s' % (self.alias, get_alias(other)))
+        alias='%s / %s' % (self.alias_raw, get_alias(other)))
 
   def __truediv__(self, other):
     return self.__div__(other)
 
   def __rdiv__(self, other):
-    alias = '%s_divides_%s' % (get_alias(other), self.alias)
-    if alias[0] == '-':
-      alias = 'neg_' + alias[1:]
+    alias = '%s / %s' % (get_alias(other), self.alias_raw)
     return Column(
         'SAFE_DIVIDE({}, {})'.format(
             getattr(other, 'expression', other), self.expression),
@@ -1890,12 +1888,10 @@ class Column(SqlComponent):
     return Column(
         'POWER({}, {})'.format(self.expression,
                                getattr(other, 'expression', other)),
-        alias='%s_to_the_power_%s' % (self.alias, get_alias(other)))
+        alias='%s ^ %s' % (self.alias_raw, get_alias(other)))
 
   def __rpow__(self, other):
-    alias = '%s_to_the_power_%s' % (get_alias(other), self.alias)
-    if alias[0] == '-':
-      alias = 'neg_' + alias[1:]
+    alias = '%s ^ %s' % (get_alias(other), self.alias_raw)
     return Column(
         'POWER({}, {})'.format(
             getattr(other, 'expression', other), self.expression),
@@ -1930,7 +1926,7 @@ class Columns(SqlComponents):
 
   @property
   def aliases(self):
-    return [c.alias for c in self]
+    return [escape_alias(c.alias) for c in self]
 
   def add(self, children):
     """Adds a Column if not existing.
@@ -1957,7 +1953,7 @@ class Columns(SqlComponents):
       return self
     if isinstance(children, str):
       return self.add(Column(children))
-    alias = children.alias
+    alias = children.alias_raw
     if alias not in self.columns:
       self.columns[alias] = children
       return self
@@ -1987,7 +1983,7 @@ class Columns(SqlComponents):
     return 'DISTINCT ' + res if self.distinct else res
 
   def as_groupby(self):
-    return ', '.join(self.columns.keys())
+    return ', '.join(self.aliases)
 
   def __str__(self):
     return self.get_columns(True)
@@ -2004,8 +2000,7 @@ class Datasource(SqlComponent):
     else:
       self.table = str(table).strip()
       self.alias = alias
-    if self.alias:
-      self.alias = utils.sql_name_sanitize(self.alias, hyphen_to='neg_')
+    self.alias = escape_alias(self.alias)
     self.is_table = not self.table.upper().startswith('SELECT')
 
   def get_expression(self, form='FROM'):
