@@ -190,6 +190,19 @@ a variable.
 Example Usage: `Sum("Queries") | Distribution("Device")` calculates the
 proportion of queries that come from each device.
 
+### Filtering
+
+We can restrict our metrics to subsets of the data. For instance to calculate
+metrics for non-spam clicks you can add a `where` clause to the Metric or
+MetricList. This clause is a boolean expression which can be passed to pandas'
+[query() method](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.query.html).
+
+
+```python
+sum_non_spam_clicks = Sum("Clicks", where="~IsSpam")
+MetricList([Sum("Clicks"), Sum("Conversions")], where="~IsSpam")
+```
+
 ### Data and Slicing
 
 Once we have specified the metric(s) and operation(s), it is time to
