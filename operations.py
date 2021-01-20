@@ -764,7 +764,7 @@ class MetricWithCI(Operation):
             {
                 'Value': res.iloc[:, i],
                 ci_lower: pt_est - half_width[0],
-                ci_upper: pt_est + half_width[0]
+                ci_upper: pt_est + half_width[1]
             },
             columns=['Value', ci_lower, ci_upper])
         sub_dfs.append(sub_df)
