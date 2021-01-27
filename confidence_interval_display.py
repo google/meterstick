@@ -379,6 +379,7 @@ class MetricFormatter(object):
       value *= 100.0
 
     value_formatted = self._format_value(value, self.metric_formats['Value'])
+    value_formatted = span(value_formatted, 'ci-display-value')
     ratio_formatted = self._format_value(ratio, self.metric_formats['Ratio'])
     ratio_formatted = span(ratio_formatted, 'ci-display-ratio')
     ci_formatted = self._format_value([ci_lower, ci_upper],

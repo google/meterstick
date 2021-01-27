@@ -442,7 +442,8 @@ def get_display_fn(name,
               display_expr_info=False,
               auto_add_description=False,
               return_pre_agg_df=False,
-              return_formatted_df=False):
+              return_formatted_df=False,
+              **interactive_table_kwargs):
     """Displays confidence interval nicely in Colab/Jupyter notebook.
 
     Args:
@@ -475,6 +476,7 @@ def get_display_fn(name,
       auto_add_description: If add Control/Not Control as descriptions.
       return_pre_agg_df: If to return the pre-aggregated df.
       return_formatted_df: If to return raw HTML df to be rendered.
+      **interactive_table_kwargs: Args passed to interactive_table.Create().
 
     Returns:
       Displays confidence interval nicely for df, or aggregated/formatted if
@@ -530,7 +532,7 @@ def get_display_fn(name,
     if return_pre_agg_df or return_formatted_df:
       return formatted_df
     display_formatted_df = confidence_interval_display.display_formatted_df
-    return display_formatted_df(formatted_df)
+    return display_formatted_df(formatted_df, **interactive_table_kwargs)
 
   return display
 
