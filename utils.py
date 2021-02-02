@@ -210,7 +210,7 @@ def adjust_slices_for_loo(bucket_res: pd.Series,
           operations_index) if operations_index else bucket_i.index
       rest_slice_in_bucket = rest_slices.isin(bucket_slices)
       rest = rest[rest_slice_in_bucket]
-    res.append(bucket_i.reindex(rest.index.unique(), fill_value=0))
+    res.append(bucket_i.reindex(rest.index.drop_duplicates(), fill_value=0))
   return pd.concat(res, keys=buckets)
 
 
