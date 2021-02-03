@@ -55,9 +55,27 @@ class UtilsTest(unittest.TestCase):
         index=pd.Index(range(3), name='unit')
     )
     output = utils.adjust_slices_for_loo(s)
-    testing.assert_series_equal(s, output)
+    self.assertIs(s, output)
 
-  def test_adjust_slices_for_loo_no_splitby(self):
+  def test_adjust_slices_for_loo_no_extra(self):
+    s = pd.Series(
+        range(1, 5),
+        index=pd.MultiIndex.from_tuples(
+            (('A', 'grp1'), ('A', 'grp2'), ('B', 'grp1'), ('C', 'grp1')),
+            names=('unit', 'grp')))
+    output = utils.adjust_slices_for_loo(s, ['grp'])
+    self.assertIs(s, output)
+
+  def test_adjust_slices_for_no_partial_slices(self):
+    s = pd.Series(
+        range(1, 5),
+        index=pd.MultiIndex.from_tuples(
+            (('A', 'grp1'), ('A', 'grp2'), ('B', 'grp1'), ('B', 'grp2')),
+            names=('unit', 'grp')))
+    output = utils.adjust_slices_for_loo(s)
+    self.assertIs(s, output)
+
+  def test_adjust_slices_for_has_partial_slices(self):
     s = pd.Series(
         range(1, 5),
         index=pd.MultiIndex.from_tuples(
@@ -70,15 +88,6 @@ class UtilsTest(unittest.TestCase):
                               ('C', 'grp1'), ('C', 'grp2')),
                              names=('unit', 'grp')))
     testing.assert_series_equal(expected, output)
-
-  def test_adjust_slices_for_loo_no_extra(self):
-    s = pd.Series(
-        range(1, 5),
-        index=pd.MultiIndex.from_tuples(
-            (('A', 'grp1'), ('A', 'grp2'), ('B', 'grp1'), ('C', 'grp1')),
-            names=('unit', 'grp')))
-    output = utils.adjust_slices_for_loo(s, ['grp'])
-    testing.assert_series_equal(s.drop(('A', 'grp2')), output)
 
   def test_one_level_column_and_no_splitby_melt(self):
     unmelted = pd.DataFrame({'foo': [1], 'bar': [2]}, columns=['foo', 'bar'])

@@ -708,6 +708,7 @@ class MetricWithCI(Operation):
   def get_stderrs_or_ci_half_width(self, replicates):
     """Returns confidence interval infomation in an unmelted DataFrame."""
     stderrs, dof = self.get_stderrs(replicates)
+    stderrs.mask(dof < 1, inplace=True)
     if self.confidence:
       res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
       res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']

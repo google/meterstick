@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Utils functions for things like DataFrame manipulation."""
 
 from __future__ import absolute_import
@@ -117,10 +116,8 @@ class CacheKey():
 
   def includes(self, other):
     """Decides if self is extended from other."""
-    return (isinstance(other, CacheKey) and
-            self.key == other.key and
-            self.where == other.where and
-            self.slice_val == other.slice_val and
+    return (isinstance(other, CacheKey) and self.key == other.key and
+            self.where == other.where and self.slice_val == other.slice_val and
             self.split_by[:len(other.split_by)] == other.split_by)
 
   def __eq__(self, other):
@@ -178,11 +175,23 @@ def adjust_slices_for_loo(bucket_res: pd.Series,
     it.
   2. slice A * bar should be added because it's in the sum of leave-unit-1-out
     data.
-  And leave-unit-2-out result should only have slices A * foo because when we
-  exclude unit-2 rows, that's the only slice left and grp A is in unit-2 data.
+  And leave-unit-2-out result should have slices A * foo, A * bar and B * bar
+  because
+  1. A * foo is in the leave-unit-2-out data and grp A is in the unit-2 data.
+  2. A * bar and B * bar are in the unit-2 data, though their jacknife standard
+    errors will be NA because they are not in other units of data.
   In summary, to get the slices that should be present for unit i,
   1. Find all the slices in the leave-unit-i-out data.
   2. Discard the slices whose split_by part is not in the unit-i data.
+  3. All slices in unit-i data need to be counted too.
+  In practice, we only enforce #1 and #2, namely, if a slice is expected ONLY
+  because it's in unit-i, we might not include it. The reason is that it only
+  happens when the slice appears in only one unit so its degrees of freedom is
+  1. In operations.py we make sure the standard error is always NA when dof is
+  1, so what we return doesn't matter. The slice won't be lost in the final
+  result either because we will join the standard error to the point estimate
+  and the latter has all slices. Nonetheless, for cases that no adjustment is
+  needed, the original data is returned, so #3 still holds.
 
   Args:
     bucket_res: The first level of its indexes is the unit to Jackknife on,
@@ -193,25 +202,27 @@ def adjust_slices_for_loo(bucket_res: pd.Series,
     A pd.Series that has the same index names as bucket_res, but with some
     levels removed and/or added.
   """
-  if len(bucket_res.index.names) == 1:
+  slicing = bucket_res.index.names[1:]
+  operation_lvl = slicing[len(split_by or ()):]
+  if not operation_lvl:
     return bucket_res
 
-  operations_index = bucket_res.index.names[1 + len(split_by or ()):]
-  buckets = bucket_res.index.levels[0].unique()
-  res = []
-  for bucket in buckets:
-    bucket_i = bucket_res.loc[bucket]
-    rest = bucket_res[bucket_res.index.get_level_values(0) != bucket].droplevel(
-        0)
-    if split_by:
-      rest_slices = rest.index.droplevel(
-          operations_index) if operations_index else rest.index
-      bucket_slices = bucket_i.index.droplevel(
-          operations_index) if operations_index else bucket_i.index
-      rest_slice_in_bucket = rest_slices.isin(bucket_slices)
-      rest = rest[rest_slice_in_bucket]
-    res.append(bucket_i.reindex(rest.index.drop_duplicates(), fill_value=0))
-  return pd.concat(res, keys=buckets)
+  unit_slice_ct = bucket_res.groupby(bucket_res.index.names).size()
+  total_ct = unit_slice_ct.groupby(slicing).sum()
+  # We need all combinations of slices.
+  unit_slice_ct = unit_slice_ct.reindex(
+      pd.MultiIndex.from_product(unit_slice_ct.index.levels), fill_value=0)
+  if len(unit_slice_ct) == len(bucket_res):
+    return bucket_res  # No missing slice.
+  slices_in_other_units = total_ct - unit_slice_ct
+  slices_in_other_units = slices_in_other_units.index[slices_in_other_units > 0]
+  if slices_in_other_units.names != bucket_res.index.names:
+    slices_in_other_units = slices_in_other_units.reorder_levels(
+        bucket_res.index.names)
+  to_keep = slices_in_other_units.droplevel(
+      operation_lvl).isin(
+          bucket_res.index.droplevel(operation_lvl))
+  return bucket_res.reindex(slices_in_other_units[to_keep], fill_value=0)
 
 
 def melt(df):
@@ -241,9 +252,7 @@ def melt(df):
   else:
     flat_idx = True
     names = df.columns
-  df = pd.concat([df[n] for n in names],
-                 keys=names,
-                 names=['Metric'])
+  df = pd.concat([df[n] for n in names], keys=names, names=['Metric'])
   df = pd.DataFrame(df)
   if flat_idx:
     df.columns = ['Value']
@@ -262,8 +271,8 @@ def unmelt(df):
     level will be dropped.
 
   Args:
-    df: A melted DataFrame in Meterstick's context, namely, the outermost
-      index level is Metrics' names.
+    df: A melted DataFrame in Meterstick's context, namely, the outermost index
+      level is Metrics' names.
 
   Returns:
     An unmelted DataFrame in Meterstick's context, namely, the outermost column
