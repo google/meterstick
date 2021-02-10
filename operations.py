@@ -621,7 +621,7 @@ class MetricWithCI(Operation):
           # In case errors occur so the top Metric was not computed, we don't
           # want to prune because the leaf Metrics still need to be cleaned up.
           self.flush_children(cache_key, split_by, prune=False)
-    return estimates
+    return pd.concat(estimates, axis=1, sort=False)
 
   def compute(self, df):
     estimates = self.compute_on_samples(self.get_samples(df))
@@ -695,10 +695,9 @@ class MetricWithCI(Operation):
     return res
 
   @staticmethod
-  def get_stderrs(replicates):
-    bucket_estimates = pd.concat(replicates, axis=1, sort=False)
-    num_buckets = bucket_estimates.count(axis=1)
-    return bucket_estimates.std(1), num_buckets - 1
+  def get_stderrs(bucket_estimates):
+    dof = bucket_estimates.count(axis=1) - 1
+    return bucket_estimates.std(1), dof
 
   def get_ci_width(self, stderrs, dof):
     """You can return asymmetrical confidence interval."""
@@ -828,6 +827,10 @@ def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
       # total - each_bucket might put the unit as the innermost level, but we
       # want the unit as the outermost level.
       loo = loo.reorder_levels(split_by_with_unit)
+    key = utils.CacheKey(('_RESERVED', 'Jackknife', unit), self.cache_key.where,
+                         [unit] + split_by)
+    self.save_to_cache(key, loo)
+    self.tmp_cache_keys.add(key)
     buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
     for bucket in buckets:
       key = self.wrap_cache_key(('_RESERVED', 'Jackknife', unit, bucket),
@@ -901,6 +904,10 @@ def get_mean_monkey_patch_fn(unit, original_split_by):
         loo = loo.reorder_levels(split_by_with_unit)
 
     buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
+    key = utils.CacheKey(('_RESERVED', 'Jackknife', unit), self.cache_key.where,
+                         [unit] + split_by)
+    self.save_to_cache(key, loo)
+    self.tmp_cache_keys.add(key)
     for bucket in buckets:
       key = utils.CacheKey(('_RESERVED', 'Jackknife', unit, bucket),
                            self.cache_key.where, split_by)
@@ -1062,11 +1069,10 @@ class Jackknife(MetricWithCI):
   def compute_slices(self, df, split_by=None):
     """Tries to compute stderr in a vectorized way as much as possible.
 
-    For the slices that have all the units, jackknife and groupby are
-    interchangeable. We find those slices and compute them in a vectorized way.
-    Then for the slices missing some units, we recursively apply such method to
-    maximize the vectorization. When none of the slices are full, we fall back
-    to computing slice by slice.
+    If the Jackknife is precomputable, we try to compute the leave-one-out (loo)
+    estimates on the whole df first. If it fails, we compute slice by slice
+    instead because we don't want to return NAs for valid slices just because an
+    irrelevant slice raises an error.
 
     Args:
       df: The DataFrame to compute on.
@@ -1075,15 +1081,24 @@ class Jackknife(MetricWithCI):
     Returns:
       A melted DataFrame of stderrs for all Metrics in self.children[0].
     """
-    samples = self.get_samples(df, split_by)
-    estimates = self.compute_on_samples(samples, split_by)
+    estimates = None
+    if self.can_precompute:
+      try:
+        estimates = self.compute_child(
+            None, [self.unit] + split_by,
+            True,
+            cache_key=('_RESERVED', 'Jackknife', self.unit))
+        estimates = estimates.unstack(self.unit)
+      except Exception:  # pylint: disable=broad-except
+        pass  # Fall back to computing slice by slice to salvage good slices.
+    if estimates is None:
+      samples = self.get_samples(df, split_by)
+      estimates = self.compute_on_samples(samples, split_by)
     return self.get_stderrs_or_ci_half_width(estimates)
 
   @staticmethod
-  def get_stderrs(replicates):
-    bucket_estimates = pd.concat(replicates, axis=1, sort=False)
+  def get_stderrs(bucket_estimates):
     means = bucket_estimates.mean(axis=1)
-    # Some slices may be missing buckets so we can't just use len(replicates).
     num_buckets = bucket_estimates.count(axis=1)
     rss = (bucket_estimates.subtract(means, axis=0)**2).sum(axis=1, min_count=1)
     return np.sqrt(rss * (1. - 1. / num_buckets)), num_buckets - 1

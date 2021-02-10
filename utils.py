@@ -68,7 +68,7 @@ class CacheKey():
   def __init__(self,
                key,
                where: Optional[Union[Text, Iterable[Text]]] = None,
-               split_by: Optional[Text] = None,
+               split_by: Optional[Union[Text, List[Text]]] = None,
                slice_val=None):
     """Wraps cache_key, split_by, filters and slice infomation.
 
