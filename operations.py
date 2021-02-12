@@ -621,11 +621,13 @@ class MetricWithCI(Operation):
           # In case errors occur so the top Metric was not computed, we don't
           # want to prune because the leaf Metrics still need to be cleaned up.
           self.flush_children(cache_key, split_by, prune=False)
-    return pd.concat(estimates, axis=1, sort=False)
+    # There are funtions outside meterstick directly call this, so don't change.
+    return estimates
 
   def compute(self, df):
-    estimates = self.compute_on_samples(self.get_samples(df))
-    return self.get_stderrs_or_ci_half_width(estimates)
+    replicates = self.compute_on_samples(self.get_samples(df))
+    bucket_estimates = pd.concat(replicates, axis=1, sort=False)
+    return self.get_stderrs_or_ci_half_width(bucket_estimates)
 
   def manipulate(self,
                  res,
@@ -704,9 +706,9 @@ class MetricWithCI(Operation):
     half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)
     return half_width, half_width
 
-  def get_stderrs_or_ci_half_width(self, replicates):
+  def get_stderrs_or_ci_half_width(self, bucket_estimates):
     """Returns confidence interval infomation in an unmelted DataFrame."""
-    stderrs, dof = self.get_stderrs(replicates)
+    stderrs, dof = self.get_stderrs(bucket_estimates)
     stderrs.mask(dof < 1, inplace=True)
     if self.confidence:
       res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
@@ -1093,7 +1095,8 @@ class Jackknife(MetricWithCI):
         pass  # Fall back to computing slice by slice to salvage good slices.
     if estimates is None:
       samples = self.get_samples(df, split_by)
-      estimates = self.compute_on_samples(samples, split_by)
+      replicates = self.compute_on_samples(samples, split_by)
+      estimates = pd.concat(replicates, axis=1, sort=False)
     return self.get_stderrs_or_ci_half_width(estimates)
 
   @staticmethod
