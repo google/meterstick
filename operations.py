@@ -624,8 +624,18 @@ class MetricWithCI(Operation):
     # There are funtions outside meterstick directly call this, so don't change.
     return estimates
 
+  def get_estimates(self,
+                    df,
+                    split_by: Optional[List[Text]] = None,
+                    precomputed=False):
+    """Returns a list of estimates on samples."""
+    if not precomputed:
+      df = df.query(self.where) if df is not None and self.where else df
+      df = self.precompute(df, split_by)
+    return self.compute_on_samples(self.get_samples(df))
+
   def compute(self, df):
-    replicates = self.compute_on_samples(self.get_samples(df))
+    replicates = self.get_estimates(df, precomputed=True)
     bucket_estimates = pd.concat(replicates, axis=1, sort=False)
     return self.get_stderrs_or_ci_half_width(bucket_estimates)
 
@@ -1098,6 +1108,29 @@ class Jackknife(MetricWithCI):
       replicates = self.compute_on_samples(samples, split_by)
       estimates = pd.concat(replicates, axis=1, sort=False)
     return self.get_stderrs_or_ci_half_width(estimates)
+
+  def get_estimates(self,
+                    df,
+                    split_by: Optional[List[Text]] = None,
+                    precomputed=False):
+    """Returns a list of leave-one-out estimates."""
+    if not precomputed:
+      df = df.query(self.where) if df is not None and self.where else df
+      df = self.precompute(df, split_by)
+    estimates = None
+    if self.can_precompute:
+      try:
+        estimates = self.compute_child(
+            None, [self.unit] + (split_by or []),
+            True,
+            cache_key=('_RESERVED', 'Jackknife', self.unit))
+        units = estimates.index.get_level_values(self.unit).unique()
+        return [estimates.xs(1, level=self.unit) for u in units]
+      except Exception:  # pylint: disable=broad-except
+        pass  # Fall back to computing slice by slice to salvage good slices.
+    if estimates is None:
+      samples = self.get_samples(df, split_by)
+      return self.compute_on_samples(samples, split_by)
 
   @staticmethod
   def get_stderrs(bucket_estimates):
