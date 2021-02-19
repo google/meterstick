@@ -709,7 +709,6 @@ class MetricWithCI(Operation):
   def get_stderrs_or_ci_half_width(self, bucket_estimates):
     """Returns confidence interval infomation in an unmelted DataFrame."""
     stderrs, dof = self.get_stderrs(bucket_estimates)
-    stderrs.mask(dof < 1, inplace=True)
     if self.confidence:
       res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
       res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']
@@ -1101,10 +1100,8 @@ class Jackknife(MetricWithCI):
 
   @staticmethod
   def get_stderrs(bucket_estimates):
-    means = bucket_estimates.mean(axis=1)
-    num_buckets = bucket_estimates.count(axis=1)
-    rss = (bucket_estimates.subtract(means, axis=0)**2).sum(axis=1, min_count=1)
-    return np.sqrt(rss * (1. - 1. / num_buckets)), num_buckets - 1
+    stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
+    return stderrs * dof / np.sqrt(dof + 1), dof
 
   def can_be_precomputed(self):
     """If all leaf Metrics are Sum, Count or Mean, LOO can be precomputed."""

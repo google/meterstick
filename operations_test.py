@@ -1262,6 +1262,19 @@ class JackknifeTests(unittest.TestCase):
     testing.assert_frame_equal(unmelted, utils.unmelt(expected))
     unmelted.display()  # Check display() runs.
 
+  def test_jackknife_one_dof(self):
+    df = pd.DataFrame({
+        'X': range(2),
+        'cookie': [0, 0],
+    })
+    jk = operations.Jackknife('cookie', metrics.Sum('X'))
+    output = jk.compute_on(df)
+    expected = pd.DataFrame([[1., np.nan]],
+                            columns=pd.MultiIndex.from_product(
+                                [['sum(X)'], ['Value', 'Jackknife SE']],
+                                names=['Metric', None]))
+    testing.assert_frame_equal(output, expected)
+
   def test_jackknife_where(self):
     df = pd.DataFrame({
         'x': range(7),
