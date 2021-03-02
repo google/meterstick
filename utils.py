@@ -171,14 +171,14 @@ def adjust_slices_for_loo(bucket_res: pd.Series,
     ).compute_on(data, 'grp'),
   the leave-unit-1-out result should only have slices A * foo and A * bar
   because
-  1. grp B never apears in unit 1 so we shouldn't calculate leave-unit-1-out for
-    it.
+  1. grp B never appears in unit 1 so we shouldn't calculate leave-unit-1-out
+    for it.
   2. slice A * bar should be added because it's in the sum of leave-unit-1-out
     data.
   And leave-unit-2-out result should have slices A * foo, A * bar and B * bar
   because
   1. A * foo is in the leave-unit-2-out data and grp A is in the unit-2 data.
-  2. A * bar and B * bar are in the unit-2 data, though their jacknife standard
+  2. A * bar and B * bar are in the unit-2 data, though their jackknife standard
     errors will be NA because they are not in other units of data.
   In summary, to get the slices that should be present for unit i,
   1. Find all the slices in the leave-unit-i-out data.
