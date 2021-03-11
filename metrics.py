@@ -474,6 +474,8 @@ class Metric(object):
     return self.__rdiv__(other)
 
   def __pow__(self, other):
+    if isinstance(other, float) and other == 0.5:
+      return CompositeMetric(lambda x, y: x**y, 'sqrt({})', (self, other))
     return CompositeMetric(lambda x, y: x**y, '{} ^ {}', (self, other))
 
   def __rpow__(self, other):
