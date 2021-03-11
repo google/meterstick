@@ -33,15 +33,17 @@ def to_sql(table, split_by=None):
   return lambda metric: metric.to_sql(table, split_by)
 
 
-def compute_on_sql(table,
-                   split_by=None,
-                   execute=None,
-                   melted=False):
+def compute_on_sql(
+    table,
+    split_by=None,
+    execute=None,
+    melted=False):
   # pylint: disable=g-long-lambda
-  return lambda m: m.compute_on_sql(table,
-                                    split_by,
-                                    execute,
-                                    melted)
+  return lambda m: m.compute_on_sql(
+      table,
+      split_by,
+      execute,
+      melted)
   # pylint: enable=g-long-lambda
 
 
@@ -619,10 +621,10 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
     split_by,
     condition,
     100 * SAFE_DIVIDE(
-      SUM(SAFE_DIVIDE(MHRaw.`sum(click)` * MHBase.`sum(impression)`,
-          MHBase.`sum(impression)` + MHRaw.`sum(impression)`)),
-      SUM(SAFE_DIVIDE(MHBase.`sum(click)` * MHRaw.`sum(impression)`,
-          MHBase.`sum(impression)` + MHRaw.`sum(impression)`))) - 100
+      COALESCE(SUM(SAFE_DIVIDE(MHRaw.`sum(click)` * MHBase.`sum(impression)`,
+          MHBase.`sum(impression)` + MHRaw.`sum(impression)`)), 0),
+      COALESCE(SUM(SAFE_DIVIDE(MHBase.`sum(click)` * MHRaw.`sum(impression)`,
+          MHBase.`sum(impression)` + MHRaw.`sum(impression)`)), 0)) - 100
       AS `ctr MH Ratio`
   FROM MHRaw
   JOIN
@@ -685,12 +687,12 @@ def get_sql_for_mh(metric, table, split_by, global_filter, indexes,
   exclude_base_condition = ' OR '.join(exclude_base_condition)
   cond = None if metric.include_base else Filters([exclude_base_condition])
   col_tmpl = """100 * SAFE_DIVIDE(
-    SUM(SAFE_DIVIDE(
+    COALESCE(SUM(SAFE_DIVIDE(
       {raw}.%(numer)s * {base}.%(denom)s,
-      {base}.%(denom)s + {raw}.%(denom)s)),
-    SUM(SAFE_DIVIDE(
+      {base}.%(denom)s + {raw}.%(denom)s)), 0),
+    COALESCE(SUM(SAFE_DIVIDE(
       {base}.%(numer)s * {raw}.%(denom)s,
-      {base}.%(denom)s + {raw}.%(denom)s))) - 100"""
+      {base}.%(denom)s + {raw}.%(denom)s)), 0)) - 100"""
   col_tmpl = col_tmpl.format(raw=raw_table_alias, base=base_table_alias)
   columns = Columns()
   if isinstance(child, metrics.MetricList):
@@ -855,9 +857,9 @@ def get_sql_for_jackknife_or_bootstrap(metric, table, split_by, global_filter,
                          local_filter, with_data)
   se_alias = with_data.add(Datasource(se, name + 'SE'))
 
-  pt_est, with_data = get_sql_for_metric(metric.children[0], table,
-                                         split_by, global_filter, indexes,
-                                         local_filter, with_data)
+  pt_est, with_data = get_sql_for_metric(metric.children[0], table, split_by,
+                                         global_filter, indexes, local_filter,
+                                         with_data)
   pt_est_alias = with_data.add(Datasource(pt_est, name + 'PointEstimate'))
 
   columns = Columns()
@@ -912,8 +914,9 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
                                           global_filter, indexes, local_filter,
                                           with_data)
   else:
-    table, with_data = get_bootstrap_data(
-        metric, table, split_by, global_filter, local_filter, with_data)
+    table, with_data = get_bootstrap_data(metric, table, split_by,
+                                          global_filter, local_filter,
+                                          with_data)
 
   if isinstance(metric, operations.Jackknife) and metric.can_precompute:
     split_by = adjust_indexes_for_jk_fast(split_by)
@@ -943,8 +946,7 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
       columns.add(se)
       if metric.confidence:
         columns.add(Column(c.alias, 'COUNT({}) - 1', '%s dof' % c.alias_raw))
-  return Sql(
-      columns, samples_alias, groupby=groupby), with_data
+  return Sql(columns, samples_alias, groupby=groupby), with_data
 
 
 def preaggregate_if_possible(metric, table, split_by, global_filter, indexes,
