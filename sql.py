@@ -1145,11 +1145,23 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
 
 def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
                             local_filter, with_data):
+  # When there is any index added by Operation, we need adjustment.
+  if split_by == Columns(indexes):
+    return get_jackknife_data_fast_no_adjustment(metric, table, global_filter,
+                                                 indexes, local_filter,
+                                                 with_data)
+  return get_jackknife_data_fast_with_adjustment(metric, table, split_by,
+                                                 global_filter, indexes,
+                                                 local_filter, with_data)
+
+
+def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
+                                          local_filter, with_data):
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
   If all the leaf Metrics are Sum, Count or Mean, we can compute the
-  leave-one-out (LOO) estimates faster. There are two situations.
-  1. If Jackknife doesn't operate on any other Operation. Then the SQL is like
+  leave-one-out (LOO) estimates faster. If there is no index added by Operation,
+  then no adjustment for slices is needed. The query is just like
   WITH
   LOO AS (SELECT DISTINCT
     unrenamed_split_by,
@@ -1173,42 +1185,88 @@ def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
   FROM LOO
   GROUP BY unrenamed_split_by, renamed_split_by, _resample_idx)
 
-  2. If Jackknife operates on any Operation, then that Operation might add extra
-  indexes and we have to adjust the slices. See the doc for
-  utils.adjust_slices_for_loo() for more discussions. The SQL will be like
+  Args:
+    metric: An instance of operations.Jackknife.
+    table: The table we want to query from.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    indexes: The columns that we shouldn't apply any arithmetic operation.
+    local_filter: The filters that have been accumulated so far.
+    with_data: A global variable that contains all the WITH clauses we need.
+
+  Returns:
+    The alias of the table in the WITH clause that has all resampled result.
+    The global with_data which holds all datasources we need in the WITH clause.
+  """
+  all_indexes = Columns(indexes)
+  for m in metric.traverse():
+    if isinstance(m, operations.MH):
+      all_indexes.add(m.stratified_by)
+  indexes_and_unit = Columns(all_indexes).add(metric.unit)
+  where = Filters(global_filter).add(local_filter)
+  columns = Columns()
+  # columns is filled in-place in modify_descendants_for_jackknife_fast.
+  modified_jk = modify_descendants_for_jackknife_fast_no_adjustment(
+      metric, columns,
+      Filters(global_filter).add(local_filter), Filters(), all_indexes,
+      indexes_and_unit)
+  metric.children = modified_jk.children
+
+  bucket = Column(metric.unit, alias='_resample_idx')
+  columns = Columns(all_indexes).add(bucket).add(columns)
+  columns.distinct = True
+  loo_table = with_data.add(Datasource(Sql(columns, table, where=where), 'LOO'))
+  return loo_table, with_data
+
+
+def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
+                                            global_filter, indexes,
+                                            local_filter, with_data):
+  """Gets jackknife samples in a fast way for precomputable Jackknife.
+
+  If all the leaf Metrics are Sum, Count or Mean, we can compute the
+  leave-one-out (LOO) estimates faster. If there is any index added by
+  Operation, then we need to adjust the slices. See
+  utils.adjust_slices_for_loo() for more discussions. The query will look like
   WITH
   AllSlices AS (SELECT
-    unrenamed_split_by,
-    $RenamedSplitByIfAny AS renamed_split_by,
-    ARRAY_AGG(DISTINCT extra_index) AS extra_index,
-    ARRAY_AGG(DISTINCT cookie) AS cookie
-  FROM table
-  WHERE filter
-  GROUP BY split_by),
-  LOO AS (SELECT DISTINCT
     split_by,
+    ARRAY_AGG(DISTINCT extra_index) AS extra_index,
+    ARRAY_AGG(DISTINCT unit) AS unit
+  FROM $DATA
+  GROUP BY split_by),
+  UnitSliceCount AS (SELECT
+    split_by,
+    extra_index,
+    unit,
+    COUNT(*) AS ct,
+    SUM(X) AS `sum(X)`
+  FROM $DATA
+  GROUP BY split_by, condition, unit),
+  TotalCount AS (SELECT
+    split_by,
+    extra_index,
+    SUM(ct) AS ct,
+    SUM(`sum(X)`) AS `sum(X)`
+  FROM UnitSliceCount
+  GROUP BY split_by, extra_index),
+  LOO AS (SELECT
+    split_by,
+    extra_index,
     unit AS _resample_idx,
-    SUM(click) OVER (PARTITION BY split_by, platform) -
-      COALESCE(SUM(click) OVER (PARTITION BY split_by, platform, unit), 0)
-    AS `sum(click)`,
-    COUNT(click) OVER (PARTITION BY split_by, platform) -
-      COUNT(click) OVER (PARTITION BY split_by, platform, unit)
-    AS `count(click)`
+    total.`sum(X)` - COALESCE(unit.`sum(X)`, 0) AS `sum(X)`
   FROM AllSlices
   JOIN
   UNNEST (extra_index) AS extra_index
   JOIN
   UNNEST (unit) AS unit
   LEFT JOIN
-  (SELECT *, renamed_index FROM table WHERE filter)
-  USING (split_by, extra_index, unit))
-
-  If there is no filter and no index column needs to be renamed, the
-  (SELECT *, renamed_index FROM table WHERE filter) will become just 'table'.
-  Also note that we have a COALESCE around SUM. We don't need it in case #1
-  because we don't need to adjust for slices there. If the sum of a unit is NULL
-  than it shouldn't be in the LOO. We also don't need it for COUNT because the
-  COUNT(NULL) is just 0.
+  UnitSliceCount AS unit
+  USING (split_by, extra_index, unit)
+  JOIN
+  TotalCount AS total
+  USING (split_by, extra_index)
+  WHERE
+  total.ct - COALESCE(unit.ct, 0) > 0)
 
   Args:
     metric: An instance of operations.Jackknife.
@@ -1224,59 +1282,66 @@ def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
     The global with_data which holds all datasources we need in the WITH clause.
   """
   all_indexes = Columns(indexes)
-  need_slice_filling = (split_by != all_indexes)
   for m in metric.traverse():
     if isinstance(m, operations.MH):
       all_indexes.add(m.stratified_by)
   indexes_and_unit = Columns(all_indexes).add(metric.unit)
   where = Filters(global_filter).add(local_filter)
-  if need_slice_filling:
-    extra_idx = indexes_and_unit.difference(split_by)
-    unique_idx = Columns(
-        (Column('ARRAY_AGG(DISTINCT %s)' % c.expression, alias=c.alias)
-         for c in extra_idx))
-    all_slices_table = Sql(unique_idx, table, where, split_by)
-    all_slices_alias = with_data.add(Datasource(all_slices_table, 'AllSlices'))
 
-    loo_from = Datasource(all_slices_alias)
-    for c in extra_idx:
-      loo_from = loo_from.join('UNNEST ({c}) AS {c}'.format(c=c.alias))
-    renamed = [c for c in indexes_and_unit if c != c.alias]
-    if where or renamed:
-      table = Sql(
-          Columns(Column('*', auto_alias=False)).add(renamed),
-          table,
-          where=where)
-    table = loo_from.join(table, join='LEFT', using=indexes_and_unit)
-    where = None
+  extra_idx = indexes_and_unit.difference(split_by)
+  unique_idx = Columns(
+      (Column('ARRAY_AGG(DISTINCT %s)' % c.expression, alias=c.alias)
+       for c in extra_idx))
+  all_slices_table = Sql(unique_idx, table, where, split_by)
+  all_slices_alias = with_data.add(Datasource(all_slices_table, 'AllSlices'))
 
-  columns = Columns()
-  if need_slice_filling:
-    all_indexes = all_indexes.aliases
-    indexes_and_unit = indexes_and_unit.aliases
-  # columns is filled in-place in modify_descendants_for_jackknife_fast.
-  modified_jk = modify_descendants_for_jackknife_fast(
-      metric, columns, need_slice_filling,
-      Filters(global_filter).add(local_filter), Filters(), all_indexes,
-      indexes_and_unit)
+  columns_to_preagg = Columns(Column('COUNT(*)', alias='ct'))
+  columns_in_loo = Columns()
+  # columns_to_preagg and columns_in_loo are filled in-place.
+  modified_jk = modify_descendants_for_jackknife_fast_with_adjustment(
+      metric, columns_to_preagg, columns_in_loo,
+      Filters(global_filter).add(local_filter), Filters())
   metric.children = modified_jk.children
 
-  bucket = Column(metric.unit).alias if need_slice_filling else metric.unit
-  bucket = Column(bucket, alias='_resample_idx')
-  columns = Columns(all_indexes).add(bucket).add(columns)
-  columns.distinct = True
-  loo_table = with_data.add(Datasource(Sql(columns, table, where=where), 'LOO'))
+  unit_slice_ct_table = Sql(columns_to_preagg, table, where, indexes_and_unit)
+  unit_slice_ct_alias = with_data.add(
+      Datasource(unit_slice_ct_table, 'UnitSliceCount'))
+
+  total_ct_table = Sql(
+      Columns([Column(c, 'SUM({})', c) for c in columns_to_preagg.aliases]),
+      unit_slice_ct_alias,
+      groupby=indexes_and_unit.difference(metric.unit).aliases)
+  total_ct_alias = with_data.add(Datasource(total_ct_table, 'TotalCount'))
+
+  slice_in_other_units = Datasource(all_slices_alias)
+  for c in extra_idx:
+    slice_in_other_units = slice_in_other_units.join(
+        'UNNEST ({c}) AS {c}'.format(c=c.alias))
+  slice_in_other_units = slice_in_other_units.join(
+      Datasource(unit_slice_ct_alias, 'unit'),
+      using=indexes_and_unit,
+      join='LEFT')
+  slice_in_other_units = slice_in_other_units.join(
+      Datasource(total_ct_alias, 'total'), using=all_indexes)
+  slice_in_other_units_table = Sql(
+      Columns(all_indexes.aliases).add(
+          Column(Column(metric.unit).alias,
+                 alias='_resample_idx')).add(columns_in_loo),
+      slice_in_other_units, 'total.ct - COALESCE(unit.ct, 0) > 0')
+  loo_table = with_data.add(Datasource(slice_in_other_units_table, 'LOO'))
   return loo_table, with_data
 
 
-def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
-                                          global_filter, local_filter,
-                                          all_indexes, indexes_and_unit):
+def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
+                                                        global_filter,
+                                                        local_filter,
+                                                        all_indexes,
+                                                        indexes_and_unit):
   """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
 
-  See the doc of get_jackknife_data_fast() first. Here we
+  See the doc of get_jackknife_data_fast_no_adjustment() first. Here we
   1. collects the LOO columns for all Sum, Count and Mean Metrics.
-  2. Modify them in-place so when we generate SQL later, they know what column
+  2. Modify metric in-place so when we generate SQL later, they know what column
     to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
     but as we precompute LOO estimates, we need to query from a table that has
     "SUM(X) OVER (PARTITION BY split_by) -
@@ -1287,10 +1352,6 @@ def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
   3. Removes filters that have already been applied in the LOO table from leaf
     Metrics. Note that we made a copy in get_se for metric so the removal won't
     affect the metric used in point estimate computation.
-  4. For Operations, their extra_index columns appear in indexes. If any of them
-    has forbidden character in the name, it will be renamed in LOO so we have to
-    change extra_index. For example, Distribution('$Foo') will generate a column
-    $Foo AS macro_Foo in LOO so we need to replace '$Foo' with 'macro_Foo'.
 
   We need to make a copy for the Metric or in
   sumx = metrics.Sum('X')
@@ -1303,8 +1364,6 @@ def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
     metric: An instance of metrics.Metric or a child of one.
     columns: A global container for all columns we need in LOO table. It's being
       added in-place.
-    need_slice_filling: If we need to adjust for the slices. See the doc of
-      get_jackknife_data_fast().
     global_filter: The filters that can be applied to the whole Metric tree.
     local_filter: The filters that have been accumulated so far.
     all_indexes: All columns that we need to used as the group by columns in the
@@ -1328,12 +1387,8 @@ def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
       op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
       total = Column(c, op, filters=filters, partition=all_indexes)
       unit_sum = Column(c, op, filters=filters, partition=indexes_and_unit)
-      if need_slice_filling and isinstance(metric, metrics.Sum):
-        unit_sum = Column(
-            'COALESCE(%s, 0)' % unit_sum.expression, auto_alias=False)
       loo = (total - unit_sum).set_alias(metric.name)
       columns.add(loo)
-      metric.jackknife_fast_col = loo.alias
     elif isinstance(metric, metrics.Mean):
       if metric.weight:
         op = 'SUM({} * {})'
@@ -1352,19 +1407,11 @@ def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
             'SUM({})',
             filters=filters,
             partition=indexes_and_unit)
-        if need_slice_filling:
-          unit_sum = Column(
-              'COALESCE(%s, 0)' % unit_sum.expression, auto_alias=False)
-          unit_weight = Column(
-              'COALESCE(%s, 0)' % unit_weight.expression, auto_alias=False)
       else:
         total_sum = Column(
             metric.var, 'SUM({})', filters=filters, partition=all_indexes)
         unit_sum = Column(
             metric.var, 'SUM({})', filters=filters, partition=indexes_and_unit)
-        if need_slice_filling:
-          unit_sum = Column(
-              'COALESCE(%s, 0)' % unit_sum.expression, auto_alias=False)
         total_weight = Column(
             metric.var, 'COUNT({})', filters=filters, partition=all_indexes)
         unit_weight = Column(
@@ -1372,11 +1419,92 @@ def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
             'COUNT({})',
             filters=filters,
             partition=indexes_and_unit)
-
       loo = (total_sum - unit_sum) / (total_weight - unit_weight)
       loo.set_alias(metric.name)
       columns.add(loo)
-      metric.jackknife_fast_col = loo.alias
+    metric.jackknife_fast_col = loo.alias
+    return metric
+
+  new_children = []
+  for m in metric.children:
+    modified = modify_descendants_for_jackknife_fast_no_adjustment(
+        m, columns, global_filter, local_filter, all_indexes, indexes_and_unit)
+    new_children.append(modified)
+  metric.children = new_children
+  return metric
+
+
+def modify_descendants_for_jackknife_fast_with_adjustment(
+    metric, columns_to_preagg, columns_in_loo, global_filter, local_filter):
+  """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
+
+  See the doc of get_jackknife_data_fast_with_adjustment() first. Here we
+  1. collects the LOO columns for all Sum, Count and Mean Metrics.
+  2. Modify them in-place so when we generate SQL later, they know what column
+    to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
+    but as we precompute LOO estimates, we need to query from a table that has
+    "total.`sum(X)` - COALESCE(unit.`sum(X)`, 0) AS `sum(X)`". So the expression
+    of Sum('X') should now become 'SUM(`sum(X)`) AS `sum(X)`'. We add the new
+    column we need to query from as an attribute "jackknife_fast_col" to the
+    metric so get_column() could handle it correctly.
+  3. Removes filters that have already been applied in the LOO table from leaf
+    Metrics. Note that we made a copy in get_se for metric so the removal won't
+    affect the metric used in point estimate computation.
+  4. For Operations, their extra_index columns appear in indexes. If any of them
+    has forbidden character in the name, it will be renamed in LOO so we have to
+    change extra_index. For example, Distribution('$Foo') will generate a column
+    $Foo AS macro_Foo in LOO so we need to replace '$Foo' with 'macro_Foo'.
+
+  We need to make a copy for the Metric or in
+  sumx = metrics.Sum('X')
+  m1 = metrics.MetricList(sumx, where='X>1')
+  m2 = metrics.MetricList(sumx, where='X>10')
+  jk = operations.Jackknife(metrics.MetricList((m1, m2)))
+  sumx will be modified twice and the second one will overwrite the first one.
+
+  Args:
+    metric: An instance of metrics.Metric or a child of one.
+    columns_to_preagg: A global container for all metric columns we need in
+      UnitSliceCount and TotalCount tables. It's being added in-place.
+    columns_in_loo: A global container for all metric columns we need in LOO
+      table. It's being added in-place.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    local_filter: The filters that have been accumulated so far.
+
+  Returns:
+    The modified metric tree.
+  """
+  if not isinstance(metric, metrics.Metric):
+    return metric
+
+  metric = copy.deepcopy(metric)
+  local_filter = Filters(local_filter).add(metric.where)
+  tmpl = 'total.%s - COALESCE(unit.%s, 0)'
+  if isinstance(metric, (metrics.Sum, metrics.Count, metrics.Mean)):
+    filters = Filters(local_filter).remove(global_filter)
+    metric.where = filters
+    if isinstance(metric, (metrics.Sum, metrics.Count)):
+      c = metric.var
+      op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
+      col = Column(c, op, filters=filters)
+      columns_to_preagg.add(col)
+      loo = Column(tmpl % (col.alias, col.alias), alias=metric.name)
+    elif isinstance(metric, metrics.Mean):
+      if metric.weight:
+        sum_col = Column((metric.var, metric.weight),
+                         'SUM({} * {})',
+                         filters=filters)
+        weight_col = Column(metric.weight, 'SUM({})', filters=filters)
+      else:
+        sum_col = Column(metric.var, 'SUM({})', filters=filters)
+        weight_col = Column(metric.var, 'COUNT({})', filters=filters)
+
+      columns_to_preagg.add([sum_col, weight_col])
+      loo_sum = Column(tmpl % (sum_col.alias, sum_col.alias))
+      loo_weight = Column(tmpl % (weight_col.alias, weight_col.alias))
+      loo = (loo_sum / loo_weight).set_alias(metric.name)
+    columns_in_loo.add(loo)
+    metric.jackknife_fast_col = loo.alias
     return metric
 
   if isinstance(metric, operations.Operation):
@@ -1386,11 +1514,8 @@ def modify_descendants_for_jackknife_fast(metric, columns, need_slice_filling,
 
   new_children = []
   for m in metric.children:
-    modified = modify_descendants_for_jackknife_fast(m, columns,
-                                                     need_slice_filling,
-                                                     global_filter,
-                                                     local_filter, all_indexes,
-                                                     indexes_and_unit)
+    modified = modify_descendants_for_jackknife_fast_with_adjustment(
+        m, columns_to_preagg, columns_in_loo, global_filter, local_filter)
     new_children.append(modified)
   metric.children = new_children
   return metric
