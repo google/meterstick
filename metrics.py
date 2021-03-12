@@ -17,7 +17,10 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import itertools
 from typing import Any, Callable, List, Optional, Sequence, Text, Union
+
+from meterstick import sql
 from meterstick import utils
 import numpy as np
 import pandas as pd
@@ -34,11 +37,29 @@ def compute_on(df,
   # pylint: enable=g-long-lambda
 
 
+def compute_on_sql(
+    table,
+    split_by=None,
+    execute=None,
+    melted=False):
+  # pylint: disable=g-long-lambda
+  return lambda m: m.compute_on_sql(
+      table,
+      split_by,
+      execute,
+      melted)
+  # pylint: enable=g-long-lambda
+
+
+def to_sql(table, split_by=None):
+  return lambda metric: metric.to_sql(table, split_by)
+
+
 def get_extra_idx(metric):
   """Collects the extra indexes added by Operations for the metric tree.
 
   Args:
-    metric: A metrics.Metric instance.
+    metric: A Metric instance.
 
   Returns:
     A tuple of column names which are just the index of metric.compute_on(df).
@@ -52,6 +73,28 @@ def get_extra_idx(metric):
   if children_idx:
     extra_idx += list(children_idx[0])
   return tuple(extra_idx)
+
+
+def get_global_filter(metric):
+  """Collects the filters that can be applied globally to the Metric tree."""
+  global_filter = sql.Filters()
+  if metric.where:
+    global_filter.add(metric.where)
+  children_filters = [
+      set(get_global_filter(c))
+      for c in metric.children
+      if isinstance(c, Metric)
+  ]
+  if children_filters:
+    shared_filter = set.intersection(*children_filters)
+    global_filter.add(shared_filter)
+  return global_filter
+
+
+def is_operation(m):
+  """We can't use isinstance because of loop dependancy."""
+  return isinstance(m, Metric) and m.children and not isinstance(
+      m, (MetricList, CompositeMetric))
 
 
 class Metric(object):
@@ -119,9 +162,8 @@ class Metric(object):
 
   def __init__(self,
                name: Text,
-               children: Optional[Union['Metric',
-                                        Sequence[Union['Metric', int,
-                                                       float]]]] = (),
+               children: Optional[Union['Metric', Sequence[Union['Metric', int,
+                                                                 float]]]] = (),
                where: Optional[Text] = None,
                precompute=None,
                compute: Optional[Callable[[pd.DataFrame], Any]] = None,
@@ -404,9 +446,6 @@ class Metric(object):
         ms += list(m.children)
         yield m
 
-  def to_sql(self, table: Text, split_by=None):
-    raise NotImplementedError  # Will be monkey-patched in sql.py.
-
   def compute_on_sql(
       self,
       table,
@@ -435,6 +474,57 @@ class Metric(object):
     if split_by:  # Use a stable sort.
       res.sort_values(split_by, kind='mergesort', inplace=True)
     return utils.melt(res) if melted else res
+
+  def to_sql(self,
+             table: Text,
+             split_by: Optional[Union[Text, List[Text]]] = None):
+    """Generates SQL query for the metric."""
+    global_filter = get_global_filter(self)
+    indexes = sql.Columns(split_by).add(get_extra_idx(self))
+    with_data = sql.Datasources()
+    if not sql.Datasource(table).is_table:
+      table = with_data.add(sql.Datasource(table, 'Data'))
+    query, with_data = self.get_sql_and_with_clause(
+        sql.Datasource(table), sql.Columns(split_by), global_filter, indexes,
+        sql.Filters(), with_data)
+    query.with_data = with_data
+    return query
+
+  def get_sql_and_with_clause(self, table: sql.Datasource,
+                              split_by: sql.Columns, global_filter: sql.Filters,
+                              indexes: sql.Columns, local_filter: sql.Filters,
+                              with_data: sql.Datasources):
+    """Gets the SQL query for metric and its WITH clause separately.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data. Note it could be
+        different to the split_by passed to the root Metric. For example, in the
+        call of get_sql(AbsoluteChange('platform', 'tablet', Distribution(...)),
+        'country') the split_by Distribution gets will be ('country',
+        'platform') because AbsoluteChange adds an extra index.
+      global_filter: The filters that can be applied to the whole Metric tree.It
+        will be passed down all the way to the leaf Metrics and become the WHERE
+        clause in the query of root table.
+      indexes: The columns that we shouldn't apply any arithmetic operation. For
+        most of the time they are the indexes you would see in the result of
+        metric.compute_on(df).
+      local_filter: The filters that have been accumulated as we walk down the
+        metric tree. It's the collection of all filters of the ancestor Metrics
+        along the path so far. More filters might be added as we walk down to
+        the leaf Metrics. It's used there as inline filters like
+        IF(local_filter, value, NULL).
+      with_data: A global variable that contains all the WITH clauses we need.
+        It's being passed around and Metrics add the datasources they need to
+        it. It's added to the SQL instance eventually in get_sql() once we have
+        walked through the whole metric tree.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    raise ValueError('SQL generator is not implemented for %s.' % type(self))
 
   def __or__(self, fn):
     """Overwrites the '|' operator to enable pipeline chaining."""
@@ -533,6 +623,72 @@ class MetricList(Metric):
       except Exception as e:  # pylint: disable=broad-except
         print('Warning: %s failed for reason %s.' % (m.name, repr(e)))
     return res
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL query and WITH clause.
+
+    The query is constructed by
+    1. Get the query for every children metric.
+    2. If all children queries are compatible, we just collect all the columns
+      from the children and use the WHERE and GROUP BY clauses from any chldren.
+      The FROM clause is more complex. We use the largest FROM clause in
+      children.
+      See the doc of is_compatible() for its meaning.
+      If any pair of children queries are incompatible, we merge the compatible
+      children as much as possible then add the merged SQLs to with_data, join
+      them on indexes, and SELECT *.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The filters that can be applied to the whole Metric tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    children_sql = [
+        c.get_sql_and_with_clause(table, split_by, global_filter, indexes,
+                                  local_filter, with_data)[0]
+        for c in self.children
+    ]
+    incompatible_sqls = []
+    # It's O(n^2). We can do better but I don't expect metric tree to be big.
+    for child_sql in children_sql:
+      found = False
+      for target in incompatible_sqls:
+        can_merge, larger_from = sql.is_compatible(child_sql, target)
+        if can_merge:
+          target.add('columns', child_sql.columns)
+          target.from_data = larger_from
+          found = True
+          break
+      if not found:
+        incompatible_sqls.append(child_sql)
+
+    if len(incompatible_sqls) == 1:
+      return incompatible_sqls[0], with_data
+
+    columns = sql.Columns(indexes.aliases)
+    for i, table in enumerate(incompatible_sqls):
+      data = sql.Datasource(table, 'MetricListChildTable')
+      alias = with_data.add(data)
+      for c in table.columns:
+        if c not in columns:
+          columns.add(sql.Column('%s.%s' % (alias, c.alias), alias=c.alias_raw))
+      if i == 0:
+        from_data = sql.Datasource(alias)
+      else:
+        join = 'FULL' if indexes else 'CROSS'
+        from_data = from_data.join(
+            sql.Datasource(alias), join=join, using=indexes)
+    return sql.Sql(columns, from_data), with_data
 
   def to_dataframe(self, res):
     res_all = pd.concat(res, axis=1, sort=False)
@@ -693,6 +849,103 @@ class CompositeMetric(Metric):
 
     return res
 
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL query and WITH clause.
+
+    A CompositeMetric has two children and at least one of them is a Metric. The
+    query is constructed as
+    1. Get the queries for the two children.
+    2. If one child is not a Metric, which means it's a constant number, then we
+      apply the computation to the columns in the other child's SQL.
+    3. If both are Metrics and their SQLs are compatible, we zip their columns
+      and apply the computation on the column pairs.
+    4. If both are Metrics and their SQLs are incompatible, we put children SQLs
+      to with_data. Then apply the computation on column pairs and SELECT them
+      from the JOIN of the two children SQLs.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The filters that can be applied to the whole Metric tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    op = self.op
+
+    if not isinstance(self.children[0], Metric):
+      constant = self.children[0]
+      query, with_data = self.children[1].get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, local_filter, with_data)
+      query.columns = sql.Columns(
+          (c if c in indexes else op(constant, c) for c in query.columns))
+    elif not isinstance(self.children[1], Metric):
+      constant = self.children[1]
+      query, with_data = self.children[0].get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, local_filter, with_data)
+      query.columns = sql.Columns(
+          (c if c in indexes else op(c, constant) for c in query.columns))
+    else:
+      query0, with_data = self.children[0].get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, local_filter, with_data)
+      query1, with_data = self.children[1].get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, local_filter, with_data)
+      if len(query0.columns) != 1 and len(query1.columns) != 1 and len(
+          query0.columns) != len(query1.columns):
+        raise ValueError('Children Metrics have different shapes!')
+
+      compatible, larger_from = sql.is_compatible(query0, query1)
+      if compatible:
+        col0_col1 = zip(itertools.cycle(query0.columns), query1.columns)
+        if len(query1.columns) == 1:
+          col0_col1 = zip(query0.columns, itertools.cycle(query1.columns))
+        columns = sql.Columns()
+        for c0, c1 in col0_col1:
+          if c0 in indexes.aliases:
+            columns.add(c0)
+          else:
+            alias = self.name_tmpl.format(c0.alias_raw, c1.alias_raw)
+            columns.add(op(c0, c1).set_alias(alias))
+        query = query0
+        query.columns = columns
+        query.from_data = larger_from
+      else:
+        tbl0 = with_data.add(sql.Datasource(query0, 'CompositeMetricTable0'))
+        tbl1 = with_data.add(sql.Datasource(query1, 'CompositeMetricTable1'))
+        join = 'FULL' if indexes else 'CROSS'
+        from_data = sql.Join(tbl0, tbl1, join=join, using=indexes)
+        columns = sql.Columns()
+        col0_col1 = zip(itertools.cycle(query0.columns), query1.columns)
+        if len(query1.columns) == 1:
+          col0_col1 = zip(query0.columns, itertools.cycle(query1.columns))
+        for c0, c1 in col0_col1:
+          if c0 not in indexes.aliases:
+            col = op(
+                sql.Column('%s.%s' % (tbl0, c0.alias), alias=c0.alias_raw),
+                sql.Column('%s.%s' % (tbl1, c1.alias), alias=c1.alias_raw))
+            columns.add(col)
+        query = sql.Sql(sql.Columns(indexes.aliases).add(columns), from_data)
+
+    if not is_operation(self.children[0]) and not is_operation(
+        self.children[1]) and len(query.columns) == 1:
+      query.columns[0].set_alias(self.name)
+
+    if self.columns:
+      columns = query.columns.difference(indexes)
+      if len(self.columns) != len(columns):
+        raise ValueError('The length of the renaming columns is wrong!')
+      for col, rename in zip(columns, self.columns):
+        col.set_alias(rename)  # Modify in-place.
+
+    return query, with_data
+
 
 class Ratio(CompositeMetric):
   """Syntactic sugar for Sum('A') / Sum('B')."""
@@ -724,6 +977,17 @@ class SimpleMetric(Metric):
     self.kwargs = kwargs
     super(SimpleMetric, self).__init__(name, where=where)
 
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    del indexes  # unused
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    return sql.Sql(
+        self.get_sql_columns(local_filter), table, global_filter,
+        split_by), with_data
+
+  def get_sql_columns(self, local_filter):
+    raise ValueError('get_sql_columns is not implemented for %s.' % type(self))
+
 
 class Count(SimpleMetric):
   """Count estimator.
@@ -753,6 +1017,12 @@ class Count(SimpleMetric):
     return grped.nunique(**self.kwargs) if self.distinct else grped.count(
         **self.kwargs)
 
+  def get_sql_columns(self, local_filter):
+    if self.distinct:
+      return sql.Column(self.var, 'COUNT(DISTINCT {})', self.name, local_filter)
+    else:
+      return sql.Column(self.var, 'COUNT({})', self.name, local_filter)
+
 
 class Sum(SimpleMetric):
   """Sum estimator.
@@ -774,6 +1044,9 @@ class Sum(SimpleMetric):
 
   def compute_slices(self, df, split_by=None):
     return self.group(df, split_by)[self.var].sum(**self.kwargs)
+
+  def get_sql_columns(self, local_filter):
+    return sql.Column(self.var, 'SUM({})', self.name, local_filter)
 
 
 class Mean(SimpleMetric):
@@ -810,6 +1083,15 @@ class Mean(SimpleMetric):
       return super(Mean, self).compute_slices(df, split_by)
     return self.group(df, split_by)[self.var].mean(**self.kwargs)
 
+  def get_sql_columns(self, local_filter):
+    if not self.weight:
+      return sql.Column(self.var, 'AVG({})', self.name, local_filter)
+    else:
+      res = sql.Column('%s * %s' % (self.weight, self.var), 'SUM({})',
+                       'total_sum', local_filter)
+      res /= sql.Column(self.weight, 'SUM({})', 'total_weight', local_filter)
+      return res.set_alias(self.name)
+
 
 class Max(SimpleMetric):
   """Max estimator.
@@ -832,6 +1114,9 @@ class Max(SimpleMetric):
   def compute_slices(self, df, split_by=None):
     return self.group(df, split_by)[self.var].max(**self.kwargs)
 
+  def get_sql_columns(self, local_filter):
+    return sql.Column(self.var, 'MAX({})', self.name, local_filter)
+
 
 class Min(SimpleMetric):
   """Min estimator.
@@ -853,6 +1138,9 @@ class Min(SimpleMetric):
 
   def compute_slices(self, df, split_by=None):
     return self.group(df, split_by)[self.var].min(**self.kwargs)
+
+  def get_sql_columns(self, local_filter):
+    return sql.Column(self.var, 'MIN({})', self.name, local_filter)
 
 
 class Quantile(SimpleMetric):
@@ -932,6 +1220,27 @@ class Quantile(SimpleMetric):
     res.columns = [self.name_tmpl.format(self.var, c[0]) for c in res]
     return res
 
+  def get_sql_columns(self, local_filter):
+    """Get SQL columns."""
+    if self.weight:
+      raise ValueError('SQL for weighted quantile is not supported!')
+    if self.one_quantile:
+      alias = 'quantile(%s, %s)' % (self.var, self.quantile)
+      return sql.Column(
+          self.var,
+          'APPROX_QUANTILES({}, 100)[OFFSET(%s)]' % int(100 * self.quantile),
+          alias, local_filter)
+
+    query = 'APPROX_QUANTILES({}, 100)[OFFSET(%s)]'
+    quantiles = []
+    for q in self.quantile:
+      alias = 'quantile(%s, %s)' % (self.var, q)
+      if alias.startswith('0.'):
+        alias = 'point_' + alias[2:]
+      quantiles.append(
+          sql.Column(self.var, query % int(100 * q), alias, local_filter))
+    return sql.Columns(quantiles)
+
 
 class Variance(SimpleMetric):
   """Variance estimator.
@@ -973,6 +1282,23 @@ class Variance(SimpleMetric):
       return super(Variance, self).compute_slices(df, split_by)
     return self.group(df, split_by)[self.var].var(ddof=self.ddof, **self.kwargs)
 
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    if self.weight:
+      return _get_sql_for_weighted_var_or_se(self, table, split_by,
+                                             global_filter, local_filter,
+                                             with_data)
+    return super(Variance,
+                 self).get_sql_and_with_clause(table, split_by, global_filter,
+                                               indexes, local_filter, with_data)
+
+  def get_sql_columns(self, local_filter):
+    if not self.weight:
+      if self.ddof == 1:
+        return sql.Column(self.var, 'VAR_SAMP({})', self.name, local_filter)
+      else:
+        return sql.Column(self.var, 'VAR_POP({})', self.name, local_filter)
+
 
 class StandardDeviation(SimpleMetric):
   """Standard Deviation estimator.
@@ -998,8 +1324,8 @@ class StandardDeviation(SimpleMetric):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
     name_tmpl = '%s-weighted sd({})' % weight if weight else 'sd({})'
-    super(StandardDeviation, self, **kwargs).__init__(var, name, name_tmpl,
-                                                      where)
+    super(StandardDeviation, self).__init__(var, name, name_tmpl, where,
+                                            **kwargs)
 
   def compute(self, df):
     if not self.weight:
@@ -1014,6 +1340,87 @@ class StandardDeviation(SimpleMetric):
       # When there is weight, just loop through slices.
       return super(StandardDeviation, self).compute_slices(df, split_by)
     return self.group(df, split_by)[self.var].std(ddof=self.ddof, **self.kwargs)
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    if self.weight:
+      query, with_data = _get_sql_for_weighted_var_or_se(
+          self, table, split_by, global_filter, local_filter, with_data)
+      return query, with_data
+    return super(StandardDeviation,
+                 self).get_sql_and_with_clause(table, split_by, global_filter,
+                                               indexes, local_filter, with_data)
+
+  def get_sql_columns(self, local_filter):
+    if not self.weight:
+      if self.ddof == 1:
+        return sql.Column(self.var, 'STDDEV_SAMP({})', self.name, local_filter)
+      else:
+        return sql.Column(self.var, 'STDDEV_POP({})', self.name, local_filter)
+
+
+def _get_sql_for_weighted_var_or_se(metric, table, split_by, global_filter,
+                                    local_filter, with_data):
+  """Gets the SQL for weighted metrics.Variance or metrics.StandardDeviation.
+
+  For Variance the query is like
+  WITH
+  WeightedBase AS (SELECT
+    split_by,
+    weight,
+    weight * POWER(var - SAFE_DIVIDE(
+      SUM(weight * var) OVER (PARTITION BY split_by),
+      SUM(weight) OVER (PARTITION BY split_by)), 2) AS weighted_squared_diff
+  FROM table)
+  SELECT
+    split_by,
+    SAFE_DIVIDE(SUM(weighted_squared_diff), SUM(weight) - 1)
+      AS weighted_metric
+  FROM WeightedBase
+  GROUP BY split_by.
+
+  For StandardDeviation we take the square root of weighted_metric.
+
+  Args:
+    metric: An instance of metrics.Variance or metrics.StandardDeviation, with
+      weight.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    local_filter: The filters that have been accumulated so far.
+    with_data: A global variable that contains all the WITH clauses we need.
+
+  Returns:
+    The SQL instance for metric, without the WITH clause component.
+    The global with_data which holds all datasources we need in the WITH clause.
+  """
+  where = sql.Filters([metric.where, local_filter]).remove(global_filter)
+  weight = metric.weight
+  var = metric.var
+  columns = sql.Columns(split_by).add(
+      sql.Column(weight, alias=weight, filters=where))
+  total_sum = sql.Column(
+      '%s * %s' % (weight, var), 'SUM({})', filters=where, partition=split_by)
+  total_weight = sql.Column(
+      weight, 'SUM({})', filters=where, partition=split_by)
+  weighted_mean = total_sum / total_weight
+  weighted_squared_diff = sql.Column(
+      '%s * POWER(%s - %s, 2)' % (weight, var, weighted_mean.expression),
+      alias='weighted_squared_diff',
+      filters=where)
+  weighted_base_table = sql.Sql(
+      columns.add(weighted_squared_diff), table, global_filter)
+  weighted_base_table_alias = with_data.add(
+      sql.Datasource(weighted_base_table, 'WeightedBase'))
+
+  weighted_var = sql.Column('weighted_squared_diff', 'SUM({})') / sql.Column(
+      sql.Column(weight).alias, 'SUM({}) - 1')
+  if isinstance(metric, StandardDeviation):
+    weighted_var = weighted_var**0.5
+  weighted_var.set_alias(metric.name)
+  return sql.Sql(
+      weighted_var, weighted_base_table_alias,
+      groupby=split_by.aliases), with_data
 
 
 class CV(SimpleMetric):
@@ -1042,6 +1449,17 @@ class CV(SimpleMetric):
     var_grouped = self.group(df, split_by)[self.var]
     return var_grouped.std(
         ddof=self.ddof, **self.kwargs) / var_grouped.mean(**self.kwargs)
+
+  def get_sql_columns(self, local_filter):
+    if self.ddof == 1:
+      res = sql.Column(self.var, 'STDDEV_SAMP({})',
+                       self.name, local_filter) / sql.Column(
+                           self.var, 'AVG({})', self.name, local_filter)
+    else:
+      res = sql.Column(self.var, 'STDDEV_POP({})',
+                       self.name, local_filter) / sql.Column(
+                           self.var, 'AVG({})', self.name, local_filter)
+    return res.set_alias(self.name)
 
 
 class Correlation(SimpleMetric):
@@ -1105,6 +1523,14 @@ class Correlation(SimpleMetric):
     return self.group(df, split_by)[self.var].corr(
         df[self.var2], method=self.method, **self.kwargs)
 
+  def get_sql_columns(self, local_filter):
+    if self.weight:
+      raise ValueError('SQL for weighted correlation is not supported!')
+    if self.method != 'pearson':
+      raise ValueError('Only Pearson correlation is supported!')
+    return sql.Column((self.var, self.var2), 'CORR({}, {})', self.name,
+                      local_filter)
+
 
 class Cov(SimpleMetric):
   """Covariance estimator.
@@ -1151,3 +1577,19 @@ class Cov(SimpleMetric):
         ddof=self.ddof,
         aweights=df[self.weight] if self.weight else None,
         **self.kwargs)[0, 1]
+
+  def get_sql_columns(self, local_filter):
+    """Get SQL columns."""
+    if self.weight:
+      raise ValueError('SQL for weighted covariance is not supported!')
+    ddof = self.ddof
+    if ddof is None:
+      ddof = 0 if self.bias else 1
+    if ddof == 1:
+      return sql.Column((self.var, self.var2), 'COVAR_SAMP({}, {})', self.name,
+                        local_filter)
+    elif ddof == 0:
+      return sql.Column((self.var, self.var2), 'COVAR_POP({}, {})', self.name,
+                        local_filter)
+    else:
+      raise ValueError('Only ddof being 0 or 1 is supported!')

@@ -21,6 +21,7 @@ import copy
 from typing import Any, Iterable, List, Optional, Text, Tuple, Union
 from meterstick import confidence_interval_display
 from meterstick import metrics
+from meterstick import sql
 from meterstick import utils
 import numpy as np
 import pandas as pd
@@ -28,10 +29,10 @@ from scipy import stats
 
 
 class Operation(metrics.Metric):
-  """An meta-Metric that operates on a Metric instance.
+  """A special kind of Metric that operates on other Metric instance(s).
 
   The differences between Metric and Operation are
-  1. Operation must take another Metric as the child to operate on.
+  1. Operation must take other Metric(s) as the children to operate on.
   2. The name of Operation is reflected in the result differently. A Metric
     usually returns a 1D data and its name could just be used as the column.
     However, Operation often operates on MetricList and one name doesn't fit
@@ -53,8 +54,8 @@ class Operation(metrics.Metric):
       we can flush the cache correctly. The convention is extra_index comes
       after split_by. If not, you need to overwrite flush_children().
     precomputable_in_jk: Indicates whether it is possible to cut corners to
-      obtain leave-one-out (LOO) estimates for the Jackknife. This attribute
-      is True if the input df is only used in compute_on() and compute_child().
+      obtain leave-one-out (LOO) estimates for the Jackknife. This attribute is
+      True if the input df is only used in compute_on() and compute_child().
       This is necessary because Jackknife emits None as the input df for LOO
       estimation when cutting corners. The compute_on() and compute_child()
       functions know to read from cache but other functions may not know what to
@@ -149,6 +150,46 @@ class Distribution(Operation):
     total = res.groupby(level=split_by).sum() if split_by else res.sum()
     return res / total
 
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL query and WITH clause.
+
+    The query is constructed by
+    1. Get the query for the child metric.
+    2. Keep all indexing/groupby columns unchanged.
+    3. For all value columns, get
+      value / SUM(value) OVER (PARTITION BY split_by).
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    child_sql, with_data = self.children[0].get_sql_and_with_clause(
+        table, indexes, global_filter, indexes, local_filter, with_data)
+    child_table = sql.Datasource(child_sql, 'DistributionRaw')
+    child_table_alias = with_data.add(child_table)
+    groupby = sql.Columns(indexes.aliases, distinct=True)
+    columns = sql.Columns()
+    for c in child_sql.columns:
+      if c.alias in groupby:
+        continue
+      col = sql.Column(c.alias) / sql.Column(
+          c.alias, 'SUM({})', partition=split_by.aliases)
+      col.set_alias('Distribution of %s' % c.alias_raw)
+      columns.add(col)
+    return sql.Sql(groupby.add(columns), child_table_alias), with_data
+
 
 Normalize = Distribution  # An alias.
 
@@ -197,6 +238,71 @@ class CumulativeDistribution(Operation):
     dist /= df.sum()
     return dist
 
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL query and WITH clause.
+
+    The query is constructed by
+    1. Get the query for the Distribution of the child Metric.
+    2. Keep all indexing/groupby columns unchanged.
+    3. For all value columns, get the cumulative sum by summing over
+      'ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW'.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    util_metric = Distribution(self.extra_index, self.children[0])
+    child_sql, with_data = util_metric.get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data)
+    child_table = sql.Datasource(child_sql, 'CumulativeDistributionRaw')
+    child_table_alias = with_data.add(child_table)
+    columns = sql.Columns(indexes.aliases)
+    order = list(metrics.get_extra_idx(self))
+    order[0] = sql.Column(
+        _get_order_for_cum_dist(sql.Column(order[0]).alias, self),
+        auto_alias=False)
+    for c in child_sql.columns:
+      if c in columns:
+        continue
+
+      col = sql.Column(
+          c.alias,
+          'SUM({})',
+          partition=split_by.aliases,
+          order=order,
+          window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')
+      col.set_alias('Cumulative %s' % c.alias_raw)
+      columns.add(col)
+    return sql.Sql(columns, child_table_alias), with_data
+
+
+def _get_order_for_cum_dist(over, metric):
+  if metric.order:
+    over = 'CASE %s\n' % over
+    tmpl = 'WHEN %s THEN %s'
+    over += '\n'.join(
+        tmpl % (_format_to_condition(o), i) for i, o in enumerate(metric.order))
+    over += '\nELSE %s\nEND' % len(metric.order)
+  return over if metric.ascending else over + ' DESC'
+
+
+def _format_to_condition(val):
+  if isinstance(val, str) and not val.startswith('$'):
+    return '"%s"' % val
+  return '%s' % val
+
 
 class Comparison(Operation):
   """Base class for comparisons like percent/absolute change."""
@@ -212,6 +318,104 @@ class Comparison(Operation):
     self.include_base = include_base
     super(Comparison, self).__init__(child, name_tmpl, condition_column,
                                      **kwargs)
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL for PercentChange or AbsoluteChange.
+
+    The query is constructed by
+    1. Get the query for the child metric and add it to with_data, we call it
+      raw_value_table.
+    2. Query the rows that only has the base value from raw_value_table, add it
+      to with_data too. We call it base_value_table.
+    3. sql.Join the two tables and computes the change for all value columns.
+
+    For example, the query for
+    AbsoluteChange('condition', 'base_value', metrics.Mean('click'))
+    will look like this:
+
+    WITH
+    ChangeRaw AS (SELECT
+      split_by,
+      condition,
+      AVG(click) AS `mean(click)`
+    FROM $DATA
+    GROUP BY split_by, condition),
+    ChangeBase AS (SELECT
+      split_by,
+      `mean(click)`
+    FROM ChangeRaw
+    WHERE
+    condition = "base_value")
+    SELECT
+      split_by,
+      condition,
+      ChangeRaw.`mean(click)` - ChangeBase.`mean(click)`
+        AS `mean(click) Absolute Change`
+    FROM ChangeRaw
+    JOIN
+    ChangeBase
+    USING (split_by)
+    WHERE
+    condition != "base_value"
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    if not isinstance(self, (PercentChange, AbsoluteChange)):
+      raise ValueError('Not a PercentChange nor AbsoluteChange!')
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+
+    child = self.children[0]
+    cond_cols = sql.Columns(self.extra_index)
+    groupby = sql.Columns(split_by).add(cond_cols)
+    alias_tmpl = self.name_tmpl
+    raw_table_sql, with_data = child.get_sql_and_with_clause(
+        table, groupby, global_filter, indexes, local_filter, with_data)
+    raw_table = sql.Datasource(raw_table_sql, 'ChangeRaw')
+    raw_table_alias = with_data.add(raw_table)
+
+    base = self.baseline_key if isinstance(self.baseline_key,
+                                           tuple) else [self.baseline_key]
+    base_cond = ('%s = %s' % (c, _format_to_condition(b))
+                 for c, b in zip(cond_cols.aliases, base))
+    base_cond = ' AND '.join(base_cond)
+    base_value = sql.Sql(
+        sql.Columns(raw_table_sql.groupby.aliases).add(
+            raw_table_sql.columns.aliases).difference(cond_cols.aliases),
+        raw_table_alias, base_cond)
+    base_table = sql.Datasource(base_value, 'ChangeBase')
+    base_table_alias = with_data.add(base_table)
+
+    exclude_base_condition = ('%s != %s' % (c, _format_to_condition(b))
+                              for c, b in zip(cond_cols.aliases, base))
+    exclude_base_condition = ' OR '.join(exclude_base_condition)
+    cond = None if self.include_base else sql.Filters([exclude_base_condition])
+    col_tmp = '%s.{c} - %s.{c}' if isinstance(
+        self, AbsoluteChange) else 'SAFE_DIVIDE(%s.{c}, (%s.{c})) * 100 - 100'
+    columns = sql.Columns()
+    for c in raw_table_sql.columns.difference(indexes.aliases):
+      col = sql.Column(
+          col_tmp.format(c=c.alias) % (raw_table_alias, base_table_alias),
+          alias=alias_tmpl.format(c.alias_raw))
+      columns.add(col)
+    using = indexes.difference(cond_cols)
+    join = '' if using else 'CROSS'
+    return sql.Sql(
+        sql.Columns(indexes.aliases).add(columns),
+        sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
+        cond), with_data
 
 
 class PercentChange(Comparison):
@@ -403,6 +607,135 @@ class MH(Comparison):
         c.flush_children(key, split_by, where, recursive, prune)
     else:
       self.children[0].flush_children(key, split_by, where, recursive, prune)
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL query and WITH clause.
+
+    The query is constructed in a similar way to AbsoluteChange except that we
+    apply weights to adjust the change.
+
+    For example, the query for
+    MH('condition', 'base_value', 'stratified',
+                  metrics.Ratio('click', 'impression', 'ctr'))
+    will look like this:
+
+    WITH
+    MHRaw AS (SELECT
+      split_by,
+      condition,
+      stratified,
+      SUM(click) AS `sum(click)`,
+      SUM(impression) AS `sum(impression)`
+    FROM $DATA
+    GROUP BY split_by, condition, stratified),
+    MHBase AS (SELECT
+      split_by,
+      stratified,
+      `sum(click)`,
+      `sum(impression)`
+    FROM MHRaw
+    WHERE
+    condition = "base_value")
+    SELECT
+      split_by,
+      condition,
+      100 * SAFE_DIVIDE(
+        COALESCE(SUM(SAFE_DIVIDE(MHRaw.`sum(click)` * MHBase.`sum(impression)`,
+            MHBase.`sum(impression)` + MHRaw.`sum(impression)`)), 0),
+        COALESCE(SUM(SAFE_DIVIDE(MHBase.`sum(click)` * MHRaw.`sum(impression)`,
+            MHBase.`sum(impression)` + MHRaw.`sum(impression)`)), 0)) - 100
+        AS `ctr MH Ratio`
+    FROM MHRaw
+    JOIN
+    MHBase
+    USING (split_by, stratified)
+    WHERE
+    condition != "base_value"
+    GROUP BY split_by, condition
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    self.check_is_ratio()
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+
+    child = self.children[0]
+    grandchildren = []
+    if isinstance(child, metrics.MetricList):
+      for m in child:
+        grandchildren += list(m.children)
+    else:
+      grandchildren = child.children
+
+    cond_cols = sql.Columns(self.extra_index)
+    groupby = sql.Columns(split_by).add(cond_cols).add(self.stratified_by)
+    util_metric = metrics.MetricList(grandchildren)
+    util_indexes = sql.Columns(indexes).add(self.stratified_by)
+    raw_table_sql, with_data = util_metric.get_sql_and_with_clause(
+        table, groupby, global_filter, util_indexes, local_filter, with_data)
+
+    raw_table = sql.Datasource(raw_table_sql, 'MHRaw')
+    raw_table_alias = with_data.add(raw_table)
+
+    base = self.baseline_key if isinstance(self.baseline_key,
+                                           tuple) else [self.baseline_key]
+    base_cond = ('%s = %s' % (c, _format_to_condition(b))
+                 for c, b in zip(cond_cols.aliases, base))
+    base_cond = ' AND '.join(base_cond)
+    base_value = sql.Sql(
+        sql.Columns(raw_table_sql.groupby.aliases).add(
+            raw_table_sql.columns.aliases).difference(cond_cols.aliases),
+        raw_table_alias, base_cond)
+    base_table = sql.Datasource(base_value, 'MHBase')
+    base_table_alias = with_data.add(base_table)
+
+    exclude_base_condition = ('%s != %s' % (c, _format_to_condition(b))
+                              for c, b in zip(cond_cols.aliases, base))
+    exclude_base_condition = ' OR '.join(exclude_base_condition)
+    cond = None if self.include_base else sql.Filters([exclude_base_condition])
+    col_tmpl = """100 * SAFE_DIVIDE(
+      COALESCE(SUM(SAFE_DIVIDE(
+        {raw}.%(numer)s * {base}.%(denom)s,
+        {base}.%(denom)s + {raw}.%(denom)s)), 0),
+      COALESCE(SUM(SAFE_DIVIDE(
+        {base}.%(numer)s * {raw}.%(denom)s,
+        {base}.%(denom)s + {raw}.%(denom)s)), 0)) - 100"""
+    col_tmpl = col_tmpl.format(raw=raw_table_alias, base=base_table_alias)
+    columns = sql.Columns()
+    alias_tmpl = self.name_tmpl
+    if isinstance(child, metrics.MetricList):
+      for c in child:
+        columns.add(
+            sql.Column(
+                col_tmpl % {
+                    'numer': sql.Column(c.children[0].name).alias,
+                    'denom': sql.Column(c.children[1].name).alias
+                },
+                alias=alias_tmpl.format(c.name)))
+    else:
+      columns = sql.Column(
+          col_tmpl % {
+              'numer': sql.Column(child.children[0].name).alias,
+              'denom': sql.Column(child.children[1].name).alias
+          },
+          alias=alias_tmpl.format(child.name))
+
+    using = indexes.difference(cond_cols).add(self.stratified_by)
+    return sql.Sql(columns,
+                   sql.Join(raw_table_alias, base_table_alias, using=using),
+                   cond, indexes.aliases), with_data
 
 
 def get_display_fn(name,
@@ -719,6 +1052,90 @@ class MetricWithCI(Operation):
 
   def get_samples(self, df, split_by=None):
     raise NotImplementedError
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL for Jackknife or Bootstrap.
+
+    The query is constructed by
+    1. Resample the table.
+    2. Compute the child Metric on the resampled data.
+    3. Compute the standard error from #2.
+    4. Compute the point estimate from original table.
+    5. sql.Join #3 and #4.
+    6. If metric has confidence level specified, we also get the degrees of
+      freedom so we can later compute the critical value of t distribution in
+      Python.
+    7. If metric only has one child and it's PercentChange or AbsoluteChange, we
+      also get the base values for comparison. They will be used in the
+      res.display().
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    if not isinstance(self, (Jackknife, Bootstrap)):
+      raise ValueError('Not a Jackknife or Bootstrap!')
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+
+    name = 'Jackknife' if isinstance(self, Jackknife) else 'Bootstrap'
+    se, with_data = get_se(self, table, split_by, global_filter, indexes,
+                           local_filter, with_data)
+    se_alias = with_data.add(sql.Datasource(se, name + 'SE'))
+
+    pt_est, with_data = self.children[0].get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data)
+    pt_est_alias = with_data.add(sql.Datasource(pt_est, name + 'PointEstimate'))
+
+    columns = sql.Columns()
+    using = sql.Columns(se.groupby)
+    for c in pt_est.columns:
+      if c in indexes.aliases:
+        using.add(c)
+      else:
+        pt_est_col = sql.Column(
+            '%s.%s' % (pt_est_alias, c.alias), alias=c.alias_raw)
+        alias = '%s %s SE' % (c.alias_raw, name)
+        se_col = sql.Column(
+            '%s.%s' % (se_alias, sql.escape_alias(alias)), alias=alias)
+        columns.add(pt_est_col)
+        columns.add(se_col)
+        if self.confidence:
+          dof = '%s dof' % c.alias_raw
+          columns.add(
+              sql.Column(
+                  '%s.%s' % (se_alias, sql.escape_alias(dof)), alias=dof))
+
+    has_base_vals = False
+    if self.confidence:
+      child = self.children[0]
+      if len(self.children) == 1 and isinstance(
+          child, (PercentChange, AbsoluteChange)):
+        has_base_vals = True
+        base, with_data = child.children[0].get_sql_and_with_clause(
+            table,
+            sql.Columns(split_by).add(child.extra_index), global_filter,
+            indexes, local_filter, with_data)
+        base_alias = with_data.add(sql.Datasource(base, '_ShouldAlreadyExists'))
+        columns.add(
+            sql.Column('%s.%s' % (base_alias, c.alias), alias=c.alias)
+            for c in base.columns.difference(indexes))
+
+    join = 'LEFT' if using else 'CROSS'
+    from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
+    if has_base_vals:
+      from_data = from_data.join(base_alias, join=join, using=using)
+    return sql.Sql(using.add(columns), from_data), with_data
 
   def compute_on_sql(
       self,
@@ -1157,3 +1574,783 @@ class Bootstrap(MetricWithCI):
       else:
         yield ('_RESERVED', 'Bootstrap',
                self.unit), pd.concat(data_slices[i] for i in buckets_sampled)
+
+
+def get_se(metric, table, split_by, global_filter, indexes, local_filter,
+           with_data):
+  """Gets the SQL query that computes the standard error and dof if needed."""
+  global_filter = sql.Filters([global_filter, local_filter]).add(metric.where)
+  local_filter = sql.Filters()
+  metric, table, split_by, global_filter, indexes, with_data = preaggregate_if_possible(
+      metric, table, split_by, global_filter, indexes, with_data)
+
+  if isinstance(metric, Jackknife):
+    if metric.can_precompute:
+      metric = copy.deepcopy(metric)  # We'll modify the metric tree in-place.
+    table, with_data = get_jackknife_data(metric, table, split_by,
+                                          global_filter, indexes, local_filter,
+                                          with_data)
+  else:
+    table, with_data = get_bootstrap_data(metric, table, split_by,
+                                          global_filter, local_filter,
+                                          with_data)
+
+  if isinstance(metric, Jackknife) and metric.can_precompute:
+    split_by = adjust_indexes_for_jk_fast(split_by)
+    indexes = adjust_indexes_for_jk_fast(indexes)
+    # global_filter has been removed from all Metrics when precomputeing LOO.
+    global_filter = sql.Filters(None)
+
+  samples, with_data = metric.children[0].get_sql_and_with_clause(
+      table,
+      sql.Columns(split_by).add('_resample_idx'), global_filter,
+      sql.Columns(indexes).add('_resample_idx'), local_filter, with_data)
+  samples_alias = with_data.add(sql.Datasource(samples, 'ResampledResults'))
+
+  columns = sql.Columns()
+  groupby = sql.Columns(
+      (c.alias for c in samples.groupby if c != '_resample_idx'))
+  for c in samples.columns:
+    if c == '_resample_idx':
+      continue
+    elif c in indexes.aliases:
+      groupby.add(c.alias)
+    else:
+      se = sql.Column(c.alias, 'STDDEV_SAMP({})',
+                      '%s Bootstrap SE' % c.alias_raw)
+      if isinstance(metric, Jackknife):
+        adjustment = sql.Column(
+            'SAFE_DIVIDE((COUNT({c}) - 1), SQRT(COUNT({c})))'.format(c=c.alias))
+        se = (se * adjustment).set_alias('%s Jackknife SE' % c.alias_raw)
+      columns.add(se)
+      if metric.confidence:
+        columns.add(
+            sql.Column(c.alias, 'COUNT({}) - 1', '%s dof' % c.alias_raw))
+  return sql.Sql(columns, samples_alias, groupby=groupby), with_data
+
+
+def preaggregate_if_possible(metric, table, split_by, global_filter, indexes,
+                             with_data):
+  """Preaggregates data to make the resampled table small.
+
+  For Jackknife and Bootstrap over group, we may preaggegate the data to make
+  the query more efficient, though there are some requirements.
+  1. There cannot be any local filter in the metric tree, otherwise the filter
+    might need access to original rows.
+  2. All leaf Metrics need to be Sum. Techanically other Metrics could be
+    supported but Sum is the most common one in use and the easiest to handle.
+
+  If preaggregatable, we sum over all split_bys used by the metric tree, and
+  clear all the local filters.
+
+  Args:
+    metric: An instance of Jackknife or Bootstrap.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    global_filter: The filters that applied to the data for resampling..
+    indexes: The columns that we shouldn't apply any arithmetic operation.
+    with_data: A global variable that contains all the WITH clauses we need.
+
+  Returns:
+    If preaggregation is possible, we return
+      Modified metric tree.
+      The alias of the preaggregated table in the with_data.
+      Modified split_by.
+      Modified indexes.
+      with_data, with preaggregated added.
+    Otherwise, they are returned untouched.
+  """
+  if not isinstance(metric, Jackknife) and not (isinstance(metric, Bootstrap)
+                                                and metric.unit):
+    return metric, table, split_by, global_filter, indexes, with_data
+
+  all_split_by = sql.Columns([indexes, metric.unit])
+  sums = sql.Columns()
+  for m in metric.traverse():
+    if sql.Filters(m.where).remove(global_filter):
+      return metric, table, split_by, global_filter, indexes, with_data
+    if isinstance(m, metrics.SimpleMetric):
+      if not isinstance(m, metrics.Sum):
+        return metric, table, split_by, global_filter, indexes, with_data
+      else:
+        sums.add(
+            sql.Column(m.var, 'SUM({})',
+                       sql.Column('', alias=m.var).alias))
+    if isinstance(m, MH):
+      all_split_by.add(m.stratified_by)
+
+  metric = copy.deepcopy(metric)
+  metric.unit = sql.Column(metric.unit).alias
+  for m in metric.traverse():
+    m.where = None
+    if isinstance(m, Operation):
+      m.extra_index = [sql.Column(i, alias=i).alias for i in m.extra_index]
+      if isinstance(m, MH):
+        m.stratified_by = sql.Column(m.stratified_by).alias
+    if isinstance(m, metrics.Sum):
+      m.var = sql.Column('', alias=m.var).alias
+
+  preagg = sql.Sql(sums, table, global_filter, all_split_by)
+  preagg_alias = with_data.add(sql.Datasource(preagg, 'Preaggregated'))
+
+  return metric, preagg_alias, sql.Columns(
+      split_by.aliases), sql.Filters(), sql.Columns(indexes.aliases), with_data
+
+
+def adjust_indexes_for_jk_fast(indexes):
+  """For the indexes that get renamed, only keep the alias.
+
+  For a Jaccknife that only has Sum, Count and Mean as leaf Metrics, we cut the
+  corner by getting the LOO table first and select everything from it. See
+  get_jackknife_data_fast() for how the LOO is constructed. If any of the index
+  is renamed in LOO, for example, $Platform AS platform, then all the following
+  selections from LOO should select 'platform' instead of $Platform. Here we
+  adjust all these columns.
+
+  Args:
+    indexes: The columns that we shouldn't apply any arithmetic operation.
+
+  Returns:
+    Adjusted indexes. The new indexes won't have any column that needs an alias.
+  """
+  ind = list(indexes.children)
+  for i, s in enumerate(indexes):
+    if s != s.alias:
+      ind[i] = sql.Column(s.alias)
+  return sql.Columns(ind)
+
+
+def get_jackknife_data(metric, table, split_by, global_filter, indexes,
+                       local_filter, with_data):
+  table = sql.Datasource(table)
+  if not table.is_table:
+    table.alias = table.alias or 'RawData'
+    table = with_data.add(table)
+  if metric.can_precompute:
+    return get_jackknife_data_fast(metric, table, split_by, global_filter,
+                                   indexes, local_filter, with_data)
+  return get_jackknife_data_general(metric, table, split_by, global_filter,
+                                    local_filter, with_data)
+
+
+def get_jackknife_data_general(metric, table, split_by, global_filter,
+                               local_filter, with_data):
+  """Gets jackknife samples.
+
+  If the leave-one-out estimates can be precomputed, see the doc of
+  get_jackknife_data_fast().
+  Otherwise for general cases, the SQL is constructed as
+  1. if split_by is None:
+    WITH
+    Buckets AS (SELECT
+      ARRAY_AGG(DISTINCT unit) AS _jk_buckets
+    FROM $DATA
+    WHERE filter),
+    JackknifeResammpledData AS (SELECT
+      * EXCEPT (_jk_buckets)
+    FROM Buckets
+    JOIN
+    UNNEST(_jk_buckets) AS _resample_idx
+    CROSS JOIN
+    $DATA
+    WHERE
+    _resample_idx != unit AND filter)
+
+  2. if split_by is not None:
+    WITH
+    Buckets AS (SELECT
+      split_by AS _jk_split_by,
+      ARRAY_AGG(DISTINCT unit) AS _jk_buckets
+    FROM $DATA
+    WHERE filter
+    GROUP BY _jk_split_by),
+    JackknifeResammpledData AS (SELECT
+      * EXCEPT (_jk_split_by, _jk_buckets)
+    FROM Buckets
+    JOIN
+    UNNEST(_jk_buckets) AS _resample_idx
+    JOIN
+    $DATA
+    ON _jk_split_by = split_by AND _resample_idx != unit
+    WHERE filter)
+
+  Args:
+    metric: An instance of Jackknife.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    local_filter: The filters that have been accumulated so far.
+    with_data: A global variable that contains all the WITH clauses we need.
+
+  Returns:
+    The alias of the table in the WITH clause that has all resampled data.
+    The global with_data which holds all datasources we need in the WITH clause.
+  """
+  unit = metric.unit
+  unique_units = sql.Columns(
+      (sql.Column('ARRAY_AGG(DISTINCT %s)' % unit, alias='_jk_buckets')))
+  where = sql.Filters(global_filter).add(local_filter)
+  if split_by:
+    groupby = sql.Columns(
+        (sql.Column(c.expression, alias='_jk_%s' % c.alias) for c in split_by))
+    buckets = sql.Sql(unique_units, table, where, groupby)
+    buckets_alias = with_data.add(sql.Datasource(buckets, 'Buckets'))
+    jk_from = sql.Join(buckets_alias,
+                       sql.Datasource('UNNEST(_jk_buckets)', '_resample_idx'))
+    on = sql.Filters(('%s.%s = %s' % (buckets_alias, c.alias, s.expression)
+                      for c, s in zip(groupby, split_by)))
+    on.add('_resample_idx != %s' % unit)
+    jk_from = jk_from.join(table, on=on)
+    exclude = groupby.as_groupby() + ', _jk_buckets'
+    jk_data_table = sql.Sql(
+        sql.Columns(sql.Column('* EXCEPT (%s)' % exclude, auto_alias=False)),
+        jk_from,
+        where=where)
+    jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
+    jk_data_table_alias = with_data.add(jk_data_table)
+  else:
+    buckets = sql.Sql(unique_units, table, where=where)
+    buckets_alias = with_data.add(sql.Datasource(buckets, 'Buckets'))
+
+    jk_from = sql.Join(buckets_alias,
+                       sql.Datasource('UNNEST(_jk_buckets)', '_resample_idx'))
+    jk_from = jk_from.join(table, join='CROSS')
+    jk_data_table = sql.Sql(
+        sql.Column('* EXCEPT (_jk_buckets)', auto_alias=False),
+        jk_from,
+        where=sql.Filters('_resample_idx != %s' % unit).add(where))
+    jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
+    jk_data_table_alias = with_data.add(jk_data_table)
+
+  return jk_data_table_alias, with_data
+
+
+def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
+                            local_filter, with_data):
+  # When there is any index added by Operation, we need adjustment.
+  if split_by == sql.Columns(indexes):
+    return get_jackknife_data_fast_no_adjustment(metric, table, global_filter,
+                                                 indexes, local_filter,
+                                                 with_data)
+  return get_jackknife_data_fast_with_adjustment(metric, table, split_by,
+                                                 global_filter, indexes,
+                                                 local_filter, with_data)
+
+
+def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
+                                          local_filter, with_data):
+  """Gets jackknife samples in a fast way for precomputable Jackknife.
+
+  If all the leaf Metrics are Sum, Count or Mean, we can compute the
+  leave-one-out (LOO) estimates faster. If there is no index added by Operation,
+  then no adjustment for slices is needed. The query is just like
+  WITH
+  LOO AS (SELECT DISTINCT
+    unrenamed_split_by,
+    $RenamedSplitByIfAny AS renamed_split_by,
+    unit AS _resample_idx,
+    SUM(X) OVER (PARTITION BY split_by) -
+      SUM(X) OVER (PARTITION BY split_by, unit) AS `sum(X)`,
+    SAFE_DIVIDE(
+      SUM(X) OVER (PARTITION BY split_by) -
+        SUM(X) OVER (PARTITION BY split_by, unit),
+      COUNT(X) OVER (PARTITION BY split_by) -
+        COUNT(X) OVER (PARTITION BY split_by, unit)) AS `mean(X)`
+  FROM $DATA
+  WHERE
+  filters),
+  ResampledResults AS (SELECT
+    split_by,
+    _resample_idx,
+    SUM(`sum(X)`) AS `sum(X)`,
+    SUM(`mean(X)`) AS `mean(X)`
+  FROM LOO
+  GROUP BY unrenamed_split_by, renamed_split_by, _resample_idx)
+
+  Args:
+    metric: An instance of Jackknife.
+    table: The table we want to query from.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    indexes: The columns that we shouldn't apply any arithmetic operation.
+    local_filter: The filters that have been accumulated so far.
+    with_data: A global variable that contains all the WITH clauses we need.
+
+  Returns:
+    The alias of the table in the WITH clause that has all resampled result.
+    The global with_data which holds all datasources we need in the WITH clause.
+  """
+  all_indexes = sql.Columns(indexes)
+  for m in metric.traverse():
+    if isinstance(m, MH):
+      all_indexes.add(m.stratified_by)
+  indexes_and_unit = sql.Columns(all_indexes).add(metric.unit)
+  where = sql.Filters(global_filter).add(local_filter)
+  columns = sql.Columns()
+  # columns is filled in-place in modify_descendants_for_jackknife_fast.
+  modified_jk = modify_descendants_for_jackknife_fast_no_adjustment(
+      metric, columns,
+      sql.Filters(global_filter).add(local_filter), sql.Filters(), all_indexes,
+      indexes_and_unit)
+  metric.children = modified_jk.children
+
+  bucket = sql.Column(metric.unit, alias='_resample_idx')
+  columns = sql.Columns(all_indexes).add(bucket).add(columns)
+  columns.distinct = True
+  loo_table = with_data.add(
+      sql.Datasource(sql.Sql(columns, table, where=where), 'LOO'))
+  return loo_table, with_data
+
+
+def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
+                                            global_filter, indexes,
+                                            local_filter, with_data):
+  """Gets jackknife samples in a fast way for precomputable Jackknife.
+
+  If all the leaf Metrics are Sum, Count or Mean, we can compute the
+  leave-one-out (LOO) estimates faster. If there is any index added by
+  Operation, then we need to adjust the slices. See
+  utils.adjust_slices_for_loo() for more discussions. The query will look like
+  WITH
+  AllSlices AS (SELECT
+    split_by,
+    ARRAY_AGG(DISTINCT extra_index) AS extra_index,
+    ARRAY_AGG(DISTINCT unit) AS unit
+  FROM $DATA
+  GROUP BY split_by),
+  UnitSliceCount AS (SELECT
+    split_by,
+    extra_index,
+    unit,
+    COUNT(*) AS ct,
+    SUM(X) AS `sum(X)`
+  FROM $DATA
+  GROUP BY split_by, condition, unit),
+  TotalCount AS (SELECT
+    split_by,
+    extra_index,
+    SUM(ct) AS ct,
+    SUM(`sum(X)`) AS `sum(X)`
+  FROM UnitSliceCount
+  GROUP BY split_by, extra_index),
+  LOO AS (SELECT
+    split_by,
+    extra_index,
+    unit AS _resample_idx,
+    total.`sum(X)` - COALESCE(unit.`sum(X)`, 0) AS `sum(X)`
+  FROM AllSlices
+  JOIN
+  UNNEST (extra_index) AS extra_index
+  JOIN
+  UNNEST (unit) AS unit
+  LEFT JOIN
+  UnitSliceCount AS unit
+  USING (split_by, extra_index, unit)
+  JOIN
+  TotalCount AS total
+  USING (split_by, extra_index)
+  WHERE
+  total.ct - COALESCE(unit.ct, 0) > 0)
+
+  Args:
+    metric: An instance of Jackknife.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    indexes: The columns that we shouldn't apply any arithmetic operation.
+    local_filter: The filters that have been accumulated so far.
+    with_data: A global variable that contains all the WITH clauses we need.
+
+  Returns:
+    The alias of the table in the WITH clause that has all resampled result.
+    The global with_data which holds all datasources we need in the WITH clause.
+  """
+  all_indexes = sql.Columns(indexes)
+  for m in metric.traverse():
+    if isinstance(m, MH):
+      all_indexes.add(m.stratified_by)
+  indexes_and_unit = sql.Columns(all_indexes).add(metric.unit)
+  where = sql.Filters(global_filter).add(local_filter)
+
+  extra_idx = indexes_and_unit.difference(split_by)
+  unique_idx = sql.Columns(
+      (sql.Column('ARRAY_AGG(DISTINCT %s)' % c.expression, alias=c.alias)
+       for c in extra_idx))
+  all_slices_table = sql.Sql(unique_idx, table, where, split_by)
+  all_slices_alias = with_data.add(
+      sql.Datasource(all_slices_table, 'AllSlices'))
+
+  columns_to_preagg = sql.Columns(sql.Column('COUNT(*)', alias='ct'))
+  columns_in_loo = sql.Columns()
+  # columns_to_preagg and columns_in_loo are filled in-place.
+  modified_jk = modify_descendants_for_jackknife_fast_with_adjustment(
+      metric, columns_to_preagg, columns_in_loo,
+      sql.Filters(global_filter).add(local_filter), sql.Filters())
+  metric.children = modified_jk.children
+
+  unit_slice_ct_table = sql.Sql(columns_to_preagg, table, where,
+                                indexes_and_unit)
+  unit_slice_ct_alias = with_data.add(
+      sql.Datasource(unit_slice_ct_table, 'UnitSliceCount'))
+
+  total_ct_table = sql.Sql(
+      sql.Columns(
+          [sql.Column(c, 'SUM({})', c) for c in columns_to_preagg.aliases]),
+      unit_slice_ct_alias,
+      groupby=indexes_and_unit.difference(metric.unit).aliases)
+  total_ct_alias = with_data.add(sql.Datasource(total_ct_table, 'TotalCount'))
+
+  slice_in_other_units = sql.Datasource(all_slices_alias)
+  for c in extra_idx:
+    slice_in_other_units = slice_in_other_units.join(
+        'UNNEST ({c}) AS {c}'.format(c=c.alias))
+  slice_in_other_units = slice_in_other_units.join(
+      sql.Datasource(unit_slice_ct_alias, 'unit'),
+      using=indexes_and_unit,
+      join='LEFT')
+  slice_in_other_units = slice_in_other_units.join(
+      sql.Datasource(total_ct_alias, 'total'), using=all_indexes)
+  slice_in_other_units_table = sql.Sql(
+      sql.Columns(all_indexes.aliases).add(
+          sql.Column(sql.Column(metric.unit).alias,
+                     alias='_resample_idx')).add(columns_in_loo),
+      slice_in_other_units, 'total.ct - COALESCE(unit.ct, 0) > 0')
+  loo_table = with_data.add(sql.Datasource(slice_in_other_units_table, 'LOO'))
+  return loo_table, with_data
+
+
+def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
+                                                        global_filter,
+                                                        local_filter,
+                                                        all_indexes,
+                                                        indexes_and_unit):
+  """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
+
+  See the doc of get_jackknife_data_fast_no_adjustment() first. Here we
+  1. collects the LOO columns for all Sum, Count and Mean Metrics.
+  2. Modify metric in-place so when we generate SQL later, they know what column
+    to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
+    but as we precompute LOO estimates, we need to query from a table that has
+    "SUM(X) OVER (PARTITION BY split_by) -
+      SUM(X) OVER (PARTITION BY split_by, unit) AS `sum(X)`". So the expression
+    of Sum('X') should now become 'SUM(`sum(X)`) AS `sum(X)`'. So we replace the
+    metric with Sum('sum(X)', metric.name) so it could handle it correctly.
+  3. Removes filters as they have already been applied in the LOO table. Note
+    that we made a copy in get_se for metric so the removal won't affect the
+    metric used in point estimate computation.
+
+  We need to make a copy for the Metric or in
+  sumx = metrics.Sum('X')
+  m1 = metrics.MetricList(sumx, where='X>1')
+  m2 = metrics.MetricList(sumx, where='X>10')
+  jk = Jackknife(metrics.MetricList((m1, m2)))
+  sumx will be modified twice and the second one will overwrite the first one.
+
+  Args:
+    metric: An instance of metrics.Metric or a child of one.
+    columns: A global container for all columns we need in LOO table. It's being
+      added in-place.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    local_filter: The filters that have been accumulated so far.
+    all_indexes: All columns that we need to used as the group by columns in the
+      LOO table. It includes split_by, all extra_idx added by Operations, and
+      the stratified_by column of MH, if exists.
+    indexes_and_unit: all_indexes plus the unit of Jackknife.
+
+  Returns:
+    The modified metric tree.
+  """
+  if not isinstance(metric, metrics.Metric):
+    return metric
+
+  metric = copy.deepcopy(metric)
+  local_filter = sql.Filters(local_filter).add(metric.where)
+  metric.where = None
+  if isinstance(metric, (metrics.Sum, metrics.Count, metrics.Mean)):
+    filters = sql.Filters(local_filter).remove(global_filter)
+    if isinstance(metric, (metrics.Sum, metrics.Count)):
+      c = metric.var
+      op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
+      total = sql.Column(c, op, filters=filters, partition=all_indexes)
+      unit_sum = sql.Column(c, op, filters=filters, partition=indexes_and_unit)
+      loo = (total - unit_sum).set_alias(metric.name)
+      columns.add(loo)
+    elif isinstance(metric, metrics.Mean):
+      if metric.weight:
+        op = 'SUM({} * {})'
+        total_sum = sql.Column((metric.var, metric.weight),
+                               op,
+                               filters=filters,
+                               partition=all_indexes)
+        unit_sum = sql.Column((metric.var, metric.weight),
+                              op,
+                              filters=filters,
+                              partition=indexes_and_unit)
+        total_weight = sql.Column(
+            metric.weight, 'SUM({})', filters=filters, partition=all_indexes)
+        unit_weight = sql.Column(
+            metric.weight,
+            'SUM({})',
+            filters=filters,
+            partition=indexes_and_unit)
+      else:
+        total_sum = sql.Column(
+            metric.var, 'SUM({})', filters=filters, partition=all_indexes)
+        unit_sum = sql.Column(
+            metric.var, 'SUM({})', filters=filters, partition=indexes_and_unit)
+        total_weight = sql.Column(
+            metric.var, 'COUNT({})', filters=filters, partition=all_indexes)
+        unit_weight = sql.Column(
+            metric.var,
+            'COUNT({})',
+            filters=filters,
+            partition=indexes_and_unit)
+      loo = (total_sum - unit_sum) / (total_weight - unit_weight)
+      loo.set_alias(metric.name)
+      columns.add(loo)
+    return metrics.Sum(loo.alias, metric.name)
+
+  new_children = []
+  for m in metric.children:
+    modified = modify_descendants_for_jackknife_fast_no_adjustment(
+        m, columns, global_filter, local_filter, all_indexes, indexes_and_unit)
+    new_children.append(modified)
+  metric.children = new_children
+  return metric
+
+
+def modify_descendants_for_jackknife_fast_with_adjustment(
+    metric, columns_to_preagg, columns_in_loo, global_filter, local_filter):
+  """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
+
+  See the doc of get_jackknife_data_fast_with_adjustment() first. Here we
+  1. collects the LOO columns for all Sum, Count and Mean Metrics.
+  2. Modify them in-place so when we generate SQL later, they know what column
+    to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
+    but as we precompute LOO estimates, we need to query from a table that has
+    "total.`sum(X)` - COALESCE(unit.`sum(X)`, 0) AS `sum(X)`". So the expression
+    of Sum('X') should now become 'SUM(`sum(X)`) AS `sum(X)`'. So we replace the
+    metric with Sum('sum(X)', metric.name) so it could handle it correctly.
+  3. Removes filters as they have already been applied in the LOO table. Note
+    that we made a copy in get_se for metric so the removal won't affect the
+    metric used in point estimate computation.
+  4. For Operations, their extra_index columns appear in indexes. If any of them
+    has forbidden character in the name, it will be renamed in LOO so we have to
+    change extra_index. For example, Distribution('$Foo') will generate a column
+    $Foo AS macro_Foo in LOO so we need to replace '$Foo' with 'macro_Foo'.
+
+  We need to make a copy for the Metric or in
+  sumx = metrics.Sum('X')
+  m1 = metrics.MetricList(sumx, where='X>1')
+  m2 = metrics.MetricList(sumx, where='X>10')
+  jk = Jackknife(metrics.MetricList((m1, m2)))
+  sumx will be modified twice and the second one will overwrite the first one.
+
+  Args:
+    metric: An instance of metrics.Metric or a child of one.
+    columns_to_preagg: A global container for all metric columns we need in
+      UnitSliceCount and TotalCount tables. It's being added in-place.
+    columns_in_loo: A global container for all metric columns we need in LOO
+      table. It's being added in-place.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    local_filter: The filters that have been accumulated so far.
+
+  Returns:
+    The modified metric tree.
+  """
+  if not isinstance(metric, metrics.Metric):
+    return metric
+
+  metric = copy.deepcopy(metric)
+  local_filter = sql.Filters(local_filter).add(metric.where)
+  metric.where = None
+  tmpl = 'total.%s - COALESCE(unit.%s, 0)'
+  if isinstance(metric, (metrics.Sum, metrics.Count, metrics.Mean)):
+    filters = sql.Filters(local_filter).remove(global_filter)
+    if isinstance(metric, (metrics.Sum, metrics.Count)):
+      c = metric.var
+      op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
+      col = sql.Column(c, op, filters=filters)
+      columns_to_preagg.add(col)
+      loo = sql.Column(tmpl % (col.alias, col.alias), alias=metric.name)
+    elif isinstance(metric, metrics.Mean):
+      if metric.weight:
+        sum_col = sql.Column((metric.var, metric.weight),
+                             'SUM({} * {})',
+                             filters=filters)
+        weight_col = sql.Column(metric.weight, 'SUM({})', filters=filters)
+      else:
+        sum_col = sql.Column(metric.var, 'SUM({})', filters=filters)
+        weight_col = sql.Column(metric.var, 'COUNT({})', filters=filters)
+
+      columns_to_preagg.add([sum_col, weight_col])
+      loo_sum = sql.Column(tmpl % (sum_col.alias, sum_col.alias))
+      loo_weight = sql.Column(tmpl % (weight_col.alias, weight_col.alias))
+      loo = (loo_sum / loo_weight).set_alias(metric.name)
+    columns_in_loo.add(loo)
+    return metrics.Sum(loo.alias, metric.name)
+
+  if isinstance(metric, Operation):
+    metric.extra_index = sql.Columns(metric.extra_index).aliases
+    if isinstance(metric, MH):
+      metric.stratified_by = sql.Column(metric.stratified_by).alias
+
+  new_children = []
+  for m in metric.children:
+    modified = modify_descendants_for_jackknife_fast_with_adjustment(
+        m, columns_to_preagg, columns_in_loo, global_filter, local_filter)
+    new_children.append(modified)
+  metric.children = new_children
+  return metric
+
+
+def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
+                       with_data):
+  """Gets metric.n_replicates bootstrap resamples.
+
+  The SQL is constructed as
+  1. if metric.unit is None:
+    WITH
+    BootstrapRandomRows AS (SELECT
+      *,
+      filter AS _bs_filter,
+      ROW_NUMBER() OVER (PARTITION BY _resample_idx, filter) AS _bs_row_number,
+      CEILING(RAND() * COUNT(*) OVER (PARTITION BY _resample_idx, filter))
+        AS _bs_random_row_number,
+      $RenamedSplitByIfAny AS renamed_split_by,
+    FROM table
+    JOIN
+    UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS _resample_idx),
+    BootstrapRandomChoices AS (SELECT
+      b.* EXCEPT (_bs_row_number, _bs_filter)
+    FROM (SELECT
+      split_by,
+      _resample_idx,
+      _bs_filter,
+      _bs_random_row_number AS _bs_row_number
+    FROM BootstrapRandomRows) AS a
+    JOIN
+    BootstrapRandomRows AS b
+    USING (split_by, _resample_idx, _bs_row_number, _bs_filter)
+    WHERE
+    _bs_filter),
+  The filter parts are optional.
+
+  2. if metric.unit is not None:
+    WITH
+    Candidates AS (SELECT
+      split_by,
+      ARRAY_AGG(DISTINCT unit) AS unit,
+      COUNT(DISTINCT unit) AS _bs_length
+    FROM table
+    WHERE global_filter
+    GROUP BY split_by),
+    BootstrapRandomChoices AS (SELECT
+      split_by,
+      _bs_idx,
+      unit[ORDINAL(CAST(CEILING(RAND() * _bs_length) AS INT64))] AS unit
+    FROM Candidates
+    JOIN
+    UNNEST(unit)
+    JOIN
+    UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS _bs_idx),
+    BootstrapResammpledData AS (SELECT
+      *
+    FROM BootstrapRandomChoices
+    LEFT JOIN
+    table
+    USING (split_by, unit)
+    WHERE global_filter)
+
+  Args:
+    metric: An instance of Bootstrap.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    global_filter: The filters that can be applied to the whole Metric tree.
+    local_filter: The filters that have been accumulated so far.
+    with_data: A global variable that contains all the WITH clauses we need.
+
+  Returns:
+    The alias of the table in the WITH clause that has all resampled data.
+    The global with_data which holds all datasources we need in the WITH clause.
+  """
+  original_table = table
+  table = sql.Datasource(table)
+  if not table.is_table:
+    table.alias = table.alias or 'RawData'
+    table = with_data.add(table)
+  replicates = sql.Datasource(
+      'UNNEST(GENERATE_ARRAY(1, %s))' % metric.n_replicates, '_resample_idx')
+  where = sql.Filters(global_filter).add(local_filter)
+  if metric.unit is None:
+    columns = sql.Columns(sql.Column('*', auto_alias=False))
+    partition = split_by.expressions + ['_resample_idx']
+    if where:
+      columns.add(sql.Column(str(where), alias='_bs_filter'))
+      partition.append(str(where))
+    row_number = sql.Column(
+        'ROW_NUMBER()', alias='_bs_row_number', partition=partition)
+    length = sql.Column('COUNT(*)', partition=partition)
+    random_row_number = sql.Column('RAND()') * length
+    random_row_number = sql.Column(
+        'CEILING(%s)' % random_row_number.expression,
+        alias='_bs_random_row_number')
+    columns.add((row_number, random_row_number))
+    columns.add((i for i in split_by if i != i.alias))
+    random_choice_table = sql.Sql(columns, sql.Join(table, replicates))
+    random_choice_table_alias = with_data.add(
+        sql.Datasource(random_choice_table, 'BootstrapRandomRows'))
+
+    using = sql.Columns(partition).add('_bs_row_number').difference(str(where))
+    excludes = ['_bs_row_number']
+    if where:
+      excludes.append('_bs_filter')
+      using.add('_bs_filter')
+    random_rows = sql.Sql(
+        sql.Columns(using).difference('_bs_row_number').add(
+            sql.Column('_bs_random_row_number', alias='_bs_row_number')),
+        random_choice_table_alias)
+    random_rows = sql.Datasource(random_rows, 'a')
+    resampled = random_rows.join(
+        sql.Datasource(random_choice_table_alias, 'b'), using=using)
+    table = sql.Sql(
+        sql.Column('b.* EXCEPT (%s)' % ', '.join(excludes), auto_alias=False),
+        resampled,
+        where='_bs_filter' if where else None)
+    table = with_data.add(sql.Datasource(table, 'BootstrapRandomChoices'))
+  else:
+    unit = metric.unit
+    unit_alias = sql.Column(unit).alias
+    columns = (sql.Column('ARRAY_AGG(DISTINCT %s)' % unit, alias=unit),
+               sql.Column('COUNT(DISTINCT %s)' % unit, alias='_bs_length'))
+    units = sql.Sql(columns, table, where, split_by)
+    units_alias = with_data.add(sql.Datasource(units, 'Candidates'))
+    rand_samples = sql.Column(
+        '%s[ORDINAL(CAST(CEILING(RAND() * _bs_length) AS INT64))]' % unit_alias,
+        alias=unit_alias)
+
+    sample_table = sql.Sql(
+        sql.Columns(split_by.aliases).add('_resample_idx').add(rand_samples),
+        sql.Join(units_alias,
+                 sql.Datasource('UNNEST(%s)' % unit_alias)).join(replicates))
+    sample_table_alias = with_data.add(
+        sql.Datasource(sample_table, 'BootstrapRandomChoices'))
+
+    table = original_table
+    renamed = [i for i in sql.Columns(split_by).add(unit) if i != i.alias]
+    if renamed or unit != unit_alias:
+      table = sql.Sql(
+          sql.Columns(sql.Column('*', auto_alias=False)).add(renamed),
+          table,
+          where=where)
+    bs_data = sql.Sql(
+        sql.Column('*', auto_alias=False),
+        sql.Join(
+            sample_table_alias,
+            table,
+            join='LEFT',
+            using=sql.Columns(split_by.aliases).add(unit)),
+        where=where)
+    bs_data = sql.Datasource(bs_data, 'BootstrapResammpledData')
+    table = with_data.add(bs_data)
+
+  return table, with_data
