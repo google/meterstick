@@ -979,6 +979,12 @@ class CompositeMetric(unittest.TestCase):
     self.assertEqual(output, 36)
     self.assertEqual(metric.name, 'sum(X) ^ 2')
 
+  def test_sqrt(self):
+    metric = metrics.Sum('Y')**0.5
+    output = metric.compute_on(self.df, return_dataframe=False)
+    self.assertEqual(output, 2)
+    self.assertEqual(metric.name, 'sqrt(sum(Y))')
+
   def test_rpow(self):
     metric = 2**metrics.Sum('X')
     output = metric.compute_on(self.df, return_dataframe=False)

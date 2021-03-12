@@ -340,15 +340,19 @@ class Column(SqlComponent):
     return self.__rdiv__(other)
 
   def __pow__(self, other):
+    if isinstance(other, float) and other == 0.5:
+      return Column(
+          'SAFE.SQRT({})'.format(self.expression),
+          alias='sqrt(%s)' % self.alias_raw)
     return Column(
-        'POWER({}, {})'.format(self.expression,
-                               getattr(other, 'expression', other)),
+        'SAFE.POWER({}, {})'.format(self.expression,
+                                    getattr(other, 'expression', other)),
         alias='%s ^ %s' % (self.alias_raw, get_alias(other)))
 
   def __rpow__(self, other):
     alias = '%s ^ %s' % (get_alias(other), self.alias_raw)
     return Column(
-        'POWER({}, {})'.format(
+        'SAFE.POWER({}, {})'.format(
             getattr(other, 'expression', other), self.expression),
         alias=alias)
 
