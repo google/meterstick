@@ -789,7 +789,7 @@ def get_display_fn(name,
         formatting string. For example, '{:.2%}' would have the same effect as
           'percent'. By default, Value is in absolute form and Ratio in percent.
       sort_by: In the form of
-        [{'column': ('CI_Lower', 'Metric Foo'), 'ascending': False}},
+        [{'column': ('CI_Lower', 'Metric Foo'), 'ascending': False},
          {'column': 'Dim Bar': 'order': ['Logged-in', 'Logged-out']}]. 'column'
            is the column to sort by. If you want to sort by a metric, use
            (field, metric name) where field could be 'Ratio', 'Value',
