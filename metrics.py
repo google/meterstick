@@ -1051,6 +1051,47 @@ class Sum(SimpleMetric):
     return sql.Column(self.var, 'SUM({})', self.name, local_filter)
 
 
+class Dot(SimpleMetric):
+  """Inner product estimator.
+
+  Attributes:
+    var1: The first column in the inner product.
+    var2: The second column in the inner product.
+    normalize: If to normalize by the length.
+    name: Name of the Metric.
+    where: A string that will be passed to df.query() as a prefilter.
+    kwargs: Other kwargs passed to pd.DataFrame.sum() or .mean(). And all other
+      attributes inherited from SimpleMetric.
+  """
+
+  def __init__(self,
+               var1: Text,
+               var2: Text,
+               normalize=False,
+               name: Optional[Text] = None,
+               where: Optional[Text] = None,
+               **kwargs):
+    self.var2 = var2
+    self.normalize = normalize
+    name_tmpl = ('mean({} * %s)' if normalize else 'sum({} * %s)') % var2
+    super(Dot, self).__init__(var1, name, name_tmpl, where, **kwargs)
+
+  def compute_slices(self, df, split_by=None):
+    if not split_by:
+      prod = (df[self.var] * df[self.var2])
+      return prod.mean(**self.kwargs) if self.normalize else prod.sum(
+          **self.kwargs)
+    df['_meterstick_dot_helper'] = df[self.var] * df[self.var2]
+    grped = df.groupby(split_by)['_meterstick_dot_helper']
+    res = grped.mean() if self.normalize else grped.sum()
+    df.drop('_meterstick_dot_helper', axis=1, inplace=True)
+    return res
+
+  def get_sql_columns(self, local_filter):
+    tmpl = 'AVG({} * {})' if self.normalize else 'SUM({} * {})'
+    return sql.Column((self.var, self.var2), tmpl, self.name, local_filter)
+
+
 class Mean(SimpleMetric):
   """Mean estimator.
 

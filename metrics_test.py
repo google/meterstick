@@ -200,6 +200,64 @@ class SimpleMetricTest(unittest.TestCase):
     expected.set_index('grp', append=True, inplace=True)
     testing.assert_frame_equal(output, expected)
 
+  def test_dot_not_df(self):
+    metric = metrics.Dot('X', 'Y')
+    output = metric.compute_on(self.df, return_dataframe=False)
+    self.assertEqual(output, sum(self.df.X * self.df.Y))
+
+  def test_dot_split_by_not_df(self):
+    metric = metrics.Dot('X', 'Y')
+    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
+    self.df['X * Y'] = self.df.X * self.df.Y
+    expected = self.df.groupby('grp')['X * Y'].sum()
+    expected.name = 'sum(X * Y)'
+    testing.assert_series_equal(output, expected)
+
+  def test_dot_where(self):
+    metric = metrics.Dot('X', 'Y', where='grp == "A"')
+    output = metric.compute_on(self.df, return_dataframe=False)
+    d = self.df.query('grp == "A"')
+    self.assertEqual(output, sum(d.X * d.Y))
+
+  def test_dot_unmelted(self):
+    metric = metrics.Dot('X', 'Y')
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame({'sum(X * Y)': [sum(self.df.X * self.df.Y)]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_dot_normalized(self):
+    metric = metrics.Dot('X', 'Y', True)
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame({'mean(X * Y)': [(self.df.X * self.df.Y).mean()]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_dot_melted(self):
+    metric = metrics.Dot('X', 'Y')
+    output = metric.compute_on(self.df, melted=True)
+    expected = pd.DataFrame({'Value': [sum(self.df.X * self.df.Y)]},
+                            index=['sum(X * Y)'])
+    expected.index.name = 'Metric'
+    testing.assert_frame_equal(output, expected)
+
+  def test_dot_split_by_unmelted(self):
+    metric = metrics.Dot('X', 'Y')
+    output = metric.compute_on(self.df, 'grp')
+    expected = pd.DataFrame({'sum(X * Y)': [5, 45]}, index=['A', 'B'])
+    expected.index.name = 'grp'
+    testing.assert_frame_equal(output, expected)
+
+  def test_dot_split_by_melted(self):
+    metric = metrics.Dot('X', 'Y')
+    output = metric.compute_on(self.df, 'grp', melted=True)
+    expected = pd.DataFrame({
+        'Value': [5, 45],
+        'grp': ['A', 'B']
+    },
+                            index=['sum(X * Y)', 'sum(X * Y)'])
+    expected.index.name = 'Metric'
+    expected.set_index('grp', append=True, inplace=True)
+    testing.assert_frame_equal(output, expected)
+
   def test_mean_not_df(self):
     metric = metrics.Mean('X')
     output = metric.compute_on(self.df, return_dataframe=False)
