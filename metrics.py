@@ -41,13 +41,15 @@ def compute_on_sql(
     table,
     split_by=None,
     execute=None,
-    melted=False):
+    melted=False,
+):
   # pylint: disable=g-long-lambda
   return lambda m: m.compute_on_sql(
       table,
       split_by,
       execute,
-      melted)
+      melted,
+  )
   # pylint: enable=g-long-lambda
 
 
@@ -451,16 +453,20 @@ class Metric(object):
       table,
       split_by=None,
       execute=None,
-      melted=False):
-    """Generates SQL query and executes on the specified engine."""
-    query = str(self.to_sql(table, split_by))
+      melted=False,
+      mode=None,
+  ):
+    """Generates and executes SQL query, and process the return DataFrame."""
+    del mode  # Used in Operation
     split_by = [split_by] if isinstance(split_by, str) else split_by
+    query = str(self.to_sql(table, split_by))
+    res = execute(query)
+    return self.postcompute_sql(res, split_by, melted)
+
+  def postcompute_sql(self, res, split_by, melted):
+    """Manipulates the output of SQL execution to a better format."""
     extra_idx = list(get_extra_idx(self))
     indexes = split_by + extra_idx if split_by else extra_idx
-    if execute:
-      res = execute(query)
-    else:
-      raise ValueError('Unrecognized SQL engine!')
     # We replace '$' with 'macro_' in the generated SQL. To recover the names,
     # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
     # orignal names. So we set index using the replaced names then reset index
