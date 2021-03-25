@@ -1332,7 +1332,7 @@ class JackknifeTests(unittest.TestCase):
     with mock.patch.object(
         sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
       jk.compute_on(df)
-      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_called_once()
       mock_fn.assert_has_calls([mock.call(df, [])])
 
   def test_internal_caching_with_two_identical_jackknifes(self):
@@ -1347,7 +1347,7 @@ class JackknifeTests(unittest.TestCase):
     with mock.patch.object(
         sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
       m.compute_on(df)
-      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_called_once()
 
   def test_internal_caching_with_two_different_jackknifes(self):
     df = pd.DataFrame({
@@ -1421,7 +1421,7 @@ class JackknifeTests(unittest.TestCase):
     with mock.patch.object(
         sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
       jk.compute_on(df, 'grp')
-      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_called_once()
       mock_fn.assert_has_calls([mock.call(df, ['grp'])])
 
   def test_jackknife_with_count_distinct(self):
@@ -1537,7 +1537,7 @@ class JackknifeTests(unittest.TestCase):
     with mock.patch.object(
         sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
       jk.compute_on(df)
-      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_called_once()
       mock_fn.assert_has_calls([mock.call(df, ['condition'])])
 
   def test_monkey_patched_compute_slices_recovered_with_operation(self):
@@ -1593,7 +1593,7 @@ class JackknifeTests(unittest.TestCase):
     with mock.patch.object(
         sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
       jk.compute_on(df, 'grp')
-      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_called_once()
       mock_fn.assert_has_calls([mock.call(df, ['grp', 'condition'])])
 
   def test_internal_caching_with_operation_cleaned_up(self):
