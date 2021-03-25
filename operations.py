@@ -85,6 +85,20 @@ class Operation(metrics.Metric):
                                                    str) else extra_index or []
     self.precomputable_in_jk = True
 
+  def split_data(self, df, split_by=None):
+    """If vectorization is unavailable, split the data returned by children."""
+    if isinstance(self, MetricWithCI):
+      for s in super(Operation, self).split_data(df, split_by):
+        yield s
+    else:
+      if not split_by:
+        yield self.compute_child(df, self.extra_index), None
+      else:
+        child = self.compute_child(df, split_by + self.extra_index)
+        keys, indices = list(zip(*child.groupby(split_by).groups.items()))
+        for i, idx in enumerate(indices):
+          yield child.loc[idx.unique()].droplevel(split_by), keys[i]
+
   def compute_child(self,
                     df: pd.DataFrame,
                     split_by=None,
@@ -217,16 +231,6 @@ class CumulativeDistribution(Operation):
     self.ascending = ascending
     super(CumulativeDistribution,
           self).__init__(child, 'Cumulative Distribution of {}', over, **kwargs)
-
-  def split_data(self, df, split_by=None):
-    """Caches the result for the whole df instead of many slices."""
-    if not split_by:
-      yield self.compute_child(df, self.extra_index), None
-    else:
-      child = self.compute_child(df, split_by + self.extra_index)
-      keys, indices = list(zip(*child.groupby(split_by).groups.items()))
-      for i, idx in enumerate(indices):
-        yield child.loc[idx.unique()].droplevel(split_by), keys[i]
 
   def compute(self, df):
     if self.order:
