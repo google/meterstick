@@ -1119,7 +1119,9 @@ class JackknifeTests(unittest.TestCase):
   count_x0 = metrics.Sum('X') / metrics.Mean('X')
   count_x1 = metrics.Count('X')
   count_x2 = metrics.Metric('count_ground_truth', compute=lambda x: x.X.count())
-  metric = metrics.MetricList((count_x0, count_x1, count_x2))
+  dot1 = metrics.Dot('X', 'X')
+  dot2 = metrics.Dot('X', 'X', True)
+  metric = metrics.MetricList((count_x0, count_x1, count_x2, dot1, dot2))
   change = operations.AbsoluteChange('condition', 'foo', metric)
   jk = operations.Jackknife('cookie', metric)
   jk_change = operations.Jackknife('cookie', change)
@@ -1128,21 +1130,25 @@ class JackknifeTests(unittest.TestCase):
     df = pd.DataFrame({'X': np.arange(0, 3, 0.5), 'cookie': [1, 2, 2, 1, 2, 2]})
     unmelted = self.jk.compute_on(df)
     expected = pd.DataFrame(
-        [[6., 1.] * 3],
-        columns=pd.MultiIndex.from_product(
-            [['sum(X) / mean(X)', 'count(X)', 'count_ground_truth'],
-             ['Value', 'Jackknife SE']],
-            names=['Metric', None]))
+        [[6., 1.] * 3 + [(df.X**2).sum(), 4.625, (df.X**2).mean(), 0.875]],
+        columns=pd.MultiIndex.from_product([[
+            'sum(X) / mean(X)', 'count(X)', 'count_ground_truth', 'sum(X * X)',
+            'mean(X * X)'
+        ], ['Value', 'Jackknife SE']],
+                                           names=['Metric', None]))
     testing.assert_frame_equal(unmelted, expected)
 
     melted = self.jk.compute_on(df, melted=True)
     expected = pd.DataFrame(
         data={
-            'Value': [6.] * 3,
-            'Jackknife SE': [1.] * 3
+            'Value': [6.] * 3 + [(df.X**2).sum(), (df.X**2).mean()],
+            'Jackknife SE': [1, 1, 1, 4.625, 0.875]
         },
         columns=['Value', 'Jackknife SE'],
-        index=['sum(X) / mean(X)', 'count(X)', 'count_ground_truth'])
+        index=[
+            'sum(X) / mean(X)', 'count(X)', 'count_ground_truth', 'sum(X * X)',
+            'mean(X * X)'
+        ])
     expected.index.name = 'Metric'
     testing.assert_frame_equal(melted, expected)
 
@@ -1318,11 +1324,9 @@ class JackknifeTests(unittest.TestCase):
     self.assertEqual(6, count_x.get_cached('foo'))
     self.assertTrue(jk.in_cache('foo'))
 
-  def test_internal_caching(self):
-    sum_x = metrics.Sum('X')
-    count_x = sum_x / metrics.Mean('X')
-    metric = metrics.MetricList((sum_x, count_x))
-    jk = operations.Jackknife('cookie', metric)
+  def test_precompute_sum(self):
+    m = metrics.Sum('X')
+    jk = operations.Jackknife('cookie', m)
     df = pd.DataFrame({
         'X': range(6),
         'cookie': [1, 2, 3, 1, 2, 3],
@@ -1330,7 +1334,82 @@ class JackknifeTests(unittest.TestCase):
     # Don't use autospec=True. It conflicts with wraps.
     # https://bugs.python.org/issue31807
     with mock.patch.object(
-        sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
+        m, 'compute_through', wraps=m.compute_through) as mock_fn:
+      jk.compute_on(df)
+      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_has_calls([mock.call(df, [])])
+
+  def test_precompute_mean(self):
+    m = metrics.Mean('X')
+    jk = operations.Jackknife('cookie', m)
+    df = pd.DataFrame({
+        'X': range(6),
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    # Don't use autospec=True. It conflicts with wraps.
+    # https://bugs.python.org/issue31807
+    with mock.patch.object(
+        m, 'compute_through', wraps=m.compute_through) as mock_fn:
+      jk.compute_on(df)
+      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_has_calls([mock.call(df, [])])
+
+  def test_precompute_weighted_mean(self):
+    m = metrics.Mean('X', 'X')
+    jk = operations.Jackknife('cookie', m)
+    df = pd.DataFrame({
+        'X': range(6),
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    # Don't use autospec=True. It conflicts with wraps.
+    # https://bugs.python.org/issue31807
+    with mock.patch.object(
+        m, 'compute_through', wraps=m.compute_through) as mock_fn:
+      jk.compute_on(df)
+      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_has_calls([mock.call(df, [])])
+
+  def test_precompute_count(self):
+    m = metrics.Count('X')
+    jk = operations.Jackknife('cookie', m)
+    df = pd.DataFrame({
+        'X': range(6),
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    # Don't use autospec=True. It conflicts with wraps.
+    # https://bugs.python.org/issue31807
+    with mock.patch.object(
+        m, 'compute_through', wraps=m.compute_through) as mock_fn:
+      jk.compute_on(df)
+      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_has_calls([mock.call(df, [])])
+
+  def test_precompute_dot(self):
+    m = metrics.Dot('X', 'X')
+    jk = operations.Jackknife('cookie', m)
+    df = pd.DataFrame({
+        'X': range(6),
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    # Don't use autospec=True. It conflicts with wraps.
+    # https://bugs.python.org/issue31807
+    with mock.patch.object(
+        m, 'compute_through', wraps=m.compute_through) as mock_fn:
+      jk.compute_on(df)
+      self.assertEqual(1, mock_fn.call_count)
+      mock_fn.assert_has_calls([mock.call(df, [])])
+
+  def test_precompute_dot_normalized(self):
+    m = metrics.Dot('X', 'X', True)
+    jk = operations.Jackknife('cookie', m)
+    df = pd.DataFrame({
+        'X': range(6),
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    # Don't use autospec=True. It conflicts with wraps.
+    # https://bugs.python.org/issue31807
+    with mock.patch.object(
+        m, 'compute_through', wraps=m.compute_through) as mock_fn:
       jk.compute_on(df)
       mock_fn.assert_called_once()
       mock_fn.assert_has_calls([mock.call(df, [])])

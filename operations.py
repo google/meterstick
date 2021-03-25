@@ -1220,8 +1220,8 @@ def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
   def precompute_loo(self, df, split_by=None):
     """Precomputes leave-one-out (LOO) results to make Jackknife faster.
 
-    For Sum, Count and Mean, it's possible to compute the LOO estimates in a
-    vectorized way. For Sum and Count, we can get the LOO estimates by
+    For Sum, Count, Dot and Mean, it's possible to compute the LOO estimates in
+    a vectorized way. For Sum and Count, we can get the LOO estimates by
     subtracting the sum/count of each bucket from the total. Here we precompute
     and cache the LOO results.
 
@@ -1268,14 +1268,14 @@ def get_mean_monkey_patch_fn(unit, original_split_by):
     original_split_by: The split_by passed to Jackknife().compute_on().
 
   Returns:
-    A function that can be monkey patched to Sum/Count.compute_slices().
+    A function that can be monkey patched to Mean.compute_slices().
   """
 
   def precompute_loo(self, df, split_by=None):
     """Precomputes leave-one-out (LOO) results to make Jackknife faster.
 
-    For Sum, Count and Mean, it's possible to compute the LOO estimates in a
-    vectorized way. LOO mean is just LOO sum / LOO count. Here we precompute
+    For Sum, Count, Dot and Mean, it's possible to compute the LOO estimates in
+    a vectorized way. LOO mean is just LOO sum / LOO count. Here we precompute
     and cache the LOO results.
 
     Args:
@@ -1336,6 +1336,76 @@ def get_mean_monkey_patch_fn(unit, original_split_by):
   return precompute_loo
 
 
+def get_dot_monkey_patch_fn(unit, original_split_by, original_compute):
+  """Gets a function that can be monkey patched to Dot.compute_slices.
+
+  Args:
+    unit: The column whose levels define the jackknife buckets.
+    original_split_by: The split_by passed to Jackknife().compute_on().
+    original_compute: The compute_slices() of Dot. We will monkey patch it.
+
+  Returns:
+    A function that can be monkey patched to Dot.compute_slices().
+  """
+
+  def precompute_loo(self, df, split_by=None):
+    """Precomputes leave-one-out (LOO) results to make Jackknife faster.
+
+    For Sum, Count, Dot and Mean, it's possible to compute the LOO estimates in
+    a vectorized way. Dot is the Sum of the product of two columns, so similarly
+    to Sum, we can get the LOO estimates by subtracting the sum of each bucket
+    from the total. Here we precompute and cache the LOO results.
+
+    Args:
+      self: The Dot instance callling this function.
+      df: The DataFrame passed to Mean.compute_slies().
+      split_by: The split_by passed to Mean.compute_slies().
+
+    Returns:
+      Same as what normal Dot.compute_slies() would have returned.
+    """
+    data = df.copy()
+    split_by_with_unit = [unit] + split_by if split_by else [unit]
+    if not self.normalize:
+      total = original_compute(self, df, split_by)
+      each_bucket = original_compute(self, df, split_by_with_unit)
+      each_bucket = utils.adjust_slices_for_loo(each_bucket, original_split_by)
+      loo = total - each_bucket
+      if split_by:
+        # total - each_bucket might put the unit as the innermost level, but we
+        # want the unit as the outermost level.
+        loo = loo.reorder_levels(split_by_with_unit)
+    else:
+      prod = '_meterstick_dot_prod'
+      data[prod] = data[self.var] * data[self.var2]
+      total_sum = self.group(data, split_by)[prod].sum()
+      bucket_sum = self.group(data, split_by_with_unit)[prod].sum()
+      bucket_sum = utils.adjust_slices_for_loo(bucket_sum, original_split_by)
+      total_ct = self.group(data, split_by)[prod].count()
+      bucket_ct = self.group(data, split_by_with_unit)[prod].count()
+      bucket_ct = utils.adjust_slices_for_loo(bucket_ct, original_split_by)
+      loo_sum = total_sum - bucket_sum
+      loo_ct = total_ct - bucket_ct
+      loo = loo_sum / loo_ct
+      total = total_sum / total_ct
+      if split_by:
+        loo = loo.reorder_levels(split_by_with_unit)
+
+    buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
+    key = utils.CacheKey(('_RESERVED', 'Jackknife', unit), self.cache_key.where,
+                         [unit] + split_by)
+    self.save_to_cache(key, loo)
+    self.tmp_cache_keys.add(key)
+    for bucket in buckets:
+      key = utils.CacheKey(('_RESERVED', 'Jackknife', unit, bucket),
+                           self.cache_key.where, split_by)
+      self.save_to_cache(key, loo.loc[bucket])
+      self.tmp_cache_keys.add(key)
+    return total
+
+  return precompute_loo
+
+
 def save_to_cache_for_jackknife(self, key, val, split_by=None):
   """Used to monkey patch the save_to_cache() during Jackknife.precompute().
 
@@ -1382,8 +1452,8 @@ class Jackknife(MetricWithCI):
       Additionally, a display() function will be bound to the result so you can
       visualize the confidence interval nicely in Colab and Jupyter notebook.
     children: A tuple of a Metric whose result we jackknife on.
-    can_precompute: If all leaf Metrics are Sum, Count, and Mean, then we can
-      cut the corner to compute leave-one-out estimates.
+    can_precompute: If all leaf Metrics are Sum, Count, Dot, and Mean, then we
+      can cut the corner to compute leave-one-out estimates.
     And all other attributes inherited from Operation.
   """
 
@@ -1404,8 +1474,8 @@ class Jackknife(MetricWithCI):
   def precompute(self, df, split_by=None):
     """Caches point estimate and leave-one-out (LOO) results for Sum/Count/Mean.
 
-    For Sum, Count and Mean, it's possible to compute the LOO estimates in a
-    vectorized way. For Sum and Count, we can get the LOO estimates
+    For Sum, Count, Dot and Mean, it's possible to compute the LOO estimates in
+    a vectorized way. For Sum and Count, we can get the LOO estimates
     by subtracting the sum/count of each bucket from the total. For Mean, LOO
     mean is LOO sum / LOO count. So we can monkey patch the compute_slices() of
     the Metrics to cache the LOO results under certain keys when we precompute
@@ -1421,6 +1491,7 @@ class Jackknife(MetricWithCI):
     original_sum_compute_slices = metrics.Sum.compute_slices
     original_ct_compute_slices = metrics.Count.compute_slices
     original_mean_compute_slices = metrics.Mean.compute_slices
+    original_dot_compute_slices = metrics.Dot.compute_slices
     original_save_to_cache = metrics.Metric.save_to_cache
     try:
       metrics.Sum.compute_slices = get_sum_ct_monkey_patch_fn(
@@ -1429,6 +1500,7 @@ class Jackknife(MetricWithCI):
           self.unit, split_by, original_ct_compute_slices)
       metrics.Mean.compute_slices = get_mean_monkey_patch_fn(
           self.unit, split_by)
+      metrics.Dot.compute_slices = get_dot_monkey_patch_fn(self.unit, split_by, original_dot_compute_slices)
       metrics.Metric.save_to_cache = save_to_cache_for_jackknife
       cache_key = self.cache_key or self.RESERVED_KEY
       cache_key = ('_RESERVED', 'jk', cache_key, self.unit)
@@ -1437,6 +1509,7 @@ class Jackknife(MetricWithCI):
       metrics.Sum.compute_slices = original_sum_compute_slices
       metrics.Count.compute_slices = original_ct_compute_slices
       metrics.Mean.compute_slices = original_mean_compute_slices
+      metrics.Dot.compute_slices = original_dot_compute_slices
       metrics.Metric.save_to_cache = original_save_to_cache
     return df
 
@@ -1521,12 +1594,12 @@ class Jackknife(MetricWithCI):
     return stderrs * dof / np.sqrt(dof + 1), dof
 
   def can_be_precomputed(self):
-    """If all leaf Metrics are Sum, Count or Mean, LOO can be precomputed."""
+    """If all leaf Metrics are Sum/Count/Dot/Mean, LOO can be precomputed."""
     for m in self.traverse():
       if isinstance(m, Operation) and not m.precomputable_in_jk:
         return False
       if not m.children and not isinstance(
-          m, (metrics.Sum, metrics.Count, metrics.Mean)):
+          m, (metrics.Sum, metrics.Count, metrics.Mean, metrics.Dot)):
         return False
       if isinstance(m, metrics.Count) and m.distinct:
         return False
@@ -1700,8 +1773,8 @@ def preaggregate_if_possible(metric, table, split_by, global_filter, indexes,
 def adjust_indexes_for_jk_fast(indexes):
   """For the indexes that get renamed, only keep the alias.
 
-  For a Jaccknife that only has Sum, Count and Mean as leaf Metrics, we cut the
-  corner by getting the LOO table first and select everything from it. See
+  For a Jaccknife that only has Sum, Count, Dot and Mean as leaf Metrics, we cut
+  the corner by getting the LOO table first and select everything from it. See
   get_jackknife_data_fast() for how the LOO is constructed. If any of the index
   is renamed in LOO, for example, $Platform AS platform, then all the following
   selections from LOO should select 'platform' instead of $Platform. Here we
@@ -1841,7 +1914,7 @@ def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
                                           local_filter, with_data):
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
-  If all the leaf Metrics are Sum, Count or Mean, we can compute the
+  If all the leaf Metrics are Sum, Count, Dot or Mean, we can compute the
   leave-one-out (LOO) estimates faster. If there is no index added by Operation,
   then no adjustment for slices is needed. The query is just like
   WITH
@@ -1906,7 +1979,7 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
                                             local_filter, with_data):
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
-  If all the leaf Metrics are Sum, Count or Mean, we can compute the
+  If all the leaf Metrics are Sum, Count, Dot or Mean, we can compute the
   leave-one-out (LOO) estimates faster. If there is any index added by
   Operation, then we need to adjust the slices. See
   utils.adjust_slices_for_loo() for more discussions. The query will look like
@@ -2026,7 +2099,7 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
   """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
 
   See the doc of get_jackknife_data_fast_no_adjustment() first. Here we
-  1. collects the LOO columns for all Sum, Count and Mean Metrics.
+  1. collects the LOO columns for all Sum, Count, Dot and Mean Metrics.
   2. Modify metric in-place so when we generate SQL later, they know what column
     to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
     but as we precompute LOO estimates, we need to query from a table that has
@@ -2065,15 +2138,15 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
   metric = copy.deepcopy(metric)
   local_filter = sql.Filters(local_filter).add(metric.where)
   metric.where = None
-  if isinstance(metric, (metrics.Sum, metrics.Count, metrics.Mean)):
+  if isinstance(metric,
+                (metrics.Sum, metrics.Count, metrics.Mean, metrics.Dot)):
     filters = sql.Filters(local_filter).remove(global_filter)
     if isinstance(metric, (metrics.Sum, metrics.Count)):
       c = metric.var
       op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
       total = sql.Column(c, op, filters=filters, partition=all_indexes)
       unit_sum = sql.Column(c, op, filters=filters, partition=indexes_and_unit)
-      loo = (total - unit_sum).set_alias(metric.name)
-      columns.add(loo)
+      loo = (total - unit_sum)
     elif isinstance(metric, metrics.Mean):
       if metric.weight:
         op = 'SUM({} * {})'
@@ -2105,8 +2178,28 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
             filters=filters,
             partition=indexes_and_unit)
       loo = (total_sum - unit_sum) / (total_weight - unit_weight)
-      loo.set_alias(metric.name)
-      columns.add(loo)
+    else:
+      total_sum = sql.Column((metric.var, metric.var2),
+                             'SUM({} * {})',
+                             filters=filters,
+                             partition=all_indexes)
+      unit_sum = sql.Column((metric.var, metric.var2),
+                            'SUM({} * {})',
+                            filters=filters,
+                            partition=indexes_and_unit)
+      loo = total_sum - unit_sum
+      if metric.normalize:
+        total_ct = sql.Column((metric.var, metric.var2),
+                              'COUNT({} * {})',
+                              filters=filters,
+                              partition=all_indexes)
+        unit_ct = sql.Column((metric.var, metric.var2),
+                             'COUNT({} * {})',
+                             filters=filters,
+                             partition=indexes_and_unit)
+        loo = (total_sum - unit_sum) / (total_ct - unit_ct)
+    loo.set_alias(metric.name)
+    columns.add(loo)
     return metrics.Sum(loo.alias, metric.name)
 
   new_children = []
@@ -2123,7 +2216,7 @@ def modify_descendants_for_jackknife_fast_with_adjustment(
   """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
 
   See the doc of get_jackknife_data_fast_with_adjustment() first. Here we
-  1. collects the LOO columns for all Sum, Count and Mean Metrics.
+  1. collects the LOO columns for all Sum, Count, Dot and Mean Metrics.
   2. Modify them in-place so when we generate SQL later, they know what column
     to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
     but as we precompute LOO estimates, we need to query from a table that has
