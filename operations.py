@@ -85,6 +85,103 @@ class Operation(metrics.Metric):
                                                    str) else extra_index or []
     self.precomputable_in_jk = True
 
+  def compute_on_sql(
+      self,
+      table,
+      split_by=None,
+      execute=None,
+      melted=False,
+      mode=None):
+    """Computes self in pure SQL or a mixed of SQL and Python.
+
+    For Operations, there are two ways to compute the result in SQL, one is
+    computing everything in SQL, the other is compute the child Metric in SQL
+    then the rest in Python. We call them 'sql' and 'mixed' modes. If self is a
+    nested Operation (an Operation on an Operation), then two modes also apply
+    to how the child is computed.
+    By default `mode` is None, we try the 'sql' mode first, if it's not
+    implemented, then we try the 'mixed' mode. The logic is applied recursively
+    in the mixed mode too, namely, we try to compute the child in the 'sql' mode
+    if fail we turn to the 'mixed' mode. Otherwise if `mode` is explicitly
+    given, we only try that mode.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      melted: Whether to transform the result to long format.
+      mode: Whether to compute in pure SQL. It can be 'sql' or 'mixed'. For most
+        cases we recommend not to set it and rely on the default handling.
+
+    Returns:
+      A pandas DataFrame. It's the computeation of self in SQL.
+    """
+    if mode and mode.lower() not in ('sql', 'mixed'):
+      raise ValueError('Unrecognized execution mode!')
+    split_by = [split_by] if isinstance(split_by, str) else split_by or []
+    if not mode:
+      try:
+        return self.compute_on_sql_sql_mode(table, split_by, execute, melted)
+      except NotImplementedError:
+        return self.compute_on_sql_mixed_mode(table, split_by, execute, melted)
+    if mode.lower() == 'sql':
+      return self.compute_on_sql_sql_mode(table, split_by, execute, melted)
+    return self.compute_on_sql_mixed_mode(table, split_by, execute, melted,
+                                          True)
+
+  def compute_on_sql_sql_mode(self,
+                              table,
+                              split_by=None,
+                              execute=None,
+                              melted=False):
+    try:
+      return super(Operation, self).compute_on_sql(
+          table, split_by, execute=execute, melted=melted)
+    except NotImplementedError as e:
+      raise NotImplementedError(
+          'Please see the root cause of the failure above. '
+          "compute_on_sql(..., mode='mixed') might help.") from e
+    except Exception as e:  # pylint: disable=broad-except
+      raise Exception(
+          "Please see the root cause of the failure above. If it's caused by "
+          'the query being too complex or SQL generator not implemented, you '
+          "can try compute_on_sql(..., mode='mixed').") from e
+
+  def compute_on_sql_mixed_mode(self,
+                                table,
+                                split_by,
+                                execute,
+                                melted,
+                                recursive=False):
+    children = []
+    for c in self.children:
+      children.append(
+          c.compute_on_sql(table, split_by + self.extra_index, execute=execute))
+    if len(children) == 1:
+      children = children[0]
+    try:
+      res = self.compute_on_children(children, split_by)
+    except NotImplementedError:
+      result = []
+      slices = []
+      for d, i in super(Operation, self).split_data(children, split_by):
+        result.append(self.compute_with_split_by(d, split_by, i))
+        slices.append(i)
+        res = pd.concat(result, keys=slices, names=split_by, sort=False)
+    return self.manipulate(res, melted)
+
+  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+    to_split = split_by + self.extra_index
+    res = self.compute_child(df, to_split)
+    try:
+      return self.compute_on_children(res, split_by)
+    except NotImplementedError:
+      # Iterate the df returned by children and call compute().
+      return super(Operation, self).compute_slices(df, split_by)
+
+  def compute_on_children(self, child, split_by):
+    raise NotImplementedError
+
   def split_data(self, df, split_by=None):
     """If vectorization is unavailable, split the data returned by children."""
     if isinstance(self, MetricWithCI):
@@ -158,11 +255,9 @@ class Distribution(Operation):
     super(Distribution, self).__init__(child, 'Distribution of {}', over,
                                        **kwargs)
 
-  def compute_slices(self, df, split_by=None):
-    lvls = split_by + self.extra_index if split_by else self.extra_index
-    res = self.compute_child(df, lvls)
-    total = res.groupby(level=split_by).sum() if split_by else res.sum()
-    return res / total
+  def compute_on_children(self, child, split_by):
+    total = child.groupby(level=split_by).sum() if split_by else child.sum()
+    return child / total
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -447,16 +542,12 @@ class PercentChange(Comparison):
           self).__init__(condition_column, baseline_key, child, include_base,
                          '{} Percent Change', **kwargs)
 
-  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+  def compute_on_children(self, child, split_by):
+    level = None
     if split_by:
-      to_split = list(split_by) + self.extra_index
       level = self.extra_index[0] if len(
           self.extra_index) == 1 else self.extra_index
-    else:
-      to_split = self.extra_index
-      level = None
-    res = self.compute_child(df, to_split)
-    res = (res / res.xs(self.baseline_key, level=level) - 1) * 100
+    res = (child / child.xs(self.baseline_key, level=level) - 1) * 100
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
@@ -489,19 +580,15 @@ class AbsoluteChange(Comparison):
           self).__init__(condition_column, baseline_key, child, include_base,
                          '{} Absolute Change', **kwargs)
 
-  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+  def compute_on_children(self, child, split_by):
+    level = None
     if split_by:
-      to_split = list(split_by) + self.extra_index
       level = self.extra_index[0] if len(
           self.extra_index) == 1 else self.extra_index
-    else:
-      to_split = self.extra_index
-      level = None
-    res = self.compute_child(df, to_split)
     # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
-    res = res - res.xs(self.baseline_key, level=level)
+    res = child - child.xs(self.baseline_key, level=level)
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
@@ -554,15 +641,26 @@ class MH(Comparison):
                         metrics.CompositeMetric) or metric.op(2.0, 2) != 1:
         raise ValueError('MH only makes sense on ratio Metrics.')
 
-  def compute_one_metric(self, metric, df, split_by=None):
+  def compute_one_metric(self,
+                         metric,
+                         df,
+                         split_by=None,
+                         mode='python',
+                         execute=None):
     """Computes MH statistics for one Metric."""
+    if mode.lower() not in ('python', 'sql'):
+      raise ValueError('Unrecognized mode!')
     mh_metric = metrics.MetricList(metric.children)
     numer = metric.children[0].name
     denom = metric.children[1].name
-    df_all = mh_metric.compute_on(
-        df,
-        split_by + self.extra_index + self.stratified_by,
-        cache_key=self.cache_key or self.RESERVED_KEY)
+    if mode.lower() == 'python':
+      df_all = mh_metric.compute_on(
+          df,
+          split_by + self.extra_index + self.stratified_by,
+          cache_key=self.cache_key or self.RESERVED_KEY)
+    else:
+      df_all = mh_metric.compute_on_sql(
+          df, split_by + self.extra_index + self.stratified_by, execute=execute)
     level = self.extra_index[0] if len(
         self.extra_index) == 1 else self.extra_index
     df_baseline = df_all.xs(self.baseline_key, level=level)
@@ -597,6 +695,19 @@ class MH(Comparison):
           sort=False)
     else:
       return self.compute_one_metric(child, df, split_by)
+
+  def compute_on_sql_mixed_mode(self, table, split_by, execute, melted):
+    child = self.children[0]
+    if isinstance(child, metrics.MetricList):
+      res = pd.concat([
+          self.compute_one_metric(m, table, split_by, 'sql', execute)
+          for m in child
+      ],
+                      axis=1,
+                      sort=False)
+    else:
+      res = self.compute_one_metric(child, table, split_by, 'sql', execute)
+    return self.manipulate(res, melted)
 
   def flush_children(self,
                      key=None,
@@ -980,11 +1091,20 @@ class MetricWithCI(Operation):
                     melted: bool = False,
                     return_dataframe: bool = True,
                     split_by: Optional[List[Text]] = None,
-                    df=None):
+                    df=None,
+                    mode='python',
+                    execute=None):
     """Computes point estimates and returns it with stderrs or CI range."""
+    del return_dataframe  # unused
+    if mode.lower() not in ('python', 'sql'):
+      raise ValueError('Unrecognized mode!')
     if self.where:
       df = df.query(self.where)
-    point_est = self.compute_child(df, split_by, melted=True)
+    if mode == 'python':
+      point_est = self.compute_child(df, split_by, melted=True)
+    else:
+      point_est = self.children[0].compute_on_sql(
+          df, split_by, melted=True, execute=execute)
     res = point_est.join(std)
 
     if self.confidence:
@@ -1002,10 +1122,13 @@ class MetricWithCI(Operation):
       if len(self.children) == 1 and isinstance(
           self.children[0], (PercentChange, AbsoluteChange)):
         change = self.children[0]
+        indexes = [i for i in indexes if i not in change.extra_index]
         to_split = (
             split_by + change.extra_index if split_by else change.extra_index)
-        indexes = [i for i in indexes if i not in change.extra_index]
-        raw = change.compute_child(df, to_split)
+        if mode == 'python':
+          raw = change.compute_child(df, to_split)
+        else:
+          raw = change.children[0].compute_on_sql(df, to_split, execute=execute)
         raw.columns = [change.name_tmpl.format(c) for c in raw.columns]
         raw = utils.melt(raw)
         raw.columns = ['_base_value']
@@ -1035,6 +1158,7 @@ class MetricWithCI(Operation):
 
   @staticmethod
   def get_stderrs(bucket_estimates):
+    print(bucket_estimates)
     dof = bucket_estimates.count(axis=1) - 1
     return bucket_estimates.std(1), dof
 
@@ -1141,16 +1265,10 @@ class MetricWithCI(Operation):
       from_data = from_data.join(base_alias, join=join, using=using)
     return sql.Sql(using.add(columns), from_data), with_data
 
-  def compute_on_sql(
-      self,
-      table,
-      split_by=None,
-      execute=None,
-      melted=False):
-    res = super(MetricWithCI, self).compute_on_sql(
-        table,
-        split_by,
-        execute)
+  def compute_on_sql_sql_mode(self, table, split_by, execute, melted):
+    """Computes self in a SQL query."""
+    res = super(MetricWithCI, self).compute_on_sql_sql_mode(
+        table, split_by, execute=execute)
     sub_dfs = []
     if self.confidence:
       # raw contains the base values passed to comparison.
@@ -1206,6 +1324,19 @@ class MetricWithCI(Operation):
     if self.confidence:
       res = self.add_display_fn(res, indexes, melted, raw)
     return res
+
+  def compute_on_sql_mixed_mode(self, table, split_by, execute, melted):
+    if table.upper().startswith('SELECT'):
+      table = '(%s)' % table
+    replicates = self.get_replicates_sql(table, split_by, execute)
+    bucket_estimates = pd.concat(replicates, axis=1, sort=False)
+    res = self.get_stderrs_or_ci_half_width(bucket_estimates)
+    res = self.manipulate(res, melted)
+    return self.final_compute(res, melted, True, split_by, table, 'sql',
+                              execute)
+
+  def get_replicates_sql(self, table, split_by, execute):
+    raise NotImplementedError
 
 
 def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
@@ -1609,6 +1740,25 @@ class Jackknife(MetricWithCI):
         return False
     return True
 
+  def get_replicates_sql(self, table, split_by, execute):
+    slice_and_units = 'SELECT DISTINCT %s FROM %s' % (
+        ','.join(split_by + [self.unit]), table)
+    slice_and_units = execute(slice_and_units)
+    unit_in_sql = '%s' if pd.api.types.is_numeric_dtype(
+        slice_and_units[self.unit]) else '"%s"'
+    loo_sql = 'SELECT * FROM %s WHERE %s != ' % (table, self.unit)
+    replicates = []
+    for unit in slice_and_units[self.unit].unique():
+      data = loo_sql + (unit_in_sql % unit)
+      for c in self.children:
+        try:
+          loo = c.compute_on_sql(data, split_by, execute=execute, melted=True)
+        except NotImplementedError:
+          loo = c.compute_on_sql(
+              data, split_by, execute=execute, melted=True, mode='mixed')
+      replicates.append(loo)
+    return replicates
+
 
 class Bootstrap(MetricWithCI):
   """Class for Bootstrap estimates of standard errors.
@@ -1651,6 +1801,29 @@ class Bootstrap(MetricWithCI):
       else:
         yield ('_RESERVED', 'Bootstrap',
                self.unit), pd.concat(data_slices[i] for i in buckets_sampled)
+
+  def get_replicates_sql(self, table, split_by, execute):
+    global_filter = metrics.get_global_filter(self)
+    with_data = sql.Datasources()
+    indexes = sql.Columns(split_by).add(metrics.get_extra_idx(self))
+    util_metric = copy.deepcopy(self)
+    util_metric.n_replicates = 1
+    util_metric.confidence = None
+    if not sql.Datasource(table).is_table:
+      table = with_data.add(sql.Datasource(table, 'Data'))
+    resampled, with_data = get_bootstrap_data(util_metric, table,
+                                              sql.Columns(split_by),
+                                              global_filter, sql.Filters(),
+                                              with_data)
+    query, with_data = self.children[0].get_sql_and_with_clause(
+        sql.Datasource(resampled), sql.Columns(split_by), global_filter,
+        indexes, sql.Filters(), with_data)
+    query.with_data = with_data
+    replicates = []
+    for _ in range(self.n_replicates):
+      resampled = execute(str(query))
+      replicates.append(self.postcompute_on_sql(resampled, split_by, True))
+    return replicates
 
 
 def get_se(metric, table, split_by, global_filter, indexes, local_filter,

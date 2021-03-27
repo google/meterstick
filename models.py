@@ -21,8 +21,19 @@ from typing import List, Optional, Sequence, Text, Union
 
 from meterstick import metrics
 from meterstick import operations
+from meterstick import sql
 import pandas as pd
 from sklearn import linear_model
+
+
+def get_n_vars(m):
+  if isinstance(m, Model):
+    return m.k
+  if isinstance(m, (operations.Operation, metrics.MetricList)):
+    return sum(get_n_vars(c) for c in m.children)
+  if isinstance(m, metrics.Metric):
+    return 1
+  raise ValueError('Unrecognized Metric type!')
 
 
 class Model(operations.Operation):
@@ -54,7 +65,7 @@ class Model(operations.Operation):
     if isinstance(x, Sequence):
       x = metrics.MetricList(x)
     self.model = model
-    self.k = len(x) if isinstance(x, metrics.MetricList) else 1
+    self.k = get_n_vars(x)
     if not name:
       x_names = [m.name for m in x] if isinstance(
           x, metrics.MetricList) else [x.name]
@@ -92,6 +103,15 @@ class LinearRegression(Model):
     model = linear_model.LinearRegression(
         fit_intercept=fit_intercept, normalize=normalize)
     super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', name)
+
+  # def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+  #                             local_filter, with_data):
+  #   child_global_filter = get_global_filter(self.children[0])
+  #   child_indexes = sql.Columns(self.group_by).add(
+  #       get_extra_idx(self.children[0]))
+  #   data_to_fit, with_data = self.children[0].get_sql_and_with_clause(table, self.group_by, child_global_filter, child_indexes,
+  #                             local_filter, with_data)
+  #   with_data.add()
 
 
 class Ridge(Model):
