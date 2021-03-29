@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
 import itertools
 from typing import Any, Callable, List, Optional, Sequence, Text, Union
 
@@ -41,13 +42,15 @@ def compute_on_sql(
     table,
     split_by=None,
     execute=None,
-    melted=False):
+    melted=False,
+):
   # pylint: disable=g-long-lambda
   return lambda m: m.compute_on_sql(
       table,
       split_by,
       execute,
-      melted)
+      melted,
+  )
   # pylint: enable=g-long-lambda
 
 
@@ -451,16 +454,20 @@ class Metric(object):
       table,
       split_by=None,
       execute=None,
-      melted=False):
-    """Generates SQL query and executes on the specified engine."""
-    query = str(self.to_sql(table, split_by))
+      melted=False,
+      mode=None,
+  ):
+    """Generates and executes SQL query, and process the return DataFrame."""
+    del mode  # Used in Operation
     split_by = [split_by] if isinstance(split_by, str) else split_by
+    query = str(self.to_sql(table, split_by))
+    res = execute(query)
+    return self.postcompute_sql(res, split_by, melted)
+
+  def postcompute_sql(self, res, split_by, melted):
+    """Manipulates the output of SQL execution to a better format."""
     extra_idx = list(get_extra_idx(self))
     indexes = split_by + extra_idx if split_by else extra_idx
-    if execute:
-      res = execute(query)
-    else:
-      raise ValueError('Unrecognized SQL engine!')
     # We replace '$' with 'macro_' in the generated SQL. To recover the names,
     # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
     # orignal names. So we set index using the replaced names then reset index
@@ -476,12 +483,16 @@ class Metric(object):
     return utils.melt(res) if melted else res
 
   def to_sql(self,
-             table: Text,
+             table,
              split_by: Optional[Union[Text, List[Text]]] = None):
     """Generates SQL query for the metric."""
     global_filter = get_global_filter(self)
     indexes = sql.Columns(split_by).add(get_extra_idx(self))
     with_data = sql.Datasources()
+    if isinstance(table, sql.Sql) and table.with_data:
+      table = copy.deepcopy(table)
+      with_data = table.with_data
+      table.with_data = None
     if not sql.Datasource(table).is_table:
       table = with_data.add(sql.Datasource(table, 'Data'))
     query, with_data = self.get_sql_and_with_clause(
@@ -524,7 +535,8 @@ class Metric(object):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    raise ValueError('SQL generator is not implemented for %s.' % type(self))
+    raise NotImplementedError('SQL generator is not implemented for %s.' %
+                              type(self))
 
   def __or__(self, fn):
     """Overwrites the '|' operator to enable pipeline chaining."""
