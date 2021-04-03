@@ -1220,6 +1220,18 @@ class TestMetricList(unittest.TestCase):
         }, columns=['sum(X)', 'mean(X)'])
     testing.assert_frame_equal(output, expected)
 
+  def test_with_name_tmpl(self):
+    df = pd.DataFrame({'X': [0, 1, 2, 3]})
+    ms = [metrics.Sum('X'), metrics.Mean('X')]
+    m = metrics.MetricList(ms, name_tmpl='a{}b')
+    output = m.compute_on(df)
+    expected = pd.DataFrame(
+        data={
+            'asum(X)b': [6],
+            'amean(X)b': [1.5]
+        }, columns=['asum(X)b', 'amean(X)b'])
+    testing.assert_frame_equal(output, expected)
+
   def test_operations(self):
     df = pd.DataFrame({'X': [1, 1, 1], 'Y': ['a', 'a', 'b']})
     sumx = metrics.Sum('X')

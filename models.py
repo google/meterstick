@@ -35,6 +35,7 @@ class Model(operations.Operation):
                group_by: Optional[Union[Text, List[Text]]] = None,
                model=None,
                model_name=None,
+               where=None,
                name=None):
     """Initialize the model.
 
@@ -44,10 +45,11 @@ class Model(operations.Operation):
       group_by: The column(s) to aggregate and compute x and y. The model will
         be fit on MetricList([y, x]).compute_on(df, group_by).
       model: The model to fit. It's either a sklearn.linear_model or obeys the
-        API, namely, has a method fit(X, y) and attributes model.coef_ and
-        model.intercept_.
+        API convention, namely, has a method fit(X, y) and attributes
+        model.coef_ and model.intercept_.
       model_name: The name of the model, will be used to auto-generate a name if
         name is not given.
+      where: A string that will be passed to df.query() as a prefilter.
       name: The name to use for the model.
     """
     self.group_by = [group_by] if isinstance(group_by, str) else group_by or []
@@ -60,12 +62,13 @@ class Model(operations.Operation):
           x, metrics.MetricList) else [x.name]
       name = '%s(%s ~ %s)' % (model_name, y.name, ' + '.join(x_names))
     self.name = name
-    super(Model, self).__init__(metrics.MetricList((y, x)), name, group_by)
+    super(Model, self).__init__(
+        metrics.MetricList((y, x)), name, group_by, where=where)
 
   def compute(self, df):
     self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
     coef = self.model.coef_
-    names = ['beta%s' % i for i in range(1, self.k + 1)]
+    names = list(df.columns[1:])
     if self.model.fit_intercept:
       intercept = self.model.intercept_
       coef = [intercept] + list(coef)
@@ -87,11 +90,13 @@ class LinearRegression(Model):
                group_by: Optional[Union[Text, List[Text]]] = None,
                fit_intercept: bool = True,
                normalize: bool = False,
+               where: Optional[str] = None,
                name: Optional[str] = None):
     """Initialize a sklearn.LinearRegression model."""
     model = linear_model.LinearRegression(
         fit_intercept=fit_intercept, normalize=normalize)
-    super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', name)
+    super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', where,
+                                           name)
 
 
 class Ridge(Model):
@@ -105,6 +110,7 @@ class Ridge(Model):
                alpha=1,
                fit_intercept: bool = True,
                normalize: bool = False,
+               where: Optional[str] = None,
                name: Optional[str] = None,
                copy_X=True,
                max_iter=None,
@@ -121,7 +127,7 @@ class Ridge(Model):
         tol=tol,
         solver=solver,
         random_state=random_state)
-    super(Ridge, self).__init__(y, x, group_by, model, 'Ridge', name)
+    super(Ridge, self).__init__(y, x, group_by, model, 'Ridge', where, name)
 
 
 class Lasso(Model):
@@ -135,6 +141,7 @@ class Lasso(Model):
                alpha=1,
                fit_intercept: bool = True,
                normalize: bool = False,
+               where: Optional[str] = None,
                name: Optional[str] = None,
                precompute=False,
                copy_X=True,
@@ -156,7 +163,7 @@ class Lasso(Model):
         positive=positive,
         random_state=random_state,
         selection=selection)
-    super(Lasso, self).__init__(y, x, group_by, model, 'Lasso', name)
+    super(Lasso, self).__init__(y, x, group_by, model, 'Lasso', where, name)
 
 
 class LogisticRegression(Model):
@@ -168,6 +175,7 @@ class LogisticRegression(Model):
                         metrics.MetricList],
                group_by: Optional[Union[Text, List[Text]]] = None,
                fit_intercept: bool = True,
+               where: Optional[str] = None,
                name: Optional[str] = None,
                penalty='l2',
                dual=False,
@@ -201,12 +209,12 @@ class LogisticRegression(Model):
         n_jobs=n_jobs,
         l1_ratio=l1_ratio)
     super(LogisticRegression, self).__init__(y, x, group_by, model,
-                                             'LogisticRegression', name)
+                                             'LogisticRegression', where, name)
 
   def compute(self, df):
     self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
     coef = self.model.coef_
-    names = ['beta%s' % i for i in range(1, self.k + 1)]
+    names = list(df.columns[1:])
     if coef.shape[0] == 1:
       coef = coef[0]
       if self.model.fit_intercept:
