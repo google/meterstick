@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
 import itertools
 from typing import Any, Callable, List, Optional, Sequence, Text, Union
 
@@ -41,13 +42,17 @@ def compute_on_sql(
     table,
     split_by=None,
     execute=None,
-    melted=False):
+    melted=False,
+    mode=None,
+):
   # pylint: disable=g-long-lambda
   return lambda m: m.compute_on_sql(
       table,
       split_by,
       execute,
-      melted)
+      melted,
+      mode,
+  )
   # pylint: enable=g-long-lambda
 
 
@@ -64,7 +69,7 @@ def get_extra_idx(metric):
   Returns:
     A tuple of column names which are just the index of metric.compute_on(df).
   """
-  extra_idx = getattr(metric, 'extra_index', [])[:]
+  extra_idx = metric.extra_index[:]
   children_idx = [
       get_extra_idx(c) for c in metric.children if isinstance(c, Metric)
   ]
@@ -115,6 +120,13 @@ class Metric(object):
   postcompute(), compute_slices(), compute_through() and final_compute() operate
   on the whole data. manipulate() does common data manipulation like melting
   and cleaning. Caching is handled in compute_on().
+  If Metric has children Metrics, then compute_slices is further decomposed to
+  compute_children() -> compute_on_children(), if they are implemented. For such
+  Metrics, the decomposition makes the 'mixed' mode of compute_on_sql() simple.
+  The `mixed` mode computes children in SQL and the rest in Python, so as long
+  as a compute_children_sql() is implemented and has a similar return to
+  compute_children(), the compute_on_children() is reused and the `mixed` mode
+  automatically works.
 
   Depending on your case, you can overwrite most of them, but we suggest you NOT
   to overwrite compute_on because it might mess up the caching mechanism. Here
@@ -152,8 +164,12 @@ class Metric(object):
     postcompute: A function. See the workflow chart above for its behavior.
     compute_slices: A function. See the workflow chart above for its behavior.
     final_compute: A function. See the workflow chart above for its behavior.
+    extra_index: Used by Operation. See the doc there.
+    computable_in_pure_sql: If the Metric can be completely computed in SQL. For
+      example, all Models can't.
+    name_tmpl: Used by Metrics that have children. It's applied to children's
+      names in the output.
     cache_key: The key currently being used in computation.
-    manipulate_input_type: Whether the input df is 'melted' or 'unmelted'.
     tmp_cache_keys: The set to track what temporary cache_keys are used during
       computation when default caching is enabled. When computation is done, all
       the keys in tmp_cache_keys are flushed.
@@ -165,6 +181,7 @@ class Metric(object):
                children: Optional[Union['Metric', Sequence[Union['Metric', int,
                                                                  float]]]] = (),
                where: Optional[Text] = None,
+               name_tmpl=None,
                precompute=None,
                compute: Optional[Callable[[pd.DataFrame], Any]] = None,
                postcompute=None,
@@ -173,8 +190,12 @@ class Metric(object):
     self.name = name
     self.cache = {}
     self.cache_key = None
-    self.children = (children,) if isinstance(children, Metric) else children
+    self.children = [children] if isinstance(children,
+                                             Metric) else children or []
     self.where = where
+    self.extra_index = []
+    self.computable_in_pure_sql = True
+    self.name_tmpl = name_tmpl
     if precompute:
       self.precompute = precompute
     if compute:
@@ -196,6 +217,12 @@ class Metric(object):
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     """Applies compute() to all slices. Each slice needs a unique cache_key."""
+    if self.children:
+      try:
+        df = self.compute_children(df, split_by + self.extra_index)
+        return self.compute_on_children(df, split_by)
+      except NotImplementedError:
+        pass
     if split_by:
       # Adapted from http://esantorella.com/2016/06/16/groupby. This is faster
       # than df.groupby(split_by).apply(self.compute).
@@ -230,14 +257,38 @@ class Metric(object):
       res = self.compute_with_split_by(df)
     return res
 
+  def compute_children(self, df, split_by):
+    raise NotImplementedError
+
+  def compute_on_children(self, children, split_by):
+    """Computes the return using the result returned by children Metrics.
+
+    Args:
+      children: The return of compute_children() or compute_children_sql().
+      split_by: Something can be passed into df.group_by().
+
+    Returns:
+      Almost the final result. Only some manipulations are still needed.
+    """
+    if len(self.children) != 1:
+      raise ValueError('We can only handle one child Metric!')
+    if not split_by:
+      return self.compute(children)
+    result = []
+    slices = []
+    for d, i in self.split_data(children, split_by):
+      result.append(self.compute(d))
+      slices.append(i)
+    return pd.concat(result, keys=slices, names=split_by, sort=False)
+
   @staticmethod
   def split_data(df, split_by=None):
     if not split_by:
       yield df, None
     else:
-      keys, indices = list(zip(*df.groupby(split_by).groups.items()))
-      for i, idx in enumerate(indices):
-        yield df.loc[idx.unique()], keys[i]
+      keys, indices = zip(*df.groupby(split_by).groups.items())
+      for k, idx in zip(keys, indices):
+        yield df.loc[idx.unique()], k
 
   def compute_through(self, df, split_by: Optional[List[Text]] = None):
     """Precomputes df -> split df and apply compute() -> postcompute."""
@@ -295,8 +346,7 @@ class Metric(object):
         raw_res = self.compute_through(df, split_by)
 
       res = self.manipulate(raw_res, melted, return_dataframe)
-      res = self.final_compute(res, melted, return_dataframe, split_by, df)
-      return res
+      return self.final_compute(res, melted, return_dataframe, split_by, df)
 
     finally:
       if need_clean_up:
@@ -317,13 +367,15 @@ class Metric(object):
   def manipulate(self,
                  res: pd.Series,
                  melted: bool = False,
-                 return_dataframe: bool = True):
+                 return_dataframe: bool = True,
+                 apply_name_tmpl=None):
     """Common adhoc data manipulation.
 
     It does
     1. Converts res to a DataFrame if asked.
     2. Melts res to long format if asked.
     3. Removes redundant index levels in res.
+    4. Apply self.name_tmpl to the output name or columns if asked.
 
     Args:
       res: Returned by compute_through(). Usually a DataFrame, but could be a
@@ -332,16 +384,26 @@ class Metric(object):
       return_dataframe: Whether to convert the result to DataFrame if it's not.
         If False, it could still return a DataFrame if the input is already a
         DataFrame.
+      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
+        Distribution('country', Sum('X')).compute_on(df),
+        we first compute Sum('X').compute_on(df, 'country'), then normalize, and
+        finally apply the name_tmpl 'Distribution of {}' to all column names.
 
     Returns:
       Final result returned to user. If split_by, it's a pd.Series or a
       pd.DataFrame, otherwise it could be a base type.
     """
+    res = copy.copy(res)  # Avoid changing the result in cache.
     if isinstance(res, pd.Series):
       res.name = self.name
-    res = self.to_dataframe(res) if return_dataframe else res
+    if not isinstance(res, pd.DataFrame) and return_dataframe:
+      res = self.to_dataframe(res)
     if melted:
       res = utils.melt(res)
+    if apply_name_tmpl is None and is_operation(self):
+      apply_name_tmpl = True
+    if apply_name_tmpl:
+      res = utils.apply_name_tmpl(self.name_tmpl, res, melted)
     return utils.remove_empty_level(res)
 
   @staticmethod
@@ -451,16 +513,74 @@ class Metric(object):
       table,
       split_by=None,
       execute=None,
-      melted=False):
-    """Generates SQL query and executes on the specified engine."""
+      melted=False,
+      mode=None,
+  ):
+    """Computes self in pure SQL or a mixed of SQL and Python.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      melted: Whether to transform the result to long format.
+      mode: For Operations, there are two ways to compute the result in SQL, one
+        is computing everything in SQL, the other is computing the children
+        in SQL then the rest in Python. We call them 'sql' and 'mixed' modes. If
+        self has grandchildren, then we can compute the chilren in two modes
+        too. We can call them light `mixed` mode and recursive `mixed` mode.
+        If `mode` is 'sql', it computes everything in SQL.
+        If `mode` is 'mixed', it computes everything recursively in the `mixed`
+        mode.
+        We recommend `mode` to be None. This mode tries the `sql` mode first, if
+        not implemented, switch to light `mixed` mode. The logic is applied
+        recursively from the root to leaf Metrics, so a Metric tree could have
+        top 3 layeres computed in Python and the bottom in SQL. In summary,
+        everything can be computed in SQL is computed in SQL.
+
+    Returns:
+      A pandas DataFrame. It's the computeation of self in SQL.
+    """
+    split_by = [split_by] if isinstance(split_by, str) else split_by or []
+    res = self.compute_through_sql(table, split_by, execute, mode)
+    # res from compute_on_sql() already has name_tmpl applied.
+    res = self.manipulate(res, melted, apply_name_tmpl=False)
+    return self.final_compute(res, melted, True, split_by, table)
+
+  def compute_through_sql(self, table, split_by, execute, mode):
+    """Delegeates the computation to different modes."""
+    if mode not in (None, 'sql', 'mixed'):
+      raise ValueError('Mode %s is not supported!' % mode)
+    if not self.children:
+      mode = 'sql'
+    if mode in (None, 'sql'):
+      computable_in_pure_sql = True
+      for m in self.traverse():
+        if not m.computable_in_pure_sql:
+          computable_in_pure_sql = False
+          if mode == 'sql':
+            raise ValueError('%s is not computable in pure SQL.' % self.name)
+          break
+      if computable_in_pure_sql:
+        try:
+          return self.compute_on_sql_sql_mode(table, split_by, execute)
+        except Exception as e:  # pylint: disable=broad-except
+          raise Exception(
+              "Please see the root cause of the failure above. If it's caused "
+              'by the query being too complex, you can try '
+              "compute_on_sql(..., mode='mixed').") from e
+    if self.where:
+      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
+    return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+
+  def compute_on_sql_sql_mode(self,
+                              table,
+                              split_by=None,
+                              execute=None):
+    """Executes the query from to_sql() and process the result."""
     query = str(self.to_sql(table, split_by))
-    split_by = [split_by] if isinstance(split_by, str) else split_by
+    res = execute(query)
     extra_idx = list(get_extra_idx(self))
     indexes = split_by + extra_idx if split_by else extra_idx
-    if execute:
-      res = execute(query)
-    else:
-      raise ValueError('Unrecognized SQL engine!')
     # We replace '$' with 'macro_' in the generated SQL. To recover the names,
     # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
     # orignal names. So we set index using the replaced names then reset index
@@ -473,15 +593,19 @@ class Metric(object):
     res.columns = [c.replace('macro_', '$') for c in res.columns]
     if split_by:  # Use a stable sort.
       res.sort_values(split_by, kind='mergesort', inplace=True)
-    return utils.melt(res) if melted else res
+    return res
 
   def to_sql(self,
-             table: Text,
+             table,
              split_by: Optional[Union[Text, List[Text]]] = None):
     """Generates SQL query for the metric."""
     global_filter = get_global_filter(self)
     indexes = sql.Columns(split_by).add(get_extra_idx(self))
     with_data = sql.Datasources()
+    if isinstance(table, sql.Sql) and table.with_data:
+      table = copy.deepcopy(table)
+      with_data = table.with_data
+      table.with_data = None
     if not sql.Datasource(table).is_table:
       table = with_data.add(sql.Datasource(table, 'Data'))
     query, with_data = self.get_sql_and_with_clause(
@@ -524,7 +648,29 @@ class Metric(object):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    raise ValueError('SQL generator is not implemented for %s.' % type(self))
+    raise NotImplementedError('SQL generator is not implemented for %s.' %
+                              type(self))
+
+  def compute_on_sql_mixed_mode(self,
+                                table,
+                                split_by,
+                                execute,
+                                mode=None):
+    """Computes the child in SQL and the rest in Python."""
+    children = self.compute_children_sql(table, split_by, execute, mode)
+    return self.compute_on_children(children, split_by)
+
+  def compute_children_sql(self, table, split_by, execute, mode=None):
+    """The return should be similar to compute_children()."""
+    children = []
+    for c in self.children:
+      if not isinstance(c, Metric):
+        children.append(c)
+      else:
+        children.append(
+            c.compute_on_sql(
+                table, split_by + self.extra_index, execute, mode=mode))
+    return children[0] if len(self.children) == 1 else children
 
   def __or__(self, fn):
     """Overwrites the '|' operator to enable pipeline chaining."""
@@ -584,18 +730,21 @@ class MetricList(Metric):
     cache_key: The key currently being used in computation.
     children_return_dataframe: Whether to convert the result to a children
       Metrics to DataFrames if they are not.
+    name_tmpl: A string template to format the columns in the result DataFrame.
     And all other attributes inherited from Metric.
   """
 
   def __init__(self,
                children: Sequence[Metric],
                where: Optional[Text] = None,
-               children_return_dataframe: bool = True):
+               children_return_dataframe: bool = True,
+               name_tmpl=None):
     for m in children:
       if not isinstance(m, Metric):
         raise ValueError('%s is not a Metric.' % m)
-    name = 'MetricList(%s)' % ', '.join(m.name for m in children)
-    super(MetricList, self).__init__(name, children, where=where)
+    tmpl = name_tmpl or 'MetricList({})'
+    name = tmpl.format(', '.join(m.name for m in children))
+    super(MetricList, self).__init__(name, children, where, name_tmpl)
     self.children_return_dataframe = children_return_dataframe
     self.names = [m.name for m in children]
 
@@ -616,12 +765,18 @@ class MetricList(Metric):
     key = self.cache_key or self.RESERVED_KEY
     for m in self:
       try:
-        res.append(
-            m.compute_on(
-                df,
-                split_by,
-                return_dataframe=self.children_return_dataframe,
-                cache_key=key))
+        child = m.compute_on(
+            df,
+            split_by,
+            return_dataframe=self.children_return_dataframe,
+            cache_key=key)
+        if isinstance(child, pd.DataFrame):
+          if self.name_tmpl:
+            child.columns = [self.name_tmpl.format(c) for c in child.columns]
+        if isinstance(child, pd.Series):
+          if self.name_tmpl:
+            child.name = self.name_tmpl.format(child.name)
+        res.append(child)
       except Exception as e:  # pylint: disable=broad-except
         print('Warning: %s failed for reason %s.' % (m.name, repr(e)))
     return res
@@ -674,8 +829,13 @@ class MetricList(Metric):
       if not found:
         incompatible_sqls.append(child_sql)
 
+    name_tmpl = self.name_tmpl or '{}'
     if len(incompatible_sqls) == 1:
-      return incompatible_sqls[0], with_data
+      res = incompatible_sqls[0]
+      for c in res.columns:
+        if c not in indexes:
+          c.alias_raw = name_tmpl.format(c.alias_raw)
+      return res, with_data
 
     columns = sql.Columns(indexes.aliases)
     for i, table in enumerate(incompatible_sqls):
@@ -683,7 +843,10 @@ class MetricList(Metric):
       alias = with_data.add(data)
       for c in table.columns:
         if c not in columns:
-          columns.add(sql.Column('%s.%s' % (alias, c.alias), alias=c.alias_raw))
+          columns.add(
+              sql.Column(
+                  '%s.%s' % (alias, c.alias),
+                  alias=name_tmpl.format(c.alias_raw)))
       if i == 0:
         from_data = sql.Datasource(alias)
       else:
@@ -691,6 +854,11 @@ class MetricList(Metric):
         from_data = from_data.join(
             sql.Datasource(alias), join=join, using=indexes)
     return sql.Sql(columns, from_data), with_data
+
+  def compute_on_children(self, child, split_by):
+    if isinstance(child, list):
+      return self.to_dataframe(child)
+    return child
 
   def to_dataframe(self, res):
     res_all = pd.concat(res, axis=1, sort=False)
@@ -747,9 +915,8 @@ class CompositeMetric(Metric):
         children[1], Metric):
       raise ValueError('MetricList must take at least one Metric!')
 
-    self.name_tmpl = name_tmpl
     name = name_tmpl.format(*map(utils.get_name, children))
-    super(CompositeMetric, self).__init__(name, children, where)
+    super(CompositeMetric, self).__init__(name, children, where, name_tmpl)
     self.op = op
     self.columns = rename_columns
 
@@ -761,94 +928,86 @@ class CompositeMetric(Metric):
     self.name = name
     return self
 
-  def compute_slices(self, df, split_by=None):
-    """Computes the result with caching.
+  def compute_children(self, df, split_by):
+    if len(self.children) != 2:
+      raise ValueError('CompositeMetric can only have two children.')
+    if not any([isinstance(m, Metric) for m in self.children]):
+      raise ValueError('Must have at least one Metric.')
+    children = []
+    for m in self.children:
+      if isinstance(m, Metric):
+        m = m.compute_on(
+            df,
+            split_by,
+            # MetricList returns an undesired list when not return_dataframe.
+            return_dataframe=isinstance(m, MetricList),
+            cache_key=self.cache_key or self.RESERVED_KEY)
+      children.append(m)
+    return children
 
-    1. We know df is not going to change so we can safely enable caching with an
-    arbitrary key.
-    2. Computations between two DataFrames require columns to match. It makes
+  def compute_on_children(self, child, split_by):
+    """Computes the result based on the results from the children.
+
+    Computations between two DataFrames require columns to match. It makes
     Metric as simple as Sum('X') - Sum('Y') infeasible because they don't have
     same column names. To overcome this and make CompositeMetric useful, we try
     our best to reduce DataFrames to pd.Series and scalars. The rule is,
-      2.1 If no split_by, a 1*1 DataFrame will be converted to a scalar and a
-        n*1 DataFrame will be a pd.Series.
-      2.2 If split_by, both cases will be converted to pd.Series.
-      2.3 If both DataFrames have the same number of columns but names don't
+      1. If no split_by, a 1*1 DataFrame will be converted to a scalar and a n*1
+        DataFrame will be a pd.Series.
+      2. If split_by, both cases will be converted to pd.Series.
+      3. If both DataFrames have the same number of columns but names don't
         match, you can pass in columns or call set_columns() to unify the
-        columns. Otherwise you'll get plenty of NAs.
+        columns. Otherwise we will apply self.name_tmpl to the column names.
 
     Args:
-      df: The DataFrame to compute on.
+      child: A length-2 list. The elements could be numbers, pd.Series or
+        pd.DataFrames.
       split_by: Something can be passed into df.group_by().
-
-    Raises:
-      ValueError: If none of the children is a Metric.
 
     Returns:
       The result to be sent to final_compute().
     """
-    m1 = self.children[0]
-    m2 = self.children[1]
-    if not isinstance(m1, Metric) and not isinstance(m2, Metric):
-      raise ValueError('Must have at least one Metric.')
+    a, b = child[0], child[1]
+    m1, m2 = self.children[0], self.children[1]
+    if isinstance(a, pd.DataFrame) and a.shape[1] == 1 and not is_operation(m1):
+      a = a.iloc[:, 0]
+    if isinstance(b, pd.DataFrame) and b.shape[1] == 1 and not is_operation(m2):
+      b = b.iloc[:, 0]
+    res = None
+    if isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
+      if len(a.columns) == len(b.columns):
+        columns = [
+            self.name_tmpl.format(c1, c2)
+            for c1, c2 in zip(a.columns, b.columns)
+        ]
+        # pytype is not smart enough http://github.com/google/pytype/issues/391.
+        a.columns = columns  # pytype: disable=not-writable
+        b.columns = columns  # pytype: disable=not-writable
+    elif isinstance(a, pd.DataFrame):
+      for col in a.columns:
+        a[col] = self.op(a[col], b)
+      res = a
+      columns = [
+          self.name_tmpl.format(c, getattr(m2, 'name', m2)) for c in res.columns
+      ]
+      res.columns = columns  # pytype: disable=not-writable
+    elif isinstance(b, pd.DataFrame):
+      for col in b.columns:
+        b[col] = self.op(a, b[col])
+      res = b
+      columns = [
+          self.name_tmpl.format(getattr(m1, 'name', m1), c) for c in res.columns
+      ]
+      res.columns = columns  # pytype: disable=not-writable
 
-    key = self.cache_key or self.RESERVED_KEY
-    # MetricList returns a list we don't want when return_dataframe is False.
-    rd_a = isinstance(m1, MetricList)
-    rd_b = isinstance(m2, MetricList)
-    if isinstance(m1, Metric) and not isinstance(m2, Metric):
-      a = m1.compute_on(df, split_by, return_dataframe=rd_a, cache_key=key)
-      if isinstance(a, pd.DataFrame):
-        if hasattr(self, 'name_tmpl'):
-          a.columns = [self.name_tmpl.format(c, m2) for c in a.columns]
-      res = self.op(a, m2)
-    elif isinstance(m2, Metric) and not isinstance(m1, Metric):
-      b = m2.compute_on(df, split_by, return_dataframe=rd_b, cache_key=key)
-      if isinstance(b, pd.DataFrame):
-        if hasattr(self, 'name_tmpl'):
-          b.columns = [self.name_tmpl.format(m1, c) for c in b.columns]
-      res = self.op(m1, b)
-    else:
-      a = m1.compute_on(df, split_by, return_dataframe=rd_a, cache_key=key)
-      b = m2.compute_on(df, split_by, return_dataframe=rd_b, cache_key=key)
-      if not isinstance(a, pd.DataFrame) and not isinstance(b, pd.DataFrame):
-        res = self.op(a, b)
-      elif isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
-        if len(a.columns) == len(b.columns):
-          columns = [
-              self.name_tmpl.format(c1, c2)
-              for c1, c2 in zip(a.columns, b.columns)
-          ]
-          a.columns = columns
-          b.columns = columns
-        res = self.op(a, b)
-      elif isinstance(a, pd.DataFrame):
-        if not isinstance(b, pd.Series):
-          res = self.op(a, b)
-        else:
-          for col in a.columns:
-            a[col] = self.op(a[col], b)
-          res = a
-        res.columns = [self.name_tmpl.format(c, m2.name) for c in res.columns]
-      elif isinstance(b, pd.DataFrame):
-        if not isinstance(a, pd.Series):
-          res = self.op(a, b)
-        else:
-          for col in b.columns:
-            b[col] = self.op(a, b[col])
-          res = b
-        res.columns = [self.name_tmpl.format(m1.name, c) for c in res.columns]
-
+    if res is None:
+      res = self.op(a, b)
     if isinstance(res, pd.Series):
-      res.name = self.name
-      return res
-    if not isinstance(res, pd.DataFrame):
-      return res
-
-    if self.columns is not None:
-      if isinstance(res, pd.DataFrame):
-        res.columns = self.columns
-
+      res.name = self.name  # pytype: disable=not-writable
+      if self.columns:
+        res = pd.DataFrame(res)
+    if self.columns is not None and isinstance(res, pd.DataFrame):
+      res.columns = self.columns  # pytype: disable=not-writable
     return res
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
@@ -973,11 +1132,10 @@ class SimpleMetric(Metric):
                name_tmpl=None,
                where: Optional[Text] = None,
                **kwargs):
-    self.name_tmpl = name_tmpl
     name = name or name_tmpl.format(var)
     self.var = var
     self.kwargs = kwargs
-    super(SimpleMetric, self).__init__(name, where=where)
+    super(SimpleMetric, self).__init__(name, None, where, name_tmpl)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -1404,7 +1562,7 @@ class StandardDeviation(SimpleMetric):
 
 def _get_sql_for_weighted_var_or_se(metric, table, split_by, global_filter,
                                     local_filter, with_data):
-  """Gets the SQL for weighted metrics.Variance or metrics.StandardDeviation.
+  """Gets the SQL for weighted Variance or StandardDeviation.
 
   For Variance the query is like
   WITH
@@ -1425,8 +1583,7 @@ def _get_sql_for_weighted_var_or_se(metric, table, split_by, global_filter,
   For StandardDeviation we take the square root of weighted_metric.
 
   Args:
-    metric: An instance of metrics.Variance or metrics.StandardDeviation, with
-      weight.
+    metric: An instance of Variance or StandardDeviation, with weight.
     table: The table we want to query from.
     split_by: The columns that we use to split the data.
     global_filter: The filters that can be applied to the whole Metric tree.
