@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import collections
 from collections import abc
+import copy
 import functools
 import re
 from typing import Iterable, Optional, Text, Union
@@ -162,14 +163,17 @@ class SqlComponents(SqlComponent):
 class Filter(SqlComponent):
   """Represents single condition in SQL WHERE clause."""
 
-  def __init__(self, cond: Text):
+  def __init__(self, cond: Optional[Text]):
     super(Filter, self).__init__()
+    self.cond = ''
     if isinstance(cond, Filter):
       self.cond = cond.cond
-    else:
+    elif cond:
       self.cond = cond.replace('==', '=') or ''
 
   def __str__(self):
+    if not self.cond:
+      return ''
     return '(%s)' % self.cond if ' OR ' in self.cond.upper() else self.cond
 
 
@@ -457,10 +461,10 @@ class Datasource(SqlComponent):
       self.table = table.table
       self.alias = table.alias
     else:
-      self.table = str(table).strip()
+      self.table = table
       self.alias = alias
     self.alias = escape_alias(self.alias)
-    self.is_table = not self.table.upper().startswith('SELECT')
+    self.is_table = not str(self.table).startswith('SELECT')
 
   def get_expression(self, form='FROM'):
     """Gets the expression that can be used in a FROM or WITH clause."""
@@ -545,6 +549,10 @@ class Datasources(SqlComponents):
     Returns:
       The alias of the Datasource we eventually add.
     """
+    if isinstance(children, Datasources):
+      for c in children.datasources:
+        self.add(c)
+      return
     if not isinstance(children, str) and isinstance(children, abc.Iterable):
       for c in children:
         self.add(c)
@@ -566,6 +574,20 @@ class Datasources(SqlComponents):
       children.alias = add_suffix(alias)
       return self.add(children)
 
+  def merge(self, other: 'Datasources'):
+    """Merge other to self. Adjust the query if a new alias is needed."""
+    datasources = list(other.datasources)
+    while datasources:
+      d = datasources.pop(0)
+      original_alias = d.alias
+      new_alias = self.add(d)
+      if original_alias != new_alias:
+        for d2 in datasources:
+          if original_alias in str(d2):
+            d2.table = re.sub(r'\b%s\b' % original_alias, new_alias,
+                              str(d2.table))
+    return self
+
   def __str__(self):
     return ',\n'.join((d.get_expression('WITH') for d in self.datasources if d))
 
@@ -581,10 +603,16 @@ class Sql(SqlComponent):
                with_data=None):
     super(Sql, self).__init__()
     self.columns = Columns(columns)
-    self.from_data = Datasource(from_data)
     self.where = Filters(where)
     self.groupby = Columns(groupby)
     self.with_data = Datasources(with_data)
+    if isinstance(from_data, Sql) and from_data.with_data:
+      from_data = copy.deepcopy(from_data)
+      with_data_to_merge = from_data.with_data
+      from_data.with_data = None
+      from_data = with_data_to_merge.add(Datasource(from_data, 'NoNameTable'))
+      self.with_data.merge(with_data_to_merge)
+    self.from_data = Datasource(from_data)
 
   def add(self, attr, values):
     getattr(self, attr).add(values)
