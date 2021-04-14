@@ -1733,6 +1733,43 @@ class BootstrapTests(unittest.TestCase):
   bootstrap_no_unit = operations.Bootstrap(None, metric, n)
   bootstrap_unit = operations.Bootstrap('unit', metric, n)
 
+  def test_get_samples(self):
+    m = operations.Bootstrap(None, metrics.Sum('X'), 2)
+    output = [s[1] for s in m.get_samples(self.df)]
+    self.assertLen(output, 2)
+    for s in output:
+      self.assertLen(s, len(self.df))
+
+  def test_get_samples_splitby(self):
+    m = operations.Bootstrap(None, metrics.Sum('X'), 2)
+    output = [s[1] for s in m.get_samples(self.df, 'grp')]
+    self.assertLen(output, 2)
+    expected = self.df.groupby('grp').size()
+    for s in output:
+      testing.assert_series_equal(s.groupby('grp').size(), expected)
+
+  def test_get_samples_with_unit(self):
+    m = operations.Bootstrap('grp', metrics.Sum('X'), 10)
+    output = [s[1] for s in m.get_samples(self.df)]
+    self.assertLen(output, 10)
+    grp_cts = self.df.groupby('grp').size()
+    for s in output:
+      self.assertEqual([2], (s.groupby('grp').size() / grp_cts).sum())
+
+  def test_get_samples_with_unit_splitby(self):
+    df = pd.DataFrame({
+        'X': range(10),
+        'grp': ['A'] * 2 + ['B'] * 3 + ['C'] * 4 + ['D'],
+        'grp2': ['foo'] * 5 + ['bar'] * 5
+    })
+    m = operations.Bootstrap('grp', metrics.Sum('X'), 10)
+    output = [s[1] for s in m.get_samples(df, 'grp2')]
+    self.assertLen(output, 10)
+    grp_cts = df.groupby(['grp2', 'grp']).size()
+    for s in output:
+      s = s.groupby(['grp2', 'grp']).size()
+      self.assertEqual([2], (s / grp_cts).groupby(['grp2']).sum().unique())
+
   def test_bootstrap_no_unit(self):
     np.random.seed(42)
     unmelted = self.bootstrap_no_unit.compute_on(self.df)

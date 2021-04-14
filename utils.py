@@ -306,3 +306,25 @@ def remove_empty_level(df):
     if not level.name and len(level.values) == 1 and not level.values[0]:
       drop.append(i)
   return df.droplevel(drop)
+
+
+def apply_name_tmpl(name_tmpl, res, melted=False):
+  """Applies name_tmpl to all columns or pd.Series.name."""
+  if not name_tmpl:
+    return res
+  if isinstance(res, pd.Series):
+    res.name = name_tmpl.format(res.name)
+  elif isinstance(res, pd.DataFrame):
+    if melted:
+      if len(res.index.names) > 1:
+        res.index.set_levels(
+            map(name_tmpl.format, res.index.levels[0]), 0, inplace=True)
+      else:
+        res.index = map(name_tmpl.format, res.index)
+    else:
+      if len(res.columns.names) > 1:
+        res.columns.set_levels(
+            map(name_tmpl.format, res.columns.levels[0]), 0, inplace=True)
+      else:
+        res.columns = map(name_tmpl.format, res.columns)
+  return res

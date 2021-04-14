@@ -42,7 +42,7 @@ class ModelsTest(unittest.TestCase):
     model.fit(self.grped1[['X1']], self.grped1[['Y']])
     expected = pd.DataFrame(
         {'OLS(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0][0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -64,7 +64,7 @@ class ModelsTest(unittest.TestCase):
             'OLS(sum(Y) ~ sum(X1) + sum(X2))':
                 [model.intercept_[0], model.coef_[0][0], model.coef_[0][1]]
         },
-        index=['intercept', 'beta1', 'beta2'])
+        index=['intercept', 'sum(X1)', 'sum(X2)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -75,11 +75,11 @@ class ModelsTest(unittest.TestCase):
     model.fit(self.grped2.loc['bar'][['X1']], self.grped2.loc['bar'][['Y']])
     expected1 = pd.DataFrame(
         {'OLS(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0][0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     model.fit(self.grped2.loc['foo'][['X1']], self.grped2.loc['foo'][['Y']])
     expected2 = pd.DataFrame(
         {'OLS(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0][0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     expected = pd.concat([expected1, expected2],
                          keys=['bar', 'foo'],
                          names=['grp2'])
@@ -93,7 +93,7 @@ class ModelsTest(unittest.TestCase):
     model = linear_model.LinearRegression(fit_intercept=False)
     model.fit(self.grped1[['X1']], self.grped1[['Y']])
     expected = pd.DataFrame({'OLS(sum(Y) ~ sum(X1))': model.coef_[0]},
-                            index=['beta1'])
+                            index=['sum(X1)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -112,7 +112,7 @@ class ModelsTest(unittest.TestCase):
     model.fit(self.grped1[['X1']], self.grped1[['Y']])
     expected = pd.DataFrame(
         {'Ridge(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0][0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -129,7 +129,7 @@ class ModelsTest(unittest.TestCase):
             'Ridge(sum(Y) ~ sum(X1) + sum(X2))':
                 [model.intercept_[0], model.coef_[0][0], model.coef_[0][1]]
         },
-        index=['intercept', 'beta1', 'beta2'])
+        index=['intercept', 'sum(X1)', 'sum(X2)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -140,11 +140,11 @@ class ModelsTest(unittest.TestCase):
     model.fit(self.grped2.loc['bar'][['X1']], self.grped2.loc['bar'][['Y']])
     expected1 = pd.DataFrame(
         {'Ridge(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0][0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     model.fit(self.grped2.loc['foo'][['X1']], self.grped2.loc['foo'][['Y']])
     expected2 = pd.DataFrame(
         {'Ridge(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0][0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     expected = pd.concat([expected1, expected2],
                          keys=['bar', 'foo'],
                          names=['grp2'])
@@ -158,7 +158,7 @@ class ModelsTest(unittest.TestCase):
     model = linear_model.Ridge(fit_intercept=False)
     model.fit(self.grped1[['X1']], self.grped1[['Y']])
     expected = pd.DataFrame({'Ridge(sum(Y) ~ sum(X1))': model.coef_[0]},
-                            index=['beta1'])
+                            index=['sum(X1)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -169,7 +169,7 @@ class ModelsTest(unittest.TestCase):
     model.fit(self.grped1[['X1']], self.grped1[['Y']])
     expected = pd.DataFrame(
         {'Lasso(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -185,7 +185,7 @@ class ModelsTest(unittest.TestCase):
             'Lasso(sum(Y) ~ sum(X1) + sum(X2))':
                 [model.intercept_[0], model.coef_[0], model.coef_[1]]
         },
-        index=['intercept', 'beta1', 'beta2'])
+        index=['intercept', 'sum(X1)', 'sum(X2)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -196,11 +196,11 @@ class ModelsTest(unittest.TestCase):
     model.fit(self.grped2.loc['bar'][['X1']], self.grped2.loc['bar'][['Y']])
     expected1 = pd.DataFrame(
         {'Lasso(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     model.fit(self.grped2.loc['foo'][['X1']], self.grped2.loc['foo'][['Y']])
     expected2 = pd.DataFrame(
         {'Lasso(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0]]},
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     expected = pd.concat([expected1, expected2],
                          keys=['bar', 'foo'],
                          names=['grp2'])
@@ -214,7 +214,7 @@ class ModelsTest(unittest.TestCase):
     model = linear_model.Lasso(fit_intercept=False)
     model.fit(self.grped1[['X1']], self.grped1[['Y']])
     expected = pd.DataFrame({'Lasso(sum(Y) ~ sum(X1))': model.coef_[0]},
-                            index=['beta1'])
+                            index=['sum(X1)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -228,7 +228,7 @@ class ModelsTest(unittest.TestCase):
             'LogisticRegression(sum(grp2) ~ sum(X1))':
                 [model.intercept_[0], model.coef_[0][0]]
         },
-        index=['intercept', 'beta1'])
+        index=['intercept', 'sum(X1)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -244,7 +244,7 @@ class ModelsTest(unittest.TestCase):
             'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2))':
                 [model.intercept_[0], model.coef_[0][0], model.coef_[0][1]]
         },
-        index=['intercept', 'beta1', 'beta2'])
+        index=['intercept', 'sum(X1)', 'sum(X2)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -262,7 +262,7 @@ class ModelsTest(unittest.TestCase):
               'LogisticRegression(sum(grp2) ~ sum(X1))':
                   [model.intercept_[0], model.coef_[0][0]]
           },
-          index=['intercept', 'beta1'])
+          index=['intercept', 'sum(X1)'])
       res.append(expected)
     expected = pd.concat(res, keys=grps, names=['grp1'])
     expected.index.names = ['grp1', 'coefficient']
@@ -276,7 +276,7 @@ class ModelsTest(unittest.TestCase):
     model.fit(self.df[['X1']], self.df['grp2'])
     expected = pd.DataFrame(
         {'LogisticRegression(sum(grp2) ~ sum(X1))': model.coef_[0]},
-        index=['beta1'])
+        index=['sum(X1)'])
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
@@ -288,7 +288,7 @@ class ModelsTest(unittest.TestCase):
     for i, c in enumerate(self.grped1.Y):
       model.fit(self.grped1[['X1']], self.grped1['Y'])
       expected = pd.DataFrame({
-          'coefficient': ['intercept', 'beta1'],
+          'coefficient': ['intercept', 'sum(X1)'],
           'LogisticRegression(sum(Y) ~ sum(X1))': [
               model.intercept_[i], model.coef_[i][0]
           ]
@@ -307,7 +307,7 @@ class ModelsTest(unittest.TestCase):
     for i, c in enumerate(self.grped1.Y):
       model.fit(self.grped1[['X1']], self.grped1['Y'])
       expected = pd.DataFrame({
-          'coefficient': ['beta1'],
+          'coefficient': ['sum(X1)'],
           'LogisticRegression(sum(Y) ~ sum(X1))': model.coef_[i]
       })
       expected['class'] = c
