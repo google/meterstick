@@ -949,8 +949,9 @@ class MetricWithCI(Operation):
         estimates.append(res)
       except Exception as e:  # pylint: disable=broad-except
         print(
-            'Warning: Failed on sample data for reason %s. If you see many such'
-            ' failures, your data might be too sparse.' % repr(e))
+            'Warning: Failed on %s sample data for reason %s. If you see many '
+            'such failures, your data might be too sparse.' %
+            (self.name_tmpl.format(''), repr(e)))
       finally:
         # Jackknife keys are unique so can be kept longer.
         if isinstance(self, Bootstrap) and cache_key is not None:
