@@ -19,6 +19,8 @@ from __future__ import print_function
 
 import copy
 from typing import Any, Iterable, List, Optional, Text, Tuple, Union
+import warnings
+
 from meterstick import confidence_interval_display
 from meterstick import metrics
 from meterstick import sql
@@ -64,6 +66,11 @@ class Operation(metrics.Metric):
       1. ensure that your computation doesn't break when df is None.
       2. set attribute 'precomputable_in_jk' to False (which will force the
          jackknife to be computed the manual way, which is slower).
+    precompute_child: Many Operations first compute the child Metric with extra
+      split_by columns, then perform computation on the child Metric' result. If
+      precompute_child is True, in the precompute(), we return
+      self.children[0].compute_on(df, split_by + self.extra_index). Otherwise
+      the original input data is returned.
     where: A string that will be passed to df.query() as a prefilter.
     cache_key: What key to use to cache the df. You can use anything that can be
       a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ...).
@@ -79,25 +86,31 @@ class Operation(metrics.Metric):
                **kwargs):
     if name_tmpl and not name:
       name = name_tmpl.format(utils.get_name(child))
-    super(Operation, self).__init__(name, child or (), where, **kwargs)
-    self.name_tmpl = name_tmpl
+    super(Operation, self).__init__(name, child or (), where, name_tmpl,
+                                    **kwargs)
     self.extra_index = [extra_index] if isinstance(extra_index,
                                                    str) else extra_index or []
     self.precomputable_in_jk = True
+    self.precompute_child = True
+    self.apply_name_tmpl = True
 
   def split_data(self, df, split_by=None):
-    """If vectorization is unavailable, split the data returned by children."""
-    if isinstance(self, MetricWithCI):
-      for s in super(Operation, self).split_data(df, split_by):
-        yield s
+    """Splits the DataFrame returned by the children if it's computed."""
+    if not self.precompute_child or not split_by:
+      for i in super(Operation, self).split_data(df, split_by):
+        yield i
     else:
-      if not split_by:
-        yield self.compute_child(df, self.extra_index), None
-      else:
-        child = self.compute_child(df, split_by + self.extra_index)
-        keys, indices = list(zip(*child.groupby(split_by).groups.items()))
-        for i, idx in enumerate(indices):
-          yield child.loc[idx.unique()].droplevel(split_by), keys[i]
+      keys, indices = zip(*df.groupby(split_by).groups.items())
+      for k, idx in zip(keys, indices):
+        yield df.loc[idx.unique()].droplevel(split_by), k
+
+  def compute_children(self,
+                       df: pd.DataFrame,
+                       split_by=None,
+                       melted=False,
+                       return_dataframe=True,
+                       cache_key=None):
+    return self.compute_child(df, split_by, melted, return_dataframe, cache_key)
 
   def compute_child(self,
                     df: pd.DataFrame,
@@ -110,19 +123,10 @@ class Operation(metrics.Metric):
     cache_key = self.wrap_cache_key(cache_key, split_by)
     return child.compute_on(df, split_by, melted, return_dataframe, cache_key)
 
-  def manipulate(self, res, melted, return_dataframe=True):
-    """Applies name_tmpl to all Metric names."""
-    res = super(Operation, self).manipulate(res, melted, return_dataframe)
-    res = res.copy()  # Avoid changing the result in cache.
-    if melted:
-      if len(res.index.names) > 1:
-        res.index.set_levels(
-            map(self.name_tmpl.format, res.index.levels[0]), 0, inplace=True)
-      else:
-        res.index = map(self.name_tmpl.format, res.index)
-    else:
-      res.columns = map(self.name_tmpl.format, res.columns)
-    return res
+  def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
+    res = super(Operation,
+                self).compute_on_sql_mixed_mode(table, split_by, execute, mode)
+    return utils.apply_name_tmpl(self.name_tmpl, res)
 
   def flush_children(self,
                      key=None,
@@ -158,11 +162,9 @@ class Distribution(Operation):
     super(Distribution, self).__init__(child, 'Distribution of {}', over,
                                        **kwargs)
 
-  def compute_slices(self, df, split_by=None):
-    lvls = split_by + self.extra_index if split_by else self.extra_index
-    res = self.compute_child(df, lvls)
-    total = res.groupby(level=split_by).sum() if split_by else res.sum()
-    return res / total
+  def compute_on_children(self, child, split_by):
+    total = child.groupby(level=split_by).sum() if split_by else child.sum()
+    return child / total
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -447,16 +449,12 @@ class PercentChange(Comparison):
           self).__init__(condition_column, baseline_key, child, include_base,
                          '{} Percent Change', **kwargs)
 
-  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+  def compute_on_children(self, child, split_by):
+    level = None
     if split_by:
-      to_split = list(split_by) + self.extra_index
       level = self.extra_index[0] if len(
           self.extra_index) == 1 else self.extra_index
-    else:
-      to_split = self.extra_index
-      level = None
-    res = self.compute_child(df, to_split)
-    res = (res / res.xs(self.baseline_key, level=level) - 1) * 100
+    res = (child / child.xs(self.baseline_key, level=level) - 1) * 100
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
@@ -489,19 +487,15 @@ class AbsoluteChange(Comparison):
           self).__init__(condition_column, baseline_key, child, include_base,
                          '{} Absolute Change', **kwargs)
 
-  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+  def compute_on_children(self, child, split_by):
+    level = None
     if split_by:
-      to_split = list(split_by) + self.extra_index
       level = self.extra_index[0] if len(
           self.extra_index) == 1 else self.extra_index
-    else:
-      to_split = self.extra_index
-      level = None
-    res = self.compute_child(df, to_split)
     # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
-    res = res - res.xs(self.baseline_key, level=level)
+    res = child - child.xs(self.baseline_key, level=level)
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
@@ -554,19 +548,46 @@ class MH(Comparison):
                         metrics.CompositeMetric) or metric.op(2.0, 2) != 1:
         raise ValueError('MH only makes sense on ratio Metrics.')
 
-  def compute_one_metric(self, metric, df, split_by=None):
+  def compute_children(self,
+                       df: pd.DataFrame,
+                       split_by=None,
+                       melted=False,
+                       return_dataframe=True,
+                       cache_key=None):
+    self.check_is_ratio()
+    child = self.children[0]
+    cache_key = cache_key or self.cache_key or self.RESERVED_KEY
+    cache_key = self.wrap_cache_key(cache_key, split_by + self.stratified_by)
+    if isinstance(child, metrics.MetricList):
+      children = []
+      for m in child.children:
+        util_metric = metrics.MetricList(m.children)
+        children.append(
+            util_metric.compute_on(
+                df, split_by + self.stratified_by, cache_key=cache_key))
+      return children
+    util_metric = metrics.MetricList(child.children)
+    return util_metric.compute_on(
+        df, split_by + self.stratified_by, cache_key=cache_key)
+
+  def compute_on_children(self, children, split_by):
+    child = self.children[0]
+    if isinstance(child, metrics.MetricList):
+      res = [
+          self.compute_mh(c, d, split_by)
+          for c, d in zip(child.children, children)
+      ]
+      return pd.concat(res, 1, sort=False)
+    return self.compute_mh(child, children, split_by)
+
+  def compute_mh(self, child, df_all, split_by):
     """Computes MH statistics for one Metric."""
-    mh_metric = metrics.MetricList(metric.children)
-    numer = metric.children[0].name
-    denom = metric.children[1].name
-    df_all = mh_metric.compute_on(
-        df,
-        split_by + self.extra_index + self.stratified_by,
-        cache_key=self.cache_key or self.RESERVED_KEY)
     level = self.extra_index[0] if len(
         self.extra_index) == 1 else self.extra_index
     df_baseline = df_all.xs(self.baseline_key, level=level)
     suffix = '_base'
+    numer = child.children[0].name
+    denom = child.children[1].name
     df_mh = df_all.join(df_baseline, rsuffix=suffix)
     ka, na = df_mh[numer], df_mh[denom]
     kb, nb = df_mh[numer + suffix], df_mh[denom + suffix]
@@ -574,7 +595,7 @@ class MH(Comparison):
     to_split = [i for i in ka.index.names if i not in self.stratified_by]
     res = ((ka * nb * weights).groupby(to_split).sum() /
            (kb * na * weights).groupby(to_split).sum() - 1) * 100
-    res.name = metric.name
+    res.name = child.name
     to_split = [i for i in to_split if i not in self.extra_index]
     if to_split:
       split_by = split_by or []
@@ -587,16 +608,26 @@ class MH(Comparison):
       res = res[~idx_to_match.isin([self.baseline_key])]
     return pd.DataFrame(res.sort_index(level=split_by + self.extra_index))
 
-  def compute_slices(self, df, split_by):
+  def compute_children_sql(self, table, split_by, execute, mode=None):
     self.check_is_ratio()
     child = self.children[0]
     if isinstance(child, metrics.MetricList):
-      return pd.concat(
-          [self.compute_one_metric(m, df, split_by) for m in child],
-          axis=1,
-          sort=False)
-    else:
-      return self.compute_one_metric(child, df, split_by)
+      children = []
+      for m in child.children:
+        util_metric = metrics.MetricList(m.children)
+        c = util_metric.compute_on_sql(
+            table,
+            split_by + self.extra_index + self.stratified_by,
+            execute,
+            mode=mode)
+        children.append(c)
+      return children
+    util_metric = metrics.MetricList(child.children)
+    return util_metric.compute_on_sql(
+        table,
+        split_by + self.extra_index + self.stratified_by,
+        execute,
+        mode=mode)
 
   def flush_children(self,
                      key=None,
@@ -746,7 +777,6 @@ def get_display_fn(name,
                    split_by=None,
                    melted=False,
                    value='Value',
-                   raw=None,
                    condition_column: Optional[List[Text]] = None,
                    ctrl_id=None,
                    default_metric_formats=None):
@@ -757,8 +787,6 @@ def get_display_fn(name,
     split_by: The split_by passed to Jackknife().compute_on().
     melted: Whether the input res is in long format.
     value: The name of the value column.
-    raw: Present if the child is PercentChange or AbsoluteChange. It's the base
-      values for comparison. We will use it in the display.
     condition_column: Present if the child is PercentChange or AbsoluteChange.
     ctrl_id: Present if the child is PercentChange or AbsoluteChange. It's the
       baseline_key of the comparison.
@@ -817,16 +845,18 @@ def get_display_fn(name,
       Displays confidence interval nicely for df, or aggregated/formatted if
       return_pre_agg_df/return_formatted_df is True.
     """
+    base = res.meterstick_change_base
     if not melted:
       res = utils.melt(res)
-    if raw is not None:
-      res = raw.join(res)  # raw always has the baseline so needs to be at left.
+    if base is not None:
+      # base always has the baseline so needs to be at left.
+      res = base.join(res)
       comparison_suffix = [
           AbsoluteChange('', '').name_tmpl.format(''),
           PercentChange('', '').name_tmpl.format('')
       ]
       comparison_suffix = '(%s)$' % '|'.join(comparison_suffix)
-      # Don't use inplace=True. It will change the index of 'raw' too.
+      # Don't use inplace=True. It will change the index of 'base' too.
       res.index = res.index.set_levels(
           res.index.levels[0].str.replace(comparison_suffix, ''), 0)
       show_control = True if show_control is None else show_control
@@ -892,15 +922,13 @@ class MetricWithCI(Operation):
   As the return has multiple columns even for one Metric, the default DataFrame
   returned is in melted format, unlike vanilla Metric.
   The main computation pipeline is used to compute stderr or confidence interval
-  bounds. We compute the point estimates in final_compute() and and combine it
-  with stderr or CI in the final_compute.
+  bounds. Then we compute the point estimates and combine it with stderr or CI.
   Similar to how you derive Metric, if you don't need vectorization, overwrite
-  compute(), or even simpler, get_samples(). See Bootstrap for an example. If
-  you need vectorization, overwrite compute_slices. See Jackknife for an
-  example.
+  compute(). If you need vectorization, overwrite compute_slices(), or even
+  simpler, get_samples(). See Jackknife and Bootstrap for examples.
 
   Attributes:
-    unit: The column to go over (kackknife/bootstrap over) to get stderr.
+    unit: The column to go over (jackknife/bootstrap over) to get stderr.
     confidence: The level of the confidence interval, must be in (0, 1). If
       specified, we return confidence interval range instead of standard error.
       Additionally, a display() function will be bound to the result so you can
@@ -922,6 +950,7 @@ class MetricWithCI(Operation):
     self.unit = unit
     self.confidence = confidence
     super(MetricWithCI, self).__init__(child, name_tmpl, **kwargs)
+    self.apply_name_tmpl = False
     self.prefix = prefix
     if not self.prefix and self.name_tmpl:
       self.prefix = prefix or self.name_tmpl.format('').strip()
@@ -962,58 +991,94 @@ class MetricWithCI(Operation):
     # There are funtions outside meterstick directly call this, so don't change.
     return estimates
 
-  def compute(self, df):
-    replicates = self.compute_on_samples(self.get_samples(df))
-    bucket_estimates = pd.concat(replicates, axis=1, sort=False)
+  def compute_children(self,
+                       df: pd.DataFrame,
+                       split_by=None,
+                       melted=False,
+                       return_dataframe=True,
+                       cache_key=None):
+    del melted, return_dataframe, cache_key  # unused
+    return self.compute_on_samples(self.get_samples(df, split_by), split_by)
+
+  def compute_on_children(self, children, split_by):
+    del split_by  # unused
+    bucket_estimates = pd.concat(children, axis=1, sort=False)
     return self.get_stderrs_or_ci_half_width(bucket_estimates)
 
   def manipulate(self,
                  res,
-                 melted: bool = False,
-                 return_dataframe: bool = True):
+                 melted=False,
+                 return_dataframe=True,
+                 apply_name_tmpl=False):
     # Always return a melted df and don't add suffix like "Jackknife" because
     # point_est won't have it.
     del melted, return_dataframe  # unused
-    return super(Operation, self).manipulate(res, True, True)  # pylint: disable=bad-super-call
+    base = res.meterstick_change_base
+    res = super(MetricWithCI, self).manipulate(res, True, True, apply_name_tmpl)
+    return self._add_base_to_res(res, base)
 
-  def final_compute(self,
-                    std,
-                    melted: bool = False,
-                    return_dataframe: bool = True,
-                    split_by: Optional[List[Text]] = None,
-                    df=None):
-    """Computes point estimates and returns it with stderrs or CI range."""
-    if self.where:
-      df = df.query(self.where)
+  def compute_slices(self, df, split_by):
+    std = super(MetricWithCI, self).compute_slices(df, split_by)
     point_est = self.compute_child(df, split_by, melted=True)
-    res = point_est.join(std)
-
+    res = point_est.join(utils.melt(std))
     if self.confidence:
       res[self.prefix +
           ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
       res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
+    res = utils.unmelt(res)
+    base = self._compute_change_base(df, split_by)
+    return self._add_base_to_res(res, base)
 
+  def _compute_change_base(self, df, split_by, execute=None, mode=None):
+    """Computes the base values for Change. It's used in res.display()."""
+    if not self.confidence:
+      return None
+    if len(self.children) != 1 or not isinstance(
+        self.children[0], (PercentChange, AbsoluteChange)):
+      return None
+    base = None
+    change = self.children[0]
+    to_split = (
+        split_by + change.extra_index if split_by else change.extra_index)
+    if execute is None:
+      base = change.compute_child(df, to_split)
+    else:
+      base = change.children[0].compute_on_sql(df, to_split, execute, mode=mode)
+    base.columns = [change.name_tmpl.format(c) for c in base.columns]
+    base = utils.melt(base)
+    base.columns = ['_base_value']
+    return base
+
+  @staticmethod
+  def _add_base_to_res(res, base):
+    with warnings.catch_warnings():
+      warnings.simplefilter(action='ignore', category=UserWarning)
+      res.meterstick_change_base = base
+    return res
+
+  def final_compute(self,
+                    res,
+                    melted: bool = False,
+                    return_dataframe: bool = True,
+                    split_by: Optional[List[Text]] = None,
+                    df=None):
+    """Add a display function if confidence is specified."""
+    del return_dataframe  # unused
+    base = res.meterstick_change_base
     if not melted:
       res = utils.unmelt(res)
-
+      self._add_base_to_res(res, base)
     if self.confidence:
-      raw = None
       extra_idx = list(metrics.get_extra_idx(self))
       indexes = split_by + extra_idx if split_by else extra_idx
       if len(self.children) == 1 and isinstance(
           self.children[0], (PercentChange, AbsoluteChange)):
         change = self.children[0]
-        to_split = (
-            split_by + change.extra_index if split_by else change.extra_index)
         indexes = [i for i in indexes if i not in change.extra_index]
-        raw = change.compute_child(df, to_split)
-        raw.columns = [change.name_tmpl.format(c) for c in raw.columns]
-        raw = utils.melt(raw)
-        raw.columns = ['_base_value']
-      res = self.add_display_fn(res, indexes, melted, raw)
+      res = self.add_display_fn(res, indexes, melted)
     return res
 
-  def add_display_fn(self, res, split_by, melted, raw=None):
+  def add_display_fn(self, res, split_by, melted):
     """Bounds a display function to res so res.display() works."""
     value = res.columns[0] if melted else res.columns[0][1]
     ctrl_id = None
@@ -1027,8 +1092,8 @@ class MetricWithCI(Operation):
       if isinstance(self.children[0], PercentChange):
         metric_formats = {'Ratio': 'percent'}
 
-    fn = get_display_fn(self.prefix, split_by, melted, value, raw,
-                        condition_col, ctrl_id, metric_formats)
+    fn = get_display_fn(self.prefix, split_by, melted, value, condition_col,
+                        ctrl_id, metric_formats)
     # pylint: disable=no-value-for-parameter
     res.display = fn.__get__(res)  # pytype: disable=attribute-error
     # pylint: enable=no-value-for-parameter
@@ -1147,30 +1212,85 @@ class MetricWithCI(Operation):
       table,
       split_by=None,
       execute=None,
-      melted=False):
-    res = super(MetricWithCI, self).compute_on_sql(
-        table,
-        split_by,
-        execute)
+      melted=False,
+      mode=None,
+      batch_size=None,
+  ):
+    """Computes self in pure SQL or a mixed of SQL and Python.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      melted: Whether to transform the result to long format.
+      mode: For Operations, there are two ways to compute the result in SQL, one
+        is computing everything in SQL, the other is computing the children
+        in SQL then the rest in Python. We call them 'sql' and 'mixed' modes. If
+        self has grandchildren, then we can compute the chilren in two modes
+        too. We can call them light `mixed` mode and recursive `mixed` mode.
+        If `mode` is 'sql', it computes everything in SQL.
+        If `mode` is 'mixed', it computes everything recursively in the `mixed`
+        mode.
+        We recommend `mode` to be None. This mode tries the `sql` mode first, if
+        not implemented, switch to light `mixed` mode. The logic is applied
+        recursively from the root to leaf Metrics, so a Metric tree could have
+        top 3 layeres computed in Python and the bottom in SQL. In summary,
+        everything can be computed in SQL is computed in SQL.
+      batch_size: The number of resamples to compute in one SQL run. It only has
+        effect in the 'mixed' mode.
+
+    Returns:
+      A pandas DataFrame. It's the computeation of self in SQL.
+    """
+    self._batch_size = batch_size
+    return super(MetricWithCI, self).compute_on_sql(table, split_by, execute,
+                                                    melted, mode)
+
+  def compute_through_sql(self, table, split_by, execute, mode):
+    if mode not in (None, 'sql', 'mixed'):
+      raise ValueError('Mode %s is not supported!' % mode)
+    if not self.children:
+      mode = 'sql'
+    if mode in (None, 'sql'):
+      computable_in_pure_sql = True
+      for m in self.traverse(False):
+        if not m.computable_in_pure_sql:
+          computable_in_pure_sql = False
+          if mode == 'sql':
+            raise ValueError('%s is not computable in pure SQL.' % self.name)
+          break
+      if computable_in_pure_sql:
+        try:
+          return self.compute_on_sql_sql_mode(table, split_by, execute)
+        except Exception as e:  # pylint: disable=broad-except
+          raise Exception(
+              "Please see the root cause of the failure above. If it's caused "
+              'by the query being too complex, you can try '
+              "compute_on_sql(..., mode='mixed', batch_size=int).") from e
+    if self.where:
+      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
+    return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+
+  def compute_on_sql_sql_mode(self, table, split_by, execute):
+    """Computes self in a SQL query and process the result."""
+    res = super(MetricWithCI,
+                self).compute_on_sql_sql_mode(table, split_by, execute)
     sub_dfs = []
+    base = None
     if self.confidence:
-      # raw contains the base values passed to comparison.
-      raw = None
-      split_by = [split_by] if isinstance(split_by, str) else split_by
-      extra_idx = list(metrics.get_extra_idx(self))
-      indexes = split_by + extra_idx if split_by else extra_idx
       if len(self.children) == 1 and isinstance(
           self.children[0], (PercentChange, AbsoluteChange)):
+        # The first 3n columns are Value, SE, dof for n Metrics. The
+        # last n columns are the base values of Change.
         if len(res.columns) % 4:
           raise ValueError('Wrong shape for a MetricWithCI with confidence!')
         n_metrics = len(res.columns) // 4
-        raw = res.iloc[:, -n_metrics:]
+        base = res.iloc[:, -n_metrics:]
         res = res.iloc[:, :3 * n_metrics]
         change = self.children[0]
-        raw.columns = [change.name_tmpl.format(c) for c in raw.columns]
-        raw = utils.melt(raw)
-        raw.columns = ['_base_value']
-        indexes = [i for i in indexes if i not in change.extra_index]
+        base.columns = [change.name_tmpl.format(c) for c in base.columns]
+        base = utils.melt(base)
+        base.columns = ['_base_value']
 
       if len(res.columns) % 3:
         raise ValueError('Wrong shape for a MetricWithCI with confidence!')
@@ -1203,10 +1323,33 @@ class MetricWithCI(Operation):
         sub_dfs.append(sub_df)
 
     res = pd.concat((sub_dfs), 1, keys=metric_names, names=['Metric'])
-    res = utils.melt(res) if melted else res
+    return self._add_base_to_res(res, base)
+
+  def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
+    replicates = self.compute_children_sql(table, split_by, execute, mode,
+                                           self._batch_size)
+    std = self.compute_on_children(replicates, split_by)
+    if self.where:
+      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
+    point_est = self.children[0].compute_on_sql(table, split_by, execute, True,
+                                                mode)
+    res = point_est.join(utils.melt(std))
     if self.confidence:
-      res = self.add_display_fn(res, indexes, melted, raw)
-    return res
+      res[self.prefix +
+          ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
+      res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
+    res = utils.unmelt(res)
+    base = self._compute_change_base(table, split_by, execute, mode)
+    return self._add_base_to_res(res, base)
+
+  def compute_children_sql(self,
+                           table,
+                           split_by,
+                           execute,
+                           mode=None,
+                           batch_size=None):
+    """The return should be similar to compute_children()."""
+    raise NotImplementedError
 
 
 def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
@@ -1470,6 +1613,8 @@ class Jackknife(MetricWithCI):
     super(Jackknife, self).__init__(unit, child, confidence, '{} Jackknife',
                                     None, **kwargs)
     self.can_precompute = self.can_be_precomputed()
+    if confidence:
+      self.computable_in_pure_sql = False
 
   def __call__(self, child: metrics.Metric):
     jk = super(Jackknife, self).__call__(child)
@@ -1505,7 +1650,8 @@ class Jackknife(MetricWithCI):
           self.unit, split_by, original_ct_compute_slices)
       metrics.Mean.compute_slices = get_mean_monkey_patch_fn(
           self.unit, split_by)
-      metrics.Dot.compute_slices = get_dot_monkey_patch_fn(self.unit, split_by, original_dot_compute_slices)
+      metrics.Dot.compute_slices = get_dot_monkey_patch_fn(
+          self.unit, split_by, original_dot_compute_slices)
       metrics.Metric.save_to_cache = save_to_cache_for_jackknife
       cache_key = self.cache_key or self.RESERVED_KEY
       cache_key = ('_RESERVED', 'jk', cache_key, self.unit)
@@ -1562,36 +1708,27 @@ class Jackknife(MetricWithCI):
           yield ('_RESERVED', 'Jackknife', self.unit,
                  lvl), df_rest.reset_index()
 
-  def compute_slices(self, df, split_by=None):
-    """Tries to compute stderr in a vectorized way as much as possible.
-
-    If the Jackknife is precomputable, we try to compute the leave-one-out (loo)
-    estimates on the whole df first. If it fails, we compute slice by slice
-    instead because we don't want to return NAs for valid slices just because an
-    irrelevant slice raises an error.
-
-    Args:
-      df: The DataFrame to compute on.
-      split_by: A list of column names to be passed to df.group_by().
-
-    Returns:
-      A melted DataFrame of stderrs for all Metrics in self.children[0].
-    """
-    estimates = None
+  def compute_children(self,
+                       df: pd.DataFrame,
+                       split_by=None,
+                       melted=False,
+                       return_dataframe=True,
+                       cache_key=None):
+    del melted, return_dataframe, cache_key  # unused
+    replicates = None
     if self.can_precompute:
       try:
-        estimates = self.compute_child(
+        replicates = self.compute_child(
             None, [self.unit] + split_by,
             True,
             cache_key=('_RESERVED', 'Jackknife', self.unit))
-        estimates = estimates.unstack(self.unit)
+        replicates = [replicates.unstack(self.unit)]
       except Exception:  # pylint: disable=broad-except
         pass  # Fall back to computing slice by slice to salvage good slices.
-    if estimates is None:
+    if replicates is None:
       samples = self.get_samples(df, split_by)
       replicates = self.compute_on_samples(samples, split_by)
-      estimates = pd.concat(replicates, axis=1, sort=False)
-    return self.get_stderrs_or_ci_half_width(estimates)
+    return replicates
 
   @staticmethod
   def get_stderrs(bucket_estimates):
@@ -1610,13 +1747,61 @@ class Jackknife(MetricWithCI):
         return False
     return True
 
+  def compute_children_sql(self, table, split_by, execute, mode, batch_size):
+    """Compute the children on leave-one-out data in SQL."""
+    batch_size = batch_size or 1
+    slice_and_units = sql.Sql(
+        sql.Columns(split_by + [self.unit], distinct=True), table, self.where)
+    slice_and_units = execute(str(slice_and_units))
+    if split_by:
+      slice_and_units.set_index(split_by, inplace=True)
+    replicates = []
+    unique_units = slice_and_units[self.unit].unique()
+    if batch_size == 1:
+      loo_sql = sql.Sql(sql.Column('*', auto_alias=False), table)
+      for unit in unique_units:
+        loo_where = '%s != "%s"' % (self.unit, unit)
+        if pd.api.types.is_numeric_dtype(slice_and_units[self.unit]):
+          loo_where = '%s != %s' % (self.unit, unit)
+        loo_sql.where = sql.Filters((self.where, loo_where))
+        loo = self.children[0].compute_on_sql(
+            loo_sql, split_by, execute, mode=mode)
+        # If a slice doesn't have the unit in the input data, we should exclude
+        # the slice in the loo.
+        if split_by:
+          loo = slice_and_units[slice_and_units[self.unit] == unit].join(loo)
+          loo.drop(self.unit, 1, inplace=True)
+        replicates.append(utils.melt(loo))
+    else:
+      if split_by:
+        slice_and_units.set_index(self.unit, append=True, inplace=True)
+      for i in range(int(np.ceil(len(unique_units) / batch_size))):
+        units = list(unique_units[i * batch_size:(i + 1) * batch_size])
+        loo = sql.Sql(
+            sql.Column('*', auto_alias=False),
+            sql.Datasource('UNNEST(%s)' % units, '_resample_idx').join(
+                table, on='_resample_idx != %s' % self.unit), self.where)
+        loo = self.children[0].compute_on_sql(loo, split_by + ['_resample_idx'],
+                                              execute, True, mode)
+        # If a slice doesn't have the unit in the input data, we should exclude
+        # the slice in the loo.
+        if split_by:
+          loo.index.set_names(self.unit, level='_resample_idx', inplace=True)
+          loo = slice_and_units.join(utils.unmelt(loo), how='inner')
+          loo = utils.melt(loo).unstack(self.unit)
+        else:
+          loo = loo.unstack('_resample_idx')
+        replicates.append(loo)
+    return replicates
+
 
 class Bootstrap(MetricWithCI):
   """Class for Bootstrap estimates of standard errors.
 
   Attributes:
-    unit: The column representing the level to be resampled. If sample the
-      slices in unit column, otherwise we sample rows.
+    unit: The column representing the blocks to be resampled in block bootstrap.
+      If specified we sample the unique blocks in the `unit` column, otherwise
+      we sample rows.
     n_replicates: The number of bootstrap replicates. In "What Teachers Should
       Know About the Bootstrap" Tim Hesterberg recommends 10000 for routine use
       https://amstat.tandfonline.com/doi/full/10.1080/00031305.2015.1089789.
@@ -1638,20 +1823,59 @@ class Bootstrap(MetricWithCI):
                                     None, **kwargs)
     self.n_replicates = n_replicates
 
-  def get_samples(self, df):
+  def get_samples(self, df, split_by=None):
+    split_by = [split_by] if isinstance(split_by, str) else split_by or []
     if self.unit:
-      slices = df[self.unit].unique()
-      buckets = range(len(slices))
-      data_slices = [df[df[self.unit] == s] for s in slices]
-    else:
-      buckets = range(len(df))
+      df = df.set_index(split_by + [self.unit])
     for _ in range(self.n_replicates):
-      buckets_sampled = np.random.choice(buckets, size=len(buckets))
       if self.unit is None:
-        yield ('_RESERVED', 'Bootstrap', self.unit), df.iloc[buckets_sampled]
+        yield ('_RESERVED', 'Bootstrap', None), self.group(df, split_by).sample(
+            frac=1, replace=True)
       else:
+        if split_by:
+          resampled = []
+          for idx in df.groupby(split_by).groups.values():
+            resampled.append(idx.unique().to_series().sample(
+                frac=1, replace=True))
+          resampled = pd.concat(resampled)
+        else:
+          resampled = df.index.unique().to_series().sample(frac=1, replace=True)
         yield ('_RESERVED', 'Bootstrap',
-               self.unit), pd.concat(data_slices[i] for i in buckets_sampled)
+               self.unit), df.loc[resampled].reset_index()
+
+  def compute_children_sql(self, table, split_by, execute, mode, batch_size):
+    """Compute the children on resampled data in SQL."""
+    batch_size = batch_size or 10
+    global_filter = metrics.get_global_filter(self)
+    util_metric = copy.deepcopy(self)
+    util_metric.n_replicates = batch_size
+    util_metric.confidence = None
+    with_data = sql.Datasources()
+    if not sql.Datasource(table).is_table:
+      table = with_data.add(sql.Datasource(table, 'BootstrapData'))
+    with_data2 = copy.deepcopy(with_data)
+    _, with_data = get_bootstrap_data(util_metric, table, sql.Columns(split_by),
+                                      global_filter, sql.Filters(), with_data)
+    resampled = with_data.children.popitem()[1]
+    resampled.with_data = with_data
+    replicates = []
+    for _ in range(self.n_replicates // batch_size):
+      bst = self.children[0].compute_on_sql(resampled,
+                                            ['_resample_idx'] + split_by,
+                                            execute, True, mode)
+      replicates.append(bst.unstack('_resample_idx'))
+    util_metric.n_replicates = self.n_replicates % batch_size
+    if util_metric.n_replicates:
+      _, with_data2 = get_bootstrap_data(util_metric, table,
+                                         sql.Columns(split_by), global_filter,
+                                         sql.Filters(), with_data2)
+      resampled = with_data2.children.popitem()[1]
+      resampled.with_data = with_data2
+      bst = self.children[0].compute_on_sql(resampled,
+                                            ['_resample_idx'] + split_by,
+                                            execute, True, mode)
+      replicates.append(bst.unstack('_resample_idx'))
+    return replicates
 
 
 def get_se(metric, table, split_by, global_filter, indexes, local_filter,
