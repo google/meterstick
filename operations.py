@@ -2044,15 +2044,12 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
   Otherwise for general cases, the SQL is constructed as
   1. if split_by is None:
     WITH
-    Buckets AS (SELECT
-      ARRAY_AGG(DISTINCT unit) AS _jk_buckets
+    Buckets AS (SELECT DISTINCT unit AS _resample_idx
     FROM $DATA
     WHERE filter),
     JackknifeResammpledData AS (SELECT
       *
     FROM Buckets
-    JOIN
-    UNNEST(_jk_buckets) AS _resample_idx
     CROSS JOIN
     $DATA
     WHERE
@@ -2060,17 +2057,15 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
 
   2. if split_by is not None:
     WITH
-    Buckets AS (SELECT
+    Buckets AS (SELECT DISTINCT
       split_by AS _jk_split_by,
-      ARRAY_AGG(DISTINCT unit) AS _jk_buckets
+      unit AS _resample_idx
     FROM $DATA
     WHERE filter
     GROUP BY _jk_split_by),
     JackknifeResammpledData AS (SELECT
       *
     FROM Buckets
-    JOIN
-    UNNEST(_jk_buckets) AS _resample_idx
     JOIN
     $DATA
     ON _jk_split_by = split_by AND _resample_idx != unit
@@ -2089,20 +2084,19 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
     The global with_data which holds all datasources we need in the WITH clause.
   """
   unit = metric.unit
-  unique_units = sql.Columns(
-      (sql.Column('ARRAY_AGG(DISTINCT %s)' % unit, alias='_jk_buckets')))
+  unique_units = sql.Columns((sql.Column(unit, alias='_resample_idx')),
+                             distinct=True)
   where = sql.Filters(global_filter).add(local_filter)
   if split_by:
     groupby = sql.Columns(
         (sql.Column(c.expression, alias='_jk_%s' % c.alias) for c in split_by))
-    buckets = sql.Sql(unique_units, table, where, groupby)
+    cols = sql.Columns(groupby.add(unique_units), distinct=True)
+    buckets = sql.Sql(cols, table, where)
     buckets_alias = with_data.add(sql.Datasource(buckets, 'Buckets'))
-    jk_from = sql.Join(buckets_alias,
-                       sql.Datasource('UNNEST(_jk_buckets)', '_resample_idx'))
     on = sql.Filters(('%s.%s = %s' % (buckets_alias, c.alias, s.expression)
                       for c, s in zip(groupby, split_by)))
     on.add('_resample_idx != %s' % unit)
-    jk_from = jk_from.join(table, on=on)
+    jk_from = sql.Join(buckets_alias, table, on)
     jk_data_table = sql.Sql(
         sql.Columns(sql.Column('*', auto_alias=False)), jk_from, where=where)
     jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
@@ -2110,10 +2104,7 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
   else:
     buckets = sql.Sql(unique_units, table, where=where)
     buckets_alias = with_data.add(sql.Datasource(buckets, 'Buckets'))
-
-    jk_from = sql.Join(buckets_alias,
-                       sql.Datasource('UNNEST(_jk_buckets)', '_resample_idx'))
-    jk_from = jk_from.join(table, join='CROSS')
+    jk_from = sql.Join(buckets_alias, table, join='CROSS')
     jk_data_table = sql.Sql(
         sql.Column('*', auto_alias=False),
         jk_from,
