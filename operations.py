@@ -1326,8 +1326,15 @@ class MetricWithCI(Operation):
     return self._add_base_to_res(res, base)
 
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
-    replicates = self.compute_children_sql(table, split_by, execute, mode,
-                                           self._batch_size)
+    try:
+      replicates = self.compute_children_sql(table, split_by, execute, mode,
+                                             self._batch_size)
+    except Exception as e:  # pylint: disable=broad-except
+      raise Exception(
+          "Please see the root cause of the failure above. If it's caused "
+          'by the query being too large, you can try reducing the '
+          'batch_size in compute_on_sql(). Current batch_size is %s.' %
+          self._batch_size) from e
     std = self.compute_on_children(replicates, split_by)
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
@@ -1845,7 +1852,7 @@ class Bootstrap(MetricWithCI):
 
   def compute_children_sql(self, table, split_by, execute, mode, batch_size):
     """Compute the children on resampled data in SQL."""
-    batch_size = batch_size or 10
+    batch_size = batch_size or 1000
     global_filter = metrics.get_global_filter(self)
     util_metric = copy.deepcopy(self)
     util_metric.n_replicates = batch_size
