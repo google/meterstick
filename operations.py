@@ -2049,7 +2049,7 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
     FROM $DATA
     WHERE filter),
     JackknifeResammpledData AS (SELECT
-      * EXCEPT (_jk_buckets)
+      *
     FROM Buckets
     JOIN
     UNNEST(_jk_buckets) AS _resample_idx
@@ -2067,7 +2067,7 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
     WHERE filter
     GROUP BY _jk_split_by),
     JackknifeResammpledData AS (SELECT
-      * EXCEPT (_jk_split_by, _jk_buckets)
+      *
     FROM Buckets
     JOIN
     UNNEST(_jk_buckets) AS _resample_idx
@@ -2103,11 +2103,8 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
                       for c, s in zip(groupby, split_by)))
     on.add('_resample_idx != %s' % unit)
     jk_from = jk_from.join(table, on=on)
-    exclude = groupby.as_groupby() + ', _jk_buckets'
     jk_data_table = sql.Sql(
-        sql.Columns(sql.Column('* EXCEPT (%s)' % exclude, auto_alias=False)),
-        jk_from,
-        where=where)
+        sql.Columns(sql.Column('*', auto_alias=False)), jk_from, where=where)
     jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
     jk_data_table_alias = with_data.add(jk_data_table)
   else:
@@ -2118,7 +2115,7 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
                        sql.Datasource('UNNEST(_jk_buckets)', '_resample_idx'))
     jk_from = jk_from.join(table, join='CROSS')
     jk_data_table = sql.Sql(
-        sql.Column('* EXCEPT (_jk_buckets)', auto_alias=False),
+        sql.Column('*', auto_alias=False),
         jk_from,
         where=sql.Filters('_resample_idx != %s' % unit).add(where))
     jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
@@ -2543,7 +2540,7 @@ def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
     JOIN
     UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS _resample_idx),
     BootstrapRandomChoices AS (SELECT
-      b.* EXCEPT (_bs_row_number, _bs_filter)
+      b.*
     FROM (SELECT
       split_by,
       _resample_idx,
@@ -2623,9 +2620,7 @@ def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
         sql.Datasource(random_choice_table, 'BootstrapRandomRows'))
 
     using = sql.Columns(partition).add('_bs_row_number').difference(str(where))
-    excludes = ['_bs_row_number']
     if where:
-      excludes.append('_bs_filter')
       using.add('_bs_filter')
     random_rows = sql.Sql(
         sql.Columns(using).difference('_bs_row_number').add(
@@ -2635,7 +2630,7 @@ def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
     resampled = random_rows.join(
         sql.Datasource(random_choice_table_alias, 'b'), using=using)
     table = sql.Sql(
-        sql.Column('b.* EXCEPT (%s)' % ', '.join(excludes), auto_alias=False),
+        sql.Column('b.*', auto_alias=False),
         resampled,
         where='_bs_filter' if where else None)
     table = with_data.add(sql.Datasource(table, 'BootstrapRandomChoices'))
