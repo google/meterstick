@@ -2201,12 +2201,6 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
   Operation, then we need to adjust the slices. See
   utils.adjust_slices_for_loo() for more discussions. The query will look like
   WITH
-  AllSlices AS (SELECT
-    split_by,
-    ARRAY_AGG(DISTINCT extra_index) AS extra_index,
-    ARRAY_AGG(DISTINCT unit) AS unit
-  FROM $DATA
-  GROUP BY split_by),
   UnitSliceCount AS (SELECT
     split_by,
     extra_index,
@@ -2214,7 +2208,7 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
     COUNT(*) AS ct,
     SUM(X) AS `sum(X)`
   FROM $DATA
-  GROUP BY split_by, condition, unit),
+  GROUP BY split_by, extra_index, unit),
   TotalCount AS (SELECT
     split_by,
     extra_index,
@@ -2227,17 +2221,16 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
     extra_index,
     unit AS _resample_idx,
     total.`sum(X)` - COALESCE(unit.`sum(X)`, 0) AS `sum(X)`
-  FROM AllSlices
-  JOIN
-  UNNEST (extra_index) AS extra_index
-  JOIN
-  UNNEST (unit) AS unit
+  FROM (SELECT DISTINCT
+    split_by,
+    unit
+  FROM UnitSliceCount)
+  LEFT JOIN  # Or (SELECT DISTINCT unit FROM UnitSliceCount) CROSS JOIN
+  TotalCount AS total
+  USING (split_by)
   LEFT JOIN
   UnitSliceCount AS unit
   USING (split_by, extra_index, unit)
-  JOIN
-  TotalCount AS total
-  USING (split_by, extra_index)
   WHERE
   total.ct - COALESCE(unit.ct, 0) > 0)
 
@@ -2261,14 +2254,6 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
   indexes_and_unit = sql.Columns(all_indexes).add(metric.unit)
   where = sql.Filters(global_filter).add(local_filter)
 
-  extra_idx = indexes_and_unit.difference(split_by)
-  unique_idx = sql.Columns(
-      (sql.Column('ARRAY_AGG(DISTINCT %s)' % c.expression, alias=c.alias)
-       for c in extra_idx))
-  all_slices_table = sql.Sql(unique_idx, table, where, split_by)
-  all_slices_alias = with_data.add(
-      sql.Datasource(all_slices_table, 'AllSlices'))
-
   columns_to_preagg = sql.Columns(sql.Column('COUNT(*)', alias='ct'))
   columns_in_loo = sql.Columns()
   # columns_to_preagg and columns_in_loo are filled in-place.
@@ -2289,22 +2274,26 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
       groupby=indexes_and_unit.difference(metric.unit).aliases)
   total_ct_alias = with_data.add(sql.Datasource(total_ct_table, 'TotalCount'))
 
-  slice_in_other_units = sql.Datasource(all_slices_alias)
-  for c in extra_idx:
-    slice_in_other_units = slice_in_other_units.join(
-        'UNNEST ({c}) AS {c}'.format(c=c.alias))
-  slice_in_other_units = slice_in_other_units.join(
+  split_by_and_unit = sql.Columns(split_by).add(metric.unit)
+  all_slices = sql.Datasource(
+      sql.Sql(
+          sql.Columns(split_by_and_unit, distinct=True), unit_slice_ct_alias))
+  if split_by:
+    loo_from = all_slices.join(
+        sql.Datasource(total_ct_alias, 'total'), using=split_by, join='LEFT')
+  else:
+    loo_from = all_slices.join(
+        sql.Datasource(total_ct_alias, 'total'), join='CROSS')
+  loo_from = loo_from.join(
       sql.Datasource(unit_slice_ct_alias, 'unit'),
       using=indexes_and_unit,
       join='LEFT')
-  slice_in_other_units = slice_in_other_units.join(
-      sql.Datasource(total_ct_alias, 'total'), using=all_indexes)
-  slice_in_other_units_table = sql.Sql(
+  loo = sql.Sql(
       sql.Columns(all_indexes.aliases).add(
           sql.Column(sql.Column(metric.unit).alias,
-                     alias='_resample_idx')).add(columns_in_loo),
-      slice_in_other_units, 'total.ct - COALESCE(unit.ct, 0) > 0')
-  loo_table = with_data.add(sql.Datasource(slice_in_other_units_table, 'LOO'))
+                     alias='_resample_idx')).add(columns_in_loo), loo_from,
+      'total.ct - COALESCE(unit.ct, 0) > 0')
+  loo_table = with_data.add(sql.Datasource(loo, 'LOO'))
   return loo_table, with_data
 
 
