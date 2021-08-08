@@ -548,29 +548,30 @@ class Metric(object):
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
-    if mode not in (None, 'sql', 'mixed'):
+    if mode not in (None, 'sql', 'mixed', 'magic'):
       raise ValueError('Mode %s is not supported!' % mode)
-    if not self.children:
-      mode = 'sql'
-    if mode in (None, 'sql'):
-      computable_in_pure_sql = True
-      for m in self.traverse():
-        if not m.computable_in_pure_sql:
-          computable_in_pure_sql = False
-          if mode == 'sql':
-            raise ValueError('%s is not computable in pure SQL.' % self.name)
-          break
-      if computable_in_pure_sql:
+    if not self.children and not self.computable_in_pure_sql:
+      raise ValueError('%s is not computable in SQL.' % self.name)
+    if mode in (None, 'sql') or not self.children:
+      if self.all_computable_in_pure_sql():
         try:
           return self.compute_on_sql_sql_mode(table, split_by, execute)
         except Exception as e:  # pylint: disable=broad-except
-          raise Exception(
-              "Please see the root cause of the failure above. If it's caused "
-              'by the query being too complex, you can try '
-              "compute_on_sql(..., mode='mixed').") from e
+          if not self.children:
+            raise
+          raise utils.MaybeBadSqlModeError('mixed') from e
+      elif mode == 'sql':
+        raise ValueError('%s is not computable in pure SQL.' % self.name)
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+
+  def all_computable_in_pure_sql(self, include_self=True):
+    """If the whole Metric tree is computable in SQL."""
+    for m in self.traverse(include_self):
+      if not m.computable_in_pure_sql:
+        return False
+    return True
 
   def compute_on_sql_sql_mode(self,
                               table,
@@ -609,9 +610,10 @@ class Metric(object):
       table.with_data = None
     if not sql.Datasource(table).is_table:
       table = with_data.add(sql.Datasource(table, 'Data'))
-    query, with_data = self.get_sql_and_with_clause(
-        sql.Datasource(table), sql.Columns(split_by), global_filter, indexes,
-        sql.Filters(), with_data)
+    query, with_data = self.get_sql_and_with_clause(table,
+                                                    sql.Columns(split_by),
+                                                    global_filter, indexes,
+                                                    sql.Filters(), with_data)
     query.with_data = with_data
     return query
 
@@ -789,9 +791,9 @@ class MetricList(Metric):
     The query is constructed by
     1. Get the query for every children metric.
     2. If all children queries are compatible, we just collect all the columns
-      from the children and use the WHERE and GROUP BY clauses from any chldren.
-      The FROM clause is more complex. We use the largest FROM clause in
-      children.
+      from the children and use the WHERE and GROUP BY clauses from any
+      children. The FROM clause is more complex. We use the largest FROM clause
+      in children.
       See the doc of is_compatible() for its meaning.
       If any pair of children queries are incompatible, we merge the compatible
       children as much as possible then add the merged SQLs to with_data, join
@@ -816,44 +818,33 @@ class MetricList(Metric):
                                   local_filter, with_data)[0]
         for c in self.children
     ]
-    incompatible_sqls = []
-    # It's O(n^2). We can do better but I don't expect metric tree to be big.
+    incompatible_sqls = sql.Datasources()
     for child_sql in children_sql:
-      found = False
-      for target in incompatible_sqls:
-        can_merge, larger_from = sql.is_compatible(child_sql, target)
-        if can_merge:
-          target.add('columns', child_sql.columns)
-          target.from_data = larger_from
-          found = True
-          break
-      if not found:
-        incompatible_sqls.append(child_sql)
+      incompatible_sqls.merge(sql.Datasource(child_sql, 'MetricListChildTable'))
 
     name_tmpl = self.name_tmpl or '{}'
     if len(incompatible_sqls) == 1:
-      res = incompatible_sqls[0]
+      res = next(iter(incompatible_sqls.children.values()))
       for c in res.columns:
         if c not in indexes:
           c.alias_raw = name_tmpl.format(c.alias_raw)
       return res, with_data
 
     columns = sql.Columns(indexes.aliases)
-    for i, table in enumerate(incompatible_sqls):
-      data = sql.Datasource(table, 'MetricListChildTable')
-      alias = with_data.add(data)
+    for i, (alias, table) in enumerate(incompatible_sqls.children.items()):
+      data = sql.Datasource(table, alias)
+      alias, rename = with_data.merge(data)
       for c in table.columns:
         if c not in columns:
           columns.add(
               sql.Column(
-                  '%s.%s' % (alias, c.alias),
+                  '%s.%s' % (alias, rename.get(c.alias, c.alias)),
                   alias=name_tmpl.format(c.alias_raw)))
       if i == 0:
-        from_data = sql.Datasource(alias)
+        from_data = alias
       else:
         join = 'FULL' if indexes else 'CROSS'
-        from_data = from_data.join(
-            sql.Datasource(alias), join=join, using=indexes)
+        from_data = sql.Join(from_data, alias, join=join, using=indexes)
     return sql.Sql(columns, from_data), with_data
 
   def compute_on_children(self, child, split_by):
@@ -1611,11 +1602,13 @@ def _get_sql_for_weighted_var_or_se(metric, table, split_by, global_filter,
       filters=where)
   weighted_base_table = sql.Sql(
       columns.add(weighted_squared_diff), table, global_filter)
-  weighted_base_table_alias = with_data.add(
+  weighted_base_table_alias, rename = with_data.merge(
       sql.Datasource(weighted_base_table, 'WeightedBase'))
 
-  weighted_var = sql.Column('weighted_squared_diff', 'SUM({})') / sql.Column(
-      sql.Column(weight).alias, 'SUM({}) - 1')
+  weight = sql.Column(weight).alias
+  weighted_var = sql.Column(
+      rename.get('weighted_squared_diff', 'weighted_squared_diff'),
+      'SUM({})') / sql.Column(rename.get(weight, weight), 'SUM({}) - 1')
   if isinstance(metric, StandardDeviation):
     weighted_var = weighted_var**0.5
   weighted_var.set_alias(metric.name)

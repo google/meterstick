@@ -328,3 +328,21 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
       else:
         res.columns = map(name_tmpl.format, res.columns)
   return res
+
+
+class MaybeBadSqlModeError(Exception):
+  """An Error used in compute_on_sql(), when a better mode might exist."""
+
+  def __init__(self, better_mode=None, use_batch_size=False, batch_size=None):
+    self.better_mode = better_mode
+    self.use_batch_size = use_batch_size
+    self.batch_size = batch_size
+    if batch_size:
+      msg = 'reducing the batch_size. Current batch_size is %s.' % batch_size
+    elif use_batch_size:
+      msg = "compute_on_sql(..., mode='mixed', batch_size=an integer)."
+    else:
+      msg = "compute_on_sql(..., mode='%s')." % (better_mode or 'mixed')
+    super(MaybeBadSqlModeError, self).__init__(
+        "Please see the root cause of the failure above. If it's caused "
+        'by the query being too large/complex, you can try %s' % msg)

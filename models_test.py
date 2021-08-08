@@ -325,6 +325,31 @@ class ModelsTest(unittest.TestCase):
     expected.columns = ['OLS(sum(Y) ~ sum(X1)) - Ridge(sum(Y) ~ sum(X1))']
     pd.testing.assert_frame_equal(output, expected)
 
+  def test_count_features(self):
+    s = metrics.Sum('x')
+    self.assertEqual(models.count_features(metrics.Sum('x')), 1)
+    self.assertEqual(models.count_features(metrics.MetricList([s, s])), 2)
+    self.assertEqual(
+        models.count_features(
+            metrics.MetricList([metrics.Sum('x'),
+                                metrics.MetricList([s])])), 2)
+    self.assertEqual(
+        models.count_features(operations.AbsoluteChange('a', 'b', s)), 1)
+    self.assertEqual(
+        models.count_features(
+            operations.AbsoluteChange(
+                'a', 'b', metrics.MetricList([s, metrics.MetricList([s])]))), 2)
+    self.assertEqual(
+        models.count_features(
+            operations.AbsoluteChange(
+                'a', 'b',
+                metrics.MetricList([
+                    operations.AbsoluteChange('a', 'b',
+                                              metrics.MetricList([s, s]))
+                ]))), 2)
+    self.assertEqual(models.count_features(metrics.Ratio('x', 'y')), 1)
+    self.assertEqual(models.count_features(metrics.MetricList([s, s]) / 2), 2)
+
 
 if __name__ == '__main__':
   unittest.main()

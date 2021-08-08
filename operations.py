@@ -194,14 +194,15 @@ class Distribution(Operation):
     child_sql, with_data = self.children[0].get_sql_and_with_clause(
         table, indexes, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'DistributionRaw')
-    child_table_alias = with_data.add(child_table)
+    child_table_alias, rename = with_data.merge(child_table)
     groupby = sql.Columns(indexes.aliases, distinct=True)
     columns = sql.Columns()
     for c in child_sql.columns:
       if c.alias in groupby:
         continue
-      col = sql.Column(c.alias) / sql.Column(
-          c.alias, 'SUM({})', partition=split_by.aliases)
+      alias = rename.get(c.alias, c.alias)
+      col = sql.Column(alias) / sql.Column(
+          alias, 'SUM({})', partition=split_by.aliases)
       col.set_alias('Distribution of %s' % c.alias_raw)
       columns.add(col)
     return sql.Sql(groupby.add(columns), child_table_alias), with_data
@@ -273,7 +274,7 @@ class CumulativeDistribution(Operation):
     child_sql, with_data = util_metric.get_sql_and_with_clause(
         table, split_by, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'CumulativeDistributionRaw')
-    child_table_alias = with_data.add(child_table)
+    child_table_alias, rename = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
     order = list(metrics.get_extra_idx(self))
     order[0] = sql.Column(
@@ -284,7 +285,7 @@ class CumulativeDistribution(Operation):
         continue
 
       col = sql.Column(
-          c.alias,
+          rename.get(c.alias, c.alias),
           'SUM({})',
           partition=split_by.aliases,
           order=order,
@@ -390,30 +391,33 @@ class Comparison(Operation):
     raw_table_sql, with_data = child.get_sql_and_with_clause(
         table, groupby, global_filter, indexes, local_filter, with_data)
     raw_table = sql.Datasource(raw_table_sql, 'ChangeRaw')
-    raw_table_alias = with_data.add(raw_table)
+    raw_table_alias, rename = with_data.merge(raw_table)
 
     base = self.baseline_key if isinstance(self.baseline_key,
                                            tuple) else [self.baseline_key]
     base_cond = ('%s = %s' % (c, _format_to_condition(b))
                  for c, b in zip(cond_cols.aliases, base))
     base_cond = ' AND '.join(base_cond)
+    cols = sql.Columns(raw_table_sql.groupby.aliases)
+    cols.add((rename.get(a, a) for a in raw_table_sql.columns.aliases))
     base_value = sql.Sql(
-        sql.Columns(raw_table_sql.groupby.aliases).add(
-            raw_table_sql.columns.aliases).difference(cond_cols.aliases),
-        raw_table_alias, base_cond)
+        cols.difference(cond_cols.aliases), raw_table_alias, base_cond)
     base_table = sql.Datasource(base_value, 'ChangeBase')
-    base_table_alias = with_data.add(base_table)
+    base_table_alias, rename = with_data.merge(base_table)
 
     exclude_base_condition = ('%s != %s' % (c, _format_to_condition(b))
                               for c, b in zip(cond_cols.aliases, base))
     exclude_base_condition = ' OR '.join(exclude_base_condition)
     cond = None if self.include_base else sql.Filters([exclude_base_condition])
-    col_tmp = '%s.{c} - %s.{c}' if isinstance(
-        self, AbsoluteChange) else 'SAFE_DIVIDE(%s.{c}, (%s.{c})) * 100 - 100'
+    col_tmp = '%s.{r} - %s.{b}' if isinstance(
+        self, AbsoluteChange) else 'SAFE_DIVIDE(%s.{r}, (%s.{b})) * 100 - 100'
     columns = sql.Columns()
     for c in raw_table_sql.columns.difference(indexes.aliases):
+      raw_table_col = rename.get(c.alias, c.alias)
+      base_table_col = rename.get(c.alias, c.alias)
       col = sql.Column(
-          col_tmp.format(c=c.alias) % (raw_table_alias, base_table_alias),
+          col_tmp.format(r=raw_table_col, b=base_table_col) %
+          (raw_table_alias, base_table_alias),
           alias=alias_tmpl.format(c.alias_raw))
       columns.add(col)
     using = indexes.difference(cond_cols)
@@ -722,7 +726,7 @@ class MH(Comparison):
         table, groupby, global_filter, util_indexes, local_filter, with_data)
 
     raw_table = sql.Datasource(raw_table_sql, 'MHRaw')
-    raw_table_alias = with_data.add(raw_table)
+    raw_table_alias, _ = with_data.merge(raw_table)
 
     base = self.baseline_key if isinstance(self.baseline_key,
                                            tuple) else [self.baseline_key]
@@ -734,7 +738,7 @@ class MH(Comparison):
             raw_table_sql.columns.aliases).difference(cond_cols.aliases),
         raw_table_alias, base_cond)
     base_table = sql.Datasource(base_value, 'MHBase')
-    base_table_alias = with_data.add(base_table)
+    base_table_alias, _ = with_data.merge(base_table)
 
     exclude_base_condition = ('%s != %s' % (c, _format_to_condition(b))
                               for c, b in zip(cond_cols.aliases, base))
@@ -750,20 +754,45 @@ class MH(Comparison):
     col_tmpl = col_tmpl.format(raw=raw_table_alias, base=base_table_alias)
     columns = sql.Columns()
     alias_tmpl = self.name_tmpl
+    # The columns might get consolidated and have different aliases. We need to
+    # find them by reconstruction. Reusing the with_data in reconstruction will
+    # make sure the columns get renamed the same way as in raw_table_sql.
     if isinstance(child, metrics.MetricList):
       for c in child:
+        with_data2 = copy.deepcopy(with_data)
+        numer_sql, with_data2 = c.children[0].get_sql_and_with_clause(
+            table, groupby, global_filter, util_indexes, local_filter,
+            with_data2)
+        with_data2.merge(sql.Datasource(numer_sql))
+        numer = numer_sql.columns[-1].alias
+        with_data2 = copy.deepcopy(with_data)
+        denom_sql, with_data2 = c.children[1].get_sql_and_with_clause(
+            table, groupby, global_filter, util_indexes, local_filter,
+            with_data2)
+        with_data2.merge(sql.Datasource(denom_sql))
+        denom = denom_sql.columns[-1].alias
         columns.add(
             sql.Column(
                 col_tmpl % {
-                    'numer': sql.Column(c.children[0].name).alias,
-                    'denom': sql.Column(c.children[1].name).alias
+                    'numer': numer,
+                    'denom': denom
                 },
                 alias=alias_tmpl.format(c.name)))
     else:
+      with_data2 = copy.deepcopy(with_data)
+      numer_sql, with_data2 = child.children[0].get_sql_and_with_clause(
+          table, groupby, global_filter, util_indexes, local_filter, with_data2)
+      with_data2.merge(sql.Datasource(numer_sql))
+      numer = numer_sql.columns[-1].alias
+      with_data2 = copy.deepcopy(with_data)
+      denom_sql, with_data2 = child.children[1].get_sql_and_with_clause(
+          table, groupby, global_filter, util_indexes, local_filter, with_data2)
+      with_data2.merge(sql.Datasource(denom_sql))
+      denom = denom_sql.columns[-1].alias
       columns = sql.Column(
           col_tmpl % {
-              'numer': sql.Column(child.children[0].name).alias,
-              'denom': sql.Column(child.children[1].name).alias
+              'numer': numer,
+              'denom': denom,
           },
           alias=alias_tmpl.format(child.name))
 
@@ -935,6 +964,9 @@ class MetricWithCI(Operation):
       visualize the confidence interval nicely in Colab and Jupyter notebook.
     prefix: In the result, the column names will be like "{prefix} SE",
       "{prefix} CI-upper".
+    sql_batch_size: The number of resamples to compute in one SQL run. It only
+      has effect in the 'mixed' mode of compute_on_sql(). Note that you can also
+      specify batch_size in compute_on_sql() directly, which precedes this one.
     And all other attributes inherited from Operation.
   """
 
@@ -944,6 +976,7 @@ class MetricWithCI(Operation):
                confidence: Optional[float] = None,
                name_tmpl: Optional[Text] = None,
                prefix: Optional[Text] = None,
+               sql_batch_size=None,
                **kwargs):
     if confidence and not 0 < confidence < 1:
       raise ValueError('Confidence must be in (0, 1).')
@@ -952,6 +985,7 @@ class MetricWithCI(Operation):
     super(MetricWithCI, self).__init__(child, name_tmpl, **kwargs)
     self.apply_name_tmpl = False
     self.prefix = prefix
+    self.sql_batch_size = sql_batch_size
     if not self.prefix and self.name_tmpl:
       self.prefix = prefix or self.name_tmpl.format('').strip()
 
@@ -1161,30 +1195,38 @@ class MetricWithCI(Operation):
     name = 'Jackknife' if isinstance(self, Jackknife) else 'Bootstrap'
     se, with_data = get_se(self, table, split_by, global_filter, indexes,
                            local_filter, with_data)
-    se_alias = with_data.add(sql.Datasource(se, name + 'SE'))
+    se_alias, se_rename = with_data.merge(sql.Datasource(se, name + 'SE'))
 
     pt_est, with_data = self.children[0].get_sql_and_with_clause(
         table, split_by, global_filter, indexes, local_filter, with_data)
-    pt_est_alias = with_data.add(sql.Datasource(pt_est, name + 'PointEstimate'))
+    pt_est_alias, pt_est_rename = with_data.merge(
+        sql.Datasource(pt_est, name + 'PointEstimate'))
 
     columns = sql.Columns()
     using = sql.Columns(se.groupby)
+    pt_est_col = []
     for c in pt_est.columns:
       if c in indexes.aliases:
         using.add(c)
       else:
-        pt_est_col = sql.Column(
-            '%s.%s' % (pt_est_alias, c.alias), alias=c.alias_raw)
-        alias = '%s %s SE' % (c.alias_raw, name)
-        se_col = sql.Column(
-            '%s.%s' % (se_alias, sql.escape_alias(alias)), alias=alias)
-        columns.add(pt_est_col)
-        columns.add(se_col)
-        if self.confidence:
-          dof = '%s dof' % c.alias_raw
-          columns.add(
-              sql.Column(
-                  '%s.%s' % (se_alias, sql.escape_alias(dof)), alias=dof))
+        pt_est_col.append(
+            sql.Column(
+                '%s.%s' % (pt_est_alias, pt_est_rename.get(c.alias, c.alias)),
+                alias=c.alias_raw))
+    se_cols = []
+    for c in se.columns:
+      if c not in indexes.aliases:
+        se_cols.append(
+            sql.Column(
+                '%s.%s' % (se_alias, se_rename.get(c.alias, c.alias)),
+                alias=c.alias_raw))
+    if self.confidence:
+      dof_cols = se_cols[1::2]
+      se_cols = se_cols[::2]
+      cols = zip(pt_est_col, se_cols, dof_cols)
+    else:
+      cols = zip(pt_est_col, se_cols)
+    columns.add(cols)
 
     has_base_vals = False
     if self.confidence:
@@ -1196,13 +1238,16 @@ class MetricWithCI(Operation):
             table,
             sql.Columns(split_by).add(child.extra_index), global_filter,
             indexes, local_filter, with_data)
-        base_alias = with_data.add(sql.Datasource(base, '_ShouldAlreadyExists'))
+        base_alias, base_rename = with_data.merge(
+            sql.Datasource(base, '_ShouldAlreadyExists'))
         columns.add(
-            sql.Column('%s.%s' % (base_alias, c.alias), alias=c.alias_raw)
-            for c in base.columns.difference(indexes))
+            sql.Column(
+                '%s.%s' % (base_alias, base_rename.get(c.alias, c.alias)),
+                alias=c.alias_raw) for c in base.columns.difference(indexes))
 
     join = 'LEFT' if using else 'CROSS'
-    from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
+    from_data = sql.Join(
+        pt_est_alias, se_alias, join=join, using=using)
     if has_base_vals:
       from_data = from_data.join(base_alias, join=join, using=using)
     return sql.Sql(using.add(columns), from_data), with_data
@@ -1237,36 +1282,29 @@ class MetricWithCI(Operation):
         top 3 layeres computed in Python and the bottom in SQL. In summary,
         everything can be computed in SQL is computed in SQL.
       batch_size: The number of resamples to compute in one SQL run. It only has
-        effect in the 'mixed' mode.
+        effect in the 'mixed' mode. It precedes self.batch_size.
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
-    self._batch_size = batch_size
-    return super(MetricWithCI, self).compute_on_sql(table, split_by, execute,
-                                                    melted, mode)
+    self._runtime_batch_size = batch_size
+    try:
+      return super(MetricWithCI, self).compute_on_sql(table, split_by, execute,
+                                                      melted, mode)
+    finally:
+      self._runtime_batch_size = None
 
   def compute_through_sql(self, table, split_by, execute, mode):
-    if mode not in (None, 'sql', 'mixed'):
+    if mode not in (None, 'sql', 'mixed', 'magic'):
       raise ValueError('Mode %s is not supported!' % mode)
-    if not self.children:
-      mode = 'sql'
     if mode in (None, 'sql'):
-      computable_in_pure_sql = True
-      for m in self.traverse(False):
-        if not m.computable_in_pure_sql:
-          computable_in_pure_sql = False
-          if mode == 'sql':
-            raise ValueError('%s is not computable in pure SQL.' % self.name)
-          break
-      if computable_in_pure_sql:
+      if self.all_computable_in_pure_sql(False):
         try:
           return self.compute_on_sql_sql_mode(table, split_by, execute)
         except Exception as e:  # pylint: disable=broad-except
-          raise Exception(
-              "Please see the root cause of the failure above. If it's caused "
-              'by the query being too complex, you can try '
-              "compute_on_sql(..., mode='mixed', batch_size=int).") from e
+          raise utils.MaybeBadSqlModeError(use_batch_size=True) from e
+      elif mode == 'sql':
+        raise ValueError('%s is not computable in pure SQL.' % self.name)
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
@@ -1326,18 +1364,15 @@ class MetricWithCI(Operation):
     return self._add_base_to_res(res, base)
 
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
+    batch_size = self._runtime_batch_size or self.sql_batch_size
     try:
       replicates = self.compute_children_sql(table, split_by, execute, mode,
-                                             self._batch_size)
+                                             batch_size)
+    except utils.MaybeBadSqlModeError:
+      raise
     except Exception as e:  # pylint: disable=broad-except
-      raise Exception(
-          "Please see the root cause of the failure above. If it's caused "
-          'by the query being too large, you can try reducing the '
-          'batch_size in compute_on_sql(). Current batch_size is %s.' %
-          self._batch_size) from e
+      raise utils.MaybeBadSqlModeError(batch_size=batch_size) from e
     std = self.compute_on_children(replicates, split_by)
-    if self.where:
-      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     point_est = self.children[0].compute_on_sql(table, split_by, execute, True,
                                                 mode)
     res = point_est.join(utils.melt(std))
@@ -1914,7 +1949,8 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
       table,
       sql.Columns(split_by).add('_resample_idx'), global_filter,
       sql.Columns(indexes).add('_resample_idx'), local_filter, with_data)
-  samples_alias = with_data.add(sql.Datasource(samples, 'ResampledResults'))
+  samples_alias, rename = with_data.merge(
+      sql.Datasource(samples, 'ResampledResults'))
 
   columns = sql.Columns()
   groupby = sql.Columns(
@@ -1925,16 +1961,16 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
     elif c in indexes.aliases:
       groupby.add(c.alias)
     else:
+      alias = rename.get(c.alias, c.alias)
       se = sql.Column(c.alias, 'STDDEV_SAMP({})',
                       '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, Jackknife):
         adjustment = sql.Column(
-            'SAFE_DIVIDE((COUNT({c}) - 1), SQRT(COUNT({c})))'.format(c=c.alias))
+            'SAFE_DIVIDE((COUNT({c}) - 1), SQRT(COUNT({c})))'.format(c=alias))
         se = (se * adjustment).set_alias('%s Jackknife SE' % c.alias_raw)
       columns.add(se)
       if metric.confidence:
-        columns.add(
-            sql.Column(c.alias, 'COUNT({}) - 1', '%s dof' % c.alias_raw))
+        columns.add(sql.Column(alias, 'COUNT({}) - 1', '%s dof' % c.alias_raw))
   return sql.Sql(columns, samples_alias, groupby=groupby), with_data
 
 

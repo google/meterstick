@@ -25,28 +25,41 @@ import re
 from typing import Iterable, Optional, Text, Union
 
 
-def is_compatible(sql0, sql1):
+def is_compatible(sql0, sql1, exact_from=False):
   """Checks if two datasources are compatible so their columns can be merged.
 
-  Being compatible means datasources have same FROM and GROUP BY clauses. The
-  FROM clause is more complex. If a FROM clause is a substing of another one,
-  which means the latter is a JOIN of the former and some other datasources, we
-  still consider them compatible. You might wonder why because the JOIN add or
-  drop rows from the original data. The reason is all the JOINs we generate are
-  1. CROSS JOIN with a single value, which is just adding a constant column.
-  2. INNER JOIN The JOIN is done on all GROUP BY columns on both tables and they
-    both have all slices, even with NULLs, so again the effect is same as adding
-    columns.
-  3. The LEFT JOIN. The left side is the original table. This might add rows
-    with NULL values as some children SQL might miss some slices. But all the
-    SimpleMetrics ignore NULL so it won't affect the result.
-  As the result, as long as one datasource contains another one, they are
-  considered compatible. If in the future we have a rule that generates JOIN
-  that isn't compatible with original data, we need to change this function.
+  Being compatible means datasources have same GROUP BY clauses and compatible
+  FROM clause. Compatible means a FROM clause, though may be not exactly same as
+  the other, doesn't change the results. For example, a table selecting from t1
+  could have the same result if it was selecting from t1 LEFT JOIN t2 as long as
+  all values added to t1 are NULLs and our computation ignores NULLs.
+
+  We have several kinds of JOINs in the codes.
+  1. CROSS JOIN with a single value, which is just adding a constant column, so
+    should be considered compatible.
+  2. FULL JOIN. This only happens once in MetricList and it's on all indexing
+    columns. Both tables got expanded but the added values are NULLs and
+    are effectively dropped in the computation so the result doesn't change. So
+    this JOIN should be considered compatible.
+  3. LEFT JOIN. If the left side is the main table (both sql queries select FROM
+    it) and the join is done on all indexing columns, then the join expand the
+    left table with NULLs and don't change the result. There is only one LEFT
+    JOIN which isn't such kind. It's in Bootstrap where we have
+    BootstrapRandomChoices LEFT JOIN original_table.
+  4. (INNER) JOIN. This happens in Comparison. The right table is a subset of
+    the left so it's equivalent to a LEFT JOIN and we don't use the right table
+    alone. So if one query uses t1 JOIN t2 while the other uses t1 it's OK to
+    merge them. Again Bootstrap is an exception, it has JOINs with UNNEST(ARRAY)
+    which replicates the table and will affect the results.
+  As the result, even two queries select from different sources, as long as one
+  contains the other and it's not about Bootstrap, we can still merge them.
+  IMPORTANT: We need to check the logic of every new Metics added in the future.
 
   Args:
     sql0: A Sql instance.
     sql1: A Sql instance.
+    exact_from: If the FROM clauses need to be exactly the same to be considered
+      comaptible.
 
   Returns:
     If sql0 and sql1 are compatible.
@@ -54,22 +67,32 @@ def is_compatible(sql0, sql1):
   """
   if not isinstance(sql0, Sql) or not isinstance(sql1, Sql):
     raise ValueError('Both inputs must be a Sql instance!')
-  if sql0.where != sql1.where or sql0.groupby != sql1.groupby:
+  if (sql0.where != sql1.where or sql0.groupby != sql1.groupby or
+      sql0.with_data != sql1.with_data or sql0.columns.distinct or
+      sql1.columns.distinct):
     return False, None
   if sql0.from_data == sql1.from_data:
     return True, sql1.from_data
+  if exact_from:
+    return False, None
+  mergeable = False
   # Exclude cases where two differ on suffix.
   if (str(sql0.from_data) + '\n' in str(sql1.from_data) or
       str(sql0.from_data) + ' ' in str(sql1.from_data)):
-    return True, sql1.from_data
+    mergeable, larger = True, sql1.from_data
   if (str(sql1.from_data) + '\n' in str(sql0.from_data) or
       str(sql1.from_data) + ' ' in str(sql0.from_data)):
-    return True, sql0.from_data
+    mergeable, larger = True, sql0.from_data
+  if mergeable:
+    if 'UNNEST' in str(larger) or 'BootstrapRandomChoices' in str(larger):
+      return False, None
+    return mergeable, larger
   return False, None
 
 
 def add_suffix(alias):
   """Adds an int suffix to alias."""
+  alias = alias.strip('`')
   m = re.search(r'([0-9]+)$', alias)
   if m:
     suffix = m.group(1)
@@ -143,7 +166,7 @@ class SqlComponents(SqlComponent):
         self.add(c)
     else:
       if children and children not in self.children:
-        self.children.append(children)
+        self.children.append(copy.deepcopy(children))
     return self
 
   def __iter__(self):
@@ -243,25 +266,33 @@ class Column(SqlComponent):
     self.column = [column] if isinstance(column, str) else column or []
     self.fn = fn
     self.filters = Filters(filters)
-    self.alias_raw = alias
+    self.alias_raw = alias.strip('`') if alias else None
     if not alias and auto_alias:
       self.alias_raw = fn.lower().format(*self.column)
     self.partition = partition
     self.order = order
     self.window_frame = window_frame
     self.auto_alias = auto_alias
+    self.suffix = 0
 
   @property
   def alias(self):
-    return escape_alias(self.alias_raw)
+    a = self.alias_raw
+    if self.suffix:
+      a = '%s_%s' % (a, self.suffix)
+    return escape_alias(a)
 
   @alias.setter
   def alias(self, alias):
-    self.alias_raw = alias
+    self.alias_raw = alias.strip('`')
 
   def set_alias(self, alias):
     self.alias = alias
     return self
+
+  def add_suffix(self):
+    self.suffix += 1
+    return self.alias
 
   @property
   def expression(self):
@@ -389,7 +420,13 @@ class Columns(SqlComponents):
 
   @property
   def aliases(self):
-    return [escape_alias(c.alias) for c in self]
+    return [c.alias for c in self]
+
+  def get_alias(self, expression):
+    res = [k for k, v in self.columns.items() if v.expression == expression]
+    if res:
+      return res[0]
+    return None
 
   def add(self, children):
     """Adds a Column if not existing.
@@ -398,7 +435,8 @@ class Columns(SqlComponents):
 
     If the Column already exists with the same alias. Do nothing.
     If neither the Column nor the alias exist. Add it.
-    If the Column exists but with a different alias. Add it.
+    If the Column exists but with a different alias. Don't add the Column but
+    set its alias to the existing one's.
     If the Column doesn't exists but the alias exists. Give the Column
     a new alias by adding a unique suffix. Then add it under the new alias.
 
@@ -416,14 +454,18 @@ class Columns(SqlComponents):
       return self
     if isinstance(children, str):
       return self.add(Column(children))
-    alias = children.alias_raw
+    alias, expr = children.alias, children.expression
+    found = self.get_alias(expr)
+    if found:
+      children.set_alias(found)
+      return self
     if alias not in self.columns:
       self.columns[alias] = children
       return self
     else:
       if children == self.columns[alias]:
         return self
-      children.alias = add_suffix(alias)
+      children.add_suffix()
       return self.add(children)
 
   def difference(self, columns):
@@ -457,12 +499,11 @@ class Datasource(SqlComponent):
 
   def __init__(self, table, alias=None):
     super(Datasource, self).__init__()
+    self.table = table
+    self.alias = alias
     if isinstance(table, Datasource):
       self.table = table.table
-      self.alias = table.alias
-    else:
-      self.table = table
-      self.alias = alias
+      self.alias = alias or table.alias
     self.alias = escape_alias(self.alias)
     self.is_table = not str(self.table).startswith('SELECT')
 
@@ -507,9 +548,11 @@ class Join(Datasource):
     self.join_type = join.upper()
     self.on = Filters(on)
     self.using = Columns(using)
-    super(Join, self).__init__(str(self), alias)
+    super(Join, self).__init__(self, alias)
 
   def __str__(self):
+    if self.ds1 == self.ds2:
+      return str(self.ds1)
     join = '%s JOIN' % self.join_type if self.join_type else 'JOIN'
     sql = '\n'.join(map(str, (self.ds1, join, self.ds2)))
     if self.on:
@@ -530,6 +573,56 @@ class Datasources(SqlComponents):
   @property
   def datasources(self):
     return (Datasource(v, k) for k, v in self.children.items())
+
+  def merge(self, new_child: Datasource):
+    """Merges a datasource if possible.
+
+    The difference between merge() and add() is that in add() we skip only when
+    there is a table in self that is exactly same as the table, except for the
+    alias, being added. In merge(), we try to find a table that is compatible,
+    but not necessarily the same, and merge the columns in the new table to it.
+    In one word, merge() returns more compact query.
+
+    If the Datasource already exists with the same alias, do nothing.
+    If a compatible Datasource already exists, don't add the new Datasource.
+    Instead expand the compatible Datasource with new columns. Return the alias
+    of the compatible Datasource.
+    If no compatible Datasource nor the alias exist, add new Datasource.
+    If a compatible Datasource doesn't exists but the alias exists, give the
+    new Datasource a new alias by adding a unique suffix. Then add it under the
+    new alias.
+    Note that this function might have side effects. When the columns in
+    new_child are merged with existing columns with different aliases, the
+    columns' aliases will be set to the existing ones in-place.
+
+    Args:
+      new_child: A Datasource instance or an iterable of Datasource(s).
+
+    Returns:
+      The alias of the Datasource we eventually add.
+    """
+    if not isinstance(new_child, Datasource):
+      raise ValueError(
+          '%s is a %s, not a Datasource! You can try .add() instead.' %
+          (new_child, type(new_child)))
+    alias, table = new_child.alias, new_child.table
+    # If there is a compatible data, most likely it has the same alias.
+    if alias in self.children:
+      target = self.children[alias]
+      if isinstance(target, Sql):
+        merged, rename = target.merge(table)
+        if merged:
+          return alias, rename
+    for a, t in self.children.items():
+      if a == alias or not isinstance(t, Sql):
+        continue
+      merged, rename = t.merge(table)
+      if merged:
+        return a, rename
+    while new_child.alias in self.children:
+      new_child.alias = add_suffix(new_child.alias)
+    self.children[new_child.alias] = table
+    return new_child.alias, {}
 
   def add(self, children: Union[Datasource, Iterable[Datasource]]):
     """Adds a datasource if not existing.
@@ -574,7 +667,7 @@ class Datasources(SqlComponents):
       children.alias = add_suffix(alias)
       return self.add(children)
 
-  def merge(self, other: 'Datasources'):
+  def extend(self, other: 'Datasources'):
     """Merge other to self. Adjust the query if a new alias is needed."""
     datasources = list(other.datasources)
     while datasources:
@@ -611,12 +704,43 @@ class Sql(SqlComponent):
       with_data_to_merge = from_data.with_data
       from_data.with_data = None
       from_data = with_data_to_merge.add(Datasource(from_data, 'NoNameTable'))
-      self.with_data.merge(with_data_to_merge)
-    self.from_data = Datasource(from_data)
+      self.with_data.extend(with_data_to_merge)
+    if not isinstance(from_data, Datasource):
+      from_data = Datasource(from_data)
+    self.from_data = from_data
 
   def add(self, attr, values):
     getattr(self, attr).add(values)
     return self
+
+  def merge(self, other: 'Sql', expand_from=False):
+    """Merges columns from other to self if possible.
+
+    If self and other are compatible, we can merge their columns. The columns
+    from other that have conflicting names will be renamed in-place.
+
+    Args:
+      other: Another Sql instance.
+      expand_from: Determines if to merge when self and other are compatible but
+        other has a larger FROM clause.
+
+    Returns:
+      If two Sql instances are mergeable and a dict to look up new column names.
+    """
+    if not isinstance(other, Sql):
+      raise ValueError('Expected a Sql instance but got %s!' % type(other))
+    if self == other:
+      return True, {}
+    compatible, larger = is_compatible(self, other, expand_from)
+    if not compatible:
+      return False, {}
+    if self.from_data != larger and not expand_from:
+      return False, {}
+    self.from_data = copy.deepcopy(larger)
+    curr_aliases = other.columns.aliases
+    self.columns.add(other.columns)
+    return True, dict(
+        [i for i in zip(curr_aliases, other.columns.aliases) if i[0] != i[1]])
 
   def __str__(self):
     with_clause = 'WITH\n%s' % self.with_data if self.with_data else None
