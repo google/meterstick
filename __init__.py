@@ -20,10 +20,3 @@ from meterstick import utils
 from meterstick.metrics import *
 from meterstick.operations import *
 from meterstick.sql import *
-try:
-  from meterstick.models import *  # pylint: disable=g-import-not-at-top
-except (ImportError, ModuleNotFoundError) as e:
-  print(
-      'WARNING: metersick.model is not imported because: "%s". '
-      "It's OK if you don't fit model in Meterstick."
-      % repr(e))
