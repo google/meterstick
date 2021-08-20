@@ -577,19 +577,20 @@ class Metric(object):
                               split_by=None,
                               execute=None):
     """Executes the query from to_sql() and process the result."""
-    query = str(self.to_sql(table, split_by))
-    res = execute(query)
+    query = self.to_sql(table, split_by)
+    res = execute(str(query))
     extra_idx = list(get_extra_idx(self))
     indexes = split_by + extra_idx if split_by else extra_idx
+    columns = [a.alias_raw for a in query.groupby.add(query.columns)]
+    columns[:len(indexes)] = indexes
+    res.columns = columns
     # We replace '$' with 'macro_' in the generated SQL. To recover the names,
     # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
-    # orignal names. So we set index using the replaced names then reset index
-    # names, which recovers all indexes. Unfortunately it's not as easy to
-    # recover metric/column names, so for the remaining columns we just replace
-    # 'macro_' with '$'.
+    # orignal names. We can get the index names so we can recover them but
+    # unfortunately it's not as easy to recover metric/column names, so for the
+    # metrics we just replace 'macro_' with '$'.
     if indexes:
-      res.set_index([k.replace('$', 'macro_') for k in indexes], inplace=True)
-      res.index.names = indexes
+      res.set_index(indexes, inplace=True)
     res.columns = [c.replace('macro_', '$') for c in res.columns]
     if split_by:  # Use a stable sort.
       res.sort_values(split_by, kind='mergesort', inplace=True)
