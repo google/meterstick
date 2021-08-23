@@ -1723,6 +1723,138 @@ class JackknifeTests(unittest.TestCase):
     expected.set_index(['Metric', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
+  def test_display_simple_metric(self):
+    df = pd.DataFrame({
+        'X': np.arange(0, 3, 0.5),
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    m = operations.Jackknife('cookie', metrics.Sum('X'), 0.9)
+    res = m.compute_on(df)
+    output = res.display(return_formatted_df=True)
+    expected = pd.DataFrame(
+        {
+            'sum(X)': [
+                '<div class="ci-display-good-change ci-display-cell"><div>'
+                '<span class="ci-display-ratio">7.5000</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-ci-range">[4.1283, 10.8717]</span>'
+                '</div></div>'
+            ]
+        })
+    expected.columns.name = 'Metric'
+    testing.assert_frame_equal(output, expected)
+
+  def test_display_simple_metric_split_by(self):
+    df = pd.DataFrame({
+        'X': np.arange(0, 3, 0.5),
+        'cookie': [1, 2, 3, 1, 2, 3],
+        'grp': list('AABBAB')
+    })
+    m = operations.Jackknife('cookie', metrics.Sum('X'), 0.9)
+    res = m.compute_on(df, 'grp')
+    output = res.display(return_formatted_df=True)
+    expected = pd.DataFrame(
+        {
+            'Dimensions': [
+                '<div><div><span class="ci-display-dimension">A</span></div>'
+                '</div>',
+                '<div><div><span class="ci-display-dimension">B</span></div>'
+                '</div>'
+            ],
+            'sum(X)': [
+                '<div class="ci-display-cell"><div>'
+                '<span class="ci-display-ratio">2.5000</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-ci-range">[-5.3922, 10.3922]</span>'
+                '</div></div>',
+                '<div class="ci-display-cell"><div>'
+                '<span class="ci-display-ratio">5.0000</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-ci-range">[-1.3138, 11.3138]</span>'
+                '</div></div>'
+            ]
+        },)
+    expected.columns.name = 'Metric'
+    testing.assert_frame_equal(output, expected)
+
+  def test_display_change(self):
+    df = pd.DataFrame({
+        'X': [1, 100, 2, 100, 3, 100],
+        'cookie': [1, 2, 3, 1, 2, 3],
+        'grp': ['A', 'B'] * 3
+    })
+    change = metrics.Sum('X') | operations.PercentChange('grp', 'A')
+    m = operations.Jackknife('cookie', change, 0.9)
+    res = m.compute_on(df)
+    output = res.display(return_formatted_df=True)
+    expected = pd.DataFrame(
+        {
+            'Dimensions': [
+                '<div><div><span class="ci-display-experiment-id">A</span>'
+                '</div></div>',
+                '<div><div><span class="ci-display-experiment-id">B</span>'
+                '</div></div>'
+            ],
+            'sum(X)': [
+                '<div class="ci-display-cell">6.0000</div>',
+                '<div class="ci-display-good-change ci-display-cell">'
+                '<div>300.0000<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-ratio">4900.00%</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-ci-range">[357.80, 9442.20] %</span>'
+                '</div></div>'
+            ]
+        },)
+    expected.columns.name = 'Metric'
+    testing.assert_frame_equal(output, expected)
+
+  def test_display_change_split_by(self):
+    df = pd.DataFrame({
+        'X': list(range(0, 5)) + list(range(1000, 1004)),
+        'cookie': [1, 2, 3] * 3,
+        'grp': list('AB') * 4 + ['B'],
+        'expr': ['foo'] * 5 + ['bar'] * 4
+    })
+    change = metrics.Sum('X') | operations.AbsoluteChange('expr', 'foo')
+    m = operations.Jackknife('cookie', change, 0.9)
+    res = m.compute_on(df, 'grp')
+    output = res.display(return_formatted_df=True)
+    expected = pd.DataFrame(
+        {
+            'Dimensions': [
+                '<div><div><span class="ci-display-experiment-id">foo</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-dimension">A</span></div></div>',
+                '<div><div><span class="ci-display-experiment-id">bar</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-dimension">A</span></div></div>',
+                '<div><div><span class="ci-display-experiment-id">foo</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-dimension">B</span></div></div>',
+                '<div><div><span class="ci-display-experiment-id">bar</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-dimension">B</span></div></div>'
+            ],
+            'sum(X)': [
+                '<div class="ci-display-cell">6.0000</div>',
+                '<div class="ci-display-good-change ci-display-cell">'
+                '<div>1001.0000<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-ratio">995.0000</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-ci-range">[988.6862, 1001.3138]</span>'
+                '</div></div>',
+                '<div class="ci-display-cell">4.0000</div>',
+                '<div class="ci-display-cell">'
+                '<div>3005.0000<div class="ci-display-flex-line-break">'
+                '</div><span class="ci-display-ratio">3001.0000</span>'
+                '<div class="ci-display-flex-line-break"></div>'
+                '<span class="ci-display-ci-range">[-380.8246, 6382.8246]'
+                '</span></div></div>'
+            ]
+        },)
+    expected.columns.name = 'Metric'
+    testing.assert_frame_equal(output, expected)
+
 
 class BootstrapTests(unittest.TestCase):
 

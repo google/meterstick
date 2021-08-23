@@ -1198,7 +1198,7 @@ class MetricWithCI(Operation):
             indexes, local_filter, with_data)
         base_alias = with_data.add(sql.Datasource(base, '_ShouldAlreadyExists'))
         columns.add(
-            sql.Column('%s.%s' % (base_alias, c.alias), alias=c.alias)
+            sql.Column('%s.%s' % (base_alias, c.alias), alias=c.alias_raw)
             for c in base.columns.difference(indexes))
 
     join = 'LEFT' if using else 'CROSS'
