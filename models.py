@@ -40,7 +40,8 @@ class Model(operations.Operation):
                model_name=None,
                where=None,
                name=None,
-               fit_intercept=True):
+               fit_intercept=True,
+               normalize=False):
     """Initialize the model.
 
     Args:
@@ -56,6 +57,9 @@ class Model(operations.Operation):
       where: A string that will be passed to df.query() as a prefilter.
       name: The name to use for the model.
       fit_intercept: If to include intercept in the model.
+      normalize: This parameter is ignored when fit_intercept is False. If True,
+        the regressors X will be normalized before regression by subtracting the
+        mean and dividing by the l2-norm.
     """
     if not isinstance(y, metrics.Metric):
       raise ValueError('y must be a Metric!')
@@ -75,6 +79,7 @@ class Model(operations.Operation):
         metrics.MetricList((y, x)), name, group_by, where=where)
     self.computable_in_pure_sql = False
     self.fit_intercept = fit_intercept
+    self.normalize = normalize
 
   def compute(self, df):
     self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
@@ -140,48 +145,59 @@ class LinearRegression(Model):
     model = linear_model.LinearRegression(
         fit_intercept=fit_intercept, normalize=normalize)
     super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', where,
-                                           name, fit_intercept)
+                                           name, fit_intercept, normalize)
 
   def compute_on_sql_magic_mode(self, table, split_by, execute=None):
-    data = self.children[0].to_sql(table, split_by + self.group_by)
-    with_data = data.with_data
-    data.with_data = None
-    table = with_data.add(sql.Datasource(data, 'DataToFit'))
-    y = data.columns[-self.k - 1].alias
-    xs = data.columns.aliases[-self.k:]
-    x_t_x = []
-    x_t_y = []
-    if self.fit_intercept:
-      x_t_x = [
-          sql.Column('AVG(%s)' % x, alias='x%s' % i) for i, x in enumerate(xs)
-      ]
-      x_t_y = [sql.Column('AVG(%s)' % y, alias='y')]
-    for i, x1 in enumerate(xs):
-      for j, x2 in enumerate(xs[i:]):
-        x_t_x.append(
-            sql.Column('AVG(%s * %s)' % (x1, x2), alias='x%sx%s' % (i, i + j)))
-    x_t_y += [
-        sql.Column('AVG(%s * %s)' % (x, y), alias='x%sy' % i)
-        for i, x in enumerate(xs)
+    return compute_linear_or_ridge_coefficiens(self, table, split_by, execute)
+
+
+def compute_linear_or_ridge_coefficiens(m, table, split_by, execute=None):
+  """Computes X'X, X'y then the coefficients for linear or ridge regressions."""
+  data = m.children[0].to_sql(table, split_by + m.group_by)
+  with_data = data.with_data
+  data.with_data = None
+  table = with_data.add(sql.Datasource(data, 'DataToFit'))
+  y = data.columns[-m.k - 1].alias
+  xs = data.columns.aliases[-m.k:]
+  x_t_x = []
+  x_t_y = []
+  if m.fit_intercept:
+    x_t_x = [
+        sql.Column('AVG(%s)' % x, alias='x%s' % i) for i, x in enumerate(xs)
     ]
-    sufficient_stats = sql.Sql(
-        sql.Columns(x_t_x + x_t_y),
-        table,
-        groupby=sql.Columns(split_by).aliases,
-        with_data=with_data)
-    sufficient_stats = execute(str(sufficient_stats))
-    compute_coef_fn = lambda row: compute_coef(row, xs, self.fit_intercept)
-    if split_by:
-      sufficient_stats.columns = split_by + list(
-          sufficient_stats.columns)[len(split_by):]
-      return sufficient_stats.groupby(split_by).apply(compute_coef_fn).stack()
-    return sufficient_stats.apply(compute_coef_fn, 1).stack()
+    x_t_y = [sql.Column('AVG(%s)' % y, alias='y')]
+  for i, x1 in enumerate(xs):
+    for j, x2 in enumerate(xs[i:]):
+      x_t_x.append(
+          sql.Column('AVG(%s * %s)' % (x1, x2), alias='x%sx%s' % (i, i + j)))
+  x_t_y += [
+      sql.Column('AVG(%s * %s)' % (x, y), alias='x%sy' % i)
+      for i, x in enumerate(xs)
+  ]
+  cols = sql.Columns(x_t_x + x_t_y)
+  if isinstance(m, Ridge):
+    cols.add(sql.Column('COUNT(*)', alias='n_obs'))
+  sufficient_stats = sql.Sql(
+      cols,
+      table,
+      groupby=sql.Columns(split_by).aliases,
+      with_data=with_data)
+  sufficient_stats = execute(str(sufficient_stats))
+  fn = lambda row: compute_coef_from_sufficient_stats(row, xs, m)
+  if split_by:
+    sufficient_stats.columns = split_by + list(
+        sufficient_stats.columns)[len(split_by):]
+    return sufficient_stats.groupby(split_by).apply(fn).stack()
+  return sufficient_stats.apply(fn, 1).stack()
 
 
-def compute_coef(sufficient_stats, xs, fit_intercept):
-  """Computes coefficients of linear regression from X'X and X'y."""
-  if isinstance(sufficient_stats, pd.Series):
-    sufficient_stats = pd.DataFrame(sufficient_stats).T
+def compute_coef_from_sufficient_stats(sufficient_stats, xs, m):
+  """Computes coefficiens of linear or ridge regression from X'X and X'y."""
+  if isinstance(sufficient_stats, pd.DataFrame):
+    sufficient_stats = sufficient_stats.iloc[0]
+  fit_intercept = m.fit_intercept
+  if isinstance(m, Ridge) and fit_intercept and m.normalize:
+    return compute_coef_for_normalize_ridge(sufficient_stats, xs, m)
   n = len(xs)
   x_t_x_cols = []
   x_t_y_cols = []
@@ -192,15 +208,22 @@ def compute_coef(sufficient_stats, xs, fit_intercept):
     for j in range(i, n):
       x_t_x_cols += ['x%sx%s' % (i, j)]
   x_t_y_cols += ['x%sy' % i for i in range(n)]
-  x_t_x_elements = list(sufficient_stats[x_t_x_cols].iloc[0])
+  x_t_x_elements = list(sufficient_stats[x_t_x_cols])
   if fit_intercept:
     x_t_x_elements = [1] + x_t_x_elements
-  x_t_y = sufficient_stats[x_t_y_cols].iloc[0]
+  x_t_y = sufficient_stats[x_t_y_cols]
   if fit_intercept:
     n += 1
   x_t_x = np.zeros([n, n])
   x_t_x[np.tril_indices(n)] = x_t_x_elements
   x_t_x = x_t_x + x_t_x.T - np.diag(x_t_x.diagonal())
+  if isinstance(m, Ridge):
+    n_obs = sufficient_stats['n_obs']
+    penalty = np.identity(n)
+    if fit_intercept:
+      penalty[0, 0] = 0
+    # We use AVG() to compute x_t_x so the penalty needs to be scaled.
+    x_t_x += m.alpha / n_obs * penalty
   cond = np.linalg.cond(x_t_x)
   if cond > 20:
     print(
@@ -211,6 +234,38 @@ def compute_coef(sufficient_stats, xs, fit_intercept):
   xs = [n.replace('macro_', '$').strip('`') for n in xs]
   if fit_intercept:
     xs = ['intercept'] + xs
+  return pd.Series(coef, index=pd.Index(xs, name='coefficient'))
+
+
+def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
+  """Computes the coefficient of Ridge with normalization and intercept."""
+  n = len(xs)
+  # Compute the elements of X_scaled^T * X_scaled. See
+  # https://colab.research.google.com/drive/1wOWgdNzKGT_xl4A7Mrs_GbRKiVQACFfy#scrollTo=HrMCbB5SxS0A
+  x_t_x_elements = []
+  x_t_y = []
+  for i in range(n):
+    x_t_y.append(sufficient_stats['x%sy' % i] -
+                 sufficient_stats['x%s' % i] * sufficient_stats['y'])
+    for j in range(i, n):
+      x_t_x_elements.append(sufficient_stats['x%sx%s' % (i, j)] -
+                            sufficient_stats['x%s' % i] *
+                            sufficient_stats['x%s' % j])
+  x_t_x = np.zeros([n, n])
+  x_t_x[np.tril_indices(n)] = x_t_x_elements
+  x_t_x = x_t_x + x_t_x.T + (m.alpha - 1) * np.diag(x_t_x.diagonal())
+  cond = np.linalg.cond(x_t_x)
+  if cond > 20:
+    print(
+        "WARNING: The condition number of X'X is %i, which might be too large."
+        " The model coefficients might be inaccurate."
+        % cond)
+  coef = np.linalg.solve(x_t_x, x_t_y)
+  xs = [n.replace('macro_', '$').strip('`') for n in xs]
+  intercept = sufficient_stats.y - coef.dot(
+      [sufficient_stats['x%s' % i] for i in range(n)])
+  coef = [intercept] + list(coef)
+  xs = ['intercept'] + xs
   return pd.Series(coef, index=pd.Index(xs, name='coefficient'))
 
 
@@ -243,7 +298,11 @@ class Ridge(Model):
         solver=solver,
         random_state=random_state)
     super(Ridge, self).__init__(y, x, group_by, model, 'Ridge', where, name,
-                                fit_intercept)
+                                fit_intercept, normalize)
+    self.alpha = alpha
+
+  def compute_on_sql_magic_mode(self, table, split_by, execute=None):
+    return compute_linear_or_ridge_coefficiens(self, table, split_by, execute)
 
 
 class Lasso(Model):
@@ -280,7 +339,7 @@ class Lasso(Model):
         random_state=random_state,
         selection=selection)
     super(Lasso, self).__init__(y, x, group_by, model, 'Lasso', where, name,
-                                fit_intercept)
+                                fit_intercept, normalize)
 
 
 class LogisticRegression(Model):
