@@ -548,29 +548,30 @@ class Metric(object):
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
-    if mode not in (None, 'sql', 'mixed'):
+    if mode not in (None, 'sql', 'mixed', 'magic'):
       raise ValueError('Mode %s is not supported!' % mode)
-    if not self.children:
-      mode = 'sql'
-    if mode in (None, 'sql'):
-      computable_in_pure_sql = True
-      for m in self.traverse():
-        if not m.computable_in_pure_sql:
-          computable_in_pure_sql = False
-          if mode == 'sql':
-            raise ValueError('%s is not computable in pure SQL.' % self.name)
-          break
-      if computable_in_pure_sql:
+    if not self.children and not self.computable_in_pure_sql:
+      raise ValueError('%s is not computable in SQL.' % self.name)
+    if mode in (None, 'sql') or not self.children:
+      if self.all_computable_in_pure_sql():
         try:
           return self.compute_on_sql_sql_mode(table, split_by, execute)
         except Exception as e:  # pylint: disable=broad-except
-          raise Exception(
-              "Please see the root cause of the failure above. If it's caused "
-              'by the query being too complex, you can try '
-              "compute_on_sql(..., mode='mixed').") from e
+          if not self.children:
+            raise
+          raise utils.MaybeBadSqlModeError('mixed') from e
+      elif mode == 'sql':
+        raise ValueError('%s is not computable in pure SQL.' % self.name)
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+
+  def all_computable_in_pure_sql(self, include_self=True):
+    """If the whole Metric tree is computable in SQL."""
+    for m in self.traverse(include_self):
+      if not m.computable_in_pure_sql:
+        return False
+    return True
 
   def compute_on_sql_sql_mode(self,
                               table,

@@ -21,6 +21,9 @@ from typing import List, Optional, Sequence, Text, Union
 
 from meterstick import metrics
 from meterstick import operations
+from meterstick import sql
+from meterstick import utils
+import numpy as np
 import pandas as pd
 from sklearn import linear_model
 
@@ -36,7 +39,8 @@ class Model(operations.Operation):
                model=None,
                model_name=None,
                where=None,
-               name=None):
+               name=None,
+               fit_intercept=True):
     """Initialize the model.
 
     Args:
@@ -51,12 +55,17 @@ class Model(operations.Operation):
         name is not given.
       where: A string that will be passed to df.query() as a prefilter.
       name: The name to use for the model.
+      fit_intercept: If to include intercept in the model.
     """
+    if not isinstance(y, metrics.Metric):
+      raise ValueError('y must be a Metric!')
+    if count_features(y) != 1:
+      raise ValueError('y must be a 1D array but is %iD!' % count_features(y))
     self.group_by = [group_by] if isinstance(group_by, str) else group_by or []
     if isinstance(x, Sequence):
       x = metrics.MetricList(x)
     self.model = model
-    self.k = len(x) if isinstance(x, metrics.MetricList) else 1
+    self.k = count_features(x)
     if not name:
       x_names = [m.name for m in x] if isinstance(
           x, metrics.MetricList) else [x.name]
@@ -65,12 +74,13 @@ class Model(operations.Operation):
     super(Model, self).__init__(
         metrics.MetricList((y, x)), name, group_by, where=where)
     self.computable_in_pure_sql = False
+    self.fit_intercept = fit_intercept
 
   def compute(self, df):
     self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
     coef = self.model.coef_
     names = list(df.columns[1:])
-    if self.model.fit_intercept:
+    if self.fit_intercept:
       intercept = self.model.intercept_
       coef = [intercept] + list(coef)
       names = ['intercept'] + names
@@ -84,6 +94,34 @@ class Model(operations.Operation):
     return super(operations.Operation,
                  self).manipulate(res, melted, return_dataframe,
                                   apply_name_tmpl)
+
+  def compute_through_sql(self, table, split_by, execute, mode):
+    if mode not in (None, 'sql', 'mixed', 'magic'):
+      raise ValueError('Mode %s is not supported!' % mode)
+    if mode == 'sql':
+      raise ValueError('%s is not computable in pure SQL!' % self.name)
+    if mode == 'magic' and not self.all_computable_in_pure_sql(False):
+      raise ValueError(
+          'The "magic" mode requires all descendants to be computable in SQL!' %
+          self.name)
+
+    if self.where:
+      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
+    if mode == 'mixed' or not mode:
+      try:
+        return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+      except utils.MaybeBadSqlModeError as e:
+        raise
+      except Exception as e:  # pylint: disable=broad-except
+        raise utils.MaybeBadSqlModeError('magic') from e
+    if self.all_computable_in_pure_sql(False):
+      try:
+        return self.compute_on_sql_magic_mode(table, split_by, execute)
+      except Exception as e:  # pylint: disable=broad-except
+        raise utils.MaybeBadSqlModeError('mixed') from e
+
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
+    raise NotImplementedError
 
 
 class LinearRegression(Model):
@@ -102,7 +140,78 @@ class LinearRegression(Model):
     model = linear_model.LinearRegression(
         fit_intercept=fit_intercept, normalize=normalize)
     super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', where,
-                                           name)
+                                           name, fit_intercept)
+
+  def compute_on_sql_magic_mode(self, table, split_by, execute=None):
+    data = self.children[0].to_sql(table, split_by + self.group_by)
+    with_data = data.with_data
+    data.with_data = None
+    table = with_data.add(sql.Datasource(data, 'DataToFit'))
+    y = data.columns[-self.k - 1].alias
+    xs = data.columns.aliases[-self.k:]
+    x_t_x = []
+    x_t_y = []
+    if self.fit_intercept:
+      x_t_x = [
+          sql.Column('AVG(%s)' % x, alias='x%s' % i) for i, x in enumerate(xs)
+      ]
+      x_t_y = [sql.Column('AVG(%s)' % y, alias='y')]
+    for i, x1 in enumerate(xs):
+      for j, x2 in enumerate(xs[i:]):
+        x_t_x.append(
+            sql.Column('AVG(%s * %s)' % (x1, x2), alias='x%sx%s' % (i, i + j)))
+    x_t_y += [
+        sql.Column('AVG(%s * %s)' % (x, y), alias='x%sy' % i)
+        for i, x in enumerate(xs)
+    ]
+    sufficient_stats = sql.Sql(
+        sql.Columns(x_t_x + x_t_y),
+        table,
+        groupby=sql.Columns(split_by).aliases,
+        with_data=with_data)
+    sufficient_stats = execute(str(sufficient_stats))
+    compute_coef_fn = lambda row: compute_coef(row, xs, self.fit_intercept)
+    if split_by:
+      sufficient_stats.columns = split_by + list(
+          sufficient_stats.columns)[len(split_by):]
+      return sufficient_stats.groupby(split_by).apply(compute_coef_fn).stack()
+    return sufficient_stats.apply(compute_coef_fn, 1).stack()
+
+
+def compute_coef(sufficient_stats, xs, fit_intercept):
+  """Computes coefficients of linear regression from X'X and X'y."""
+  if isinstance(sufficient_stats, pd.Series):
+    sufficient_stats = pd.DataFrame(sufficient_stats).T
+  n = len(xs)
+  x_t_x_cols = []
+  x_t_y_cols = []
+  if fit_intercept:
+    x_t_x_cols = ['x%s' % i for i in range(n)]
+    x_t_y_cols = ['y']
+  for i in range(n):
+    for j in range(i, n):
+      x_t_x_cols += ['x%sx%s' % (i, j)]
+  x_t_y_cols += ['x%sy' % i for i in range(n)]
+  x_t_x_elements = list(sufficient_stats[x_t_x_cols].iloc[0])
+  if fit_intercept:
+    x_t_x_elements = [1] + x_t_x_elements
+  x_t_y = sufficient_stats[x_t_y_cols].iloc[0]
+  if fit_intercept:
+    n += 1
+  x_t_x = np.zeros([n, n])
+  x_t_x[np.tril_indices(n)] = x_t_x_elements
+  x_t_x = x_t_x + x_t_x.T - np.diag(x_t_x.diagonal())
+  cond = np.linalg.cond(x_t_x)
+  if cond > 20:
+    print(
+        "WARNING: The condition number of X'X is %i, which might be too large."
+        " The model coefficients might be inaccurate."
+        % cond)
+  coef = np.linalg.solve(x_t_x, x_t_y)
+  xs = [n.replace('macro_', '$').strip('`') for n in xs]
+  if fit_intercept:
+    xs = ['intercept'] + xs
+  return pd.Series(coef, index=pd.Index(xs, name='coefficient'))
 
 
 class Ridge(Model):
@@ -133,7 +242,8 @@ class Ridge(Model):
         tol=tol,
         solver=solver,
         random_state=random_state)
-    super(Ridge, self).__init__(y, x, group_by, model, 'Ridge', where, name)
+    super(Ridge, self).__init__(y, x, group_by, model, 'Ridge', where, name,
+                                fit_intercept)
 
 
 class Lasso(Model):
@@ -169,7 +279,8 @@ class Lasso(Model):
         positive=positive,
         random_state=random_state,
         selection=selection)
-    super(Lasso, self).__init__(y, x, group_by, model, 'Lasso', where, name)
+    super(Lasso, self).__init__(y, x, group_by, model, 'Lasso', where, name,
+                                fit_intercept)
 
 
 class LogisticRegression(Model):
@@ -214,8 +325,9 @@ class LogisticRegression(Model):
         warm_start=warm_start,
         n_jobs=n_jobs,
         l1_ratio=l1_ratio)
-    super(LogisticRegression, self).__init__(y, x, group_by, model,
-                                             'LogisticRegression', where, name)
+    super(LogisticRegression,
+          self).__init__(y, x, group_by, model, 'LogisticRegression', where,
+                         name, fit_intercept)
 
   def compute(self, df):
     self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
@@ -223,7 +335,7 @@ class LogisticRegression(Model):
     names = list(df.columns[1:])
     if coef.shape[0] == 1:
       coef = coef[0]
-      if self.model.fit_intercept:
+      if self.fit_intercept:
         intercept = self.model.intercept_
         intercept = intercept[0]
         coef = [intercept] + list(coef)
@@ -234,7 +346,7 @@ class LogisticRegression(Model):
           coef,
           index=pd.Index(self.model.classes_, name='class'),
           columns=names)
-      if self.model.fit_intercept:
+      if self.fit_intercept:
         intercept = pd.DataFrame(
             self.model.intercept_,
             index=pd.Index(self.model.classes_, name='class'),
@@ -243,3 +355,24 @@ class LogisticRegression(Model):
       res = res.stack()
       res.index.set_names('coefficient', -1, inplace=True)
       return res
+
+
+def count_features(m: metrics.Metric):
+  """Gets the width of the result of m.compute_on()."""
+  if isinstance(m, Model):
+    return m.k
+  if isinstance(m, metrics.MetricList):
+    return sum([count_features(i) for i in m])
+  if isinstance(m, operations.MetricWithCI):
+    return count_features(
+        m.children[0]) * 3 if m.confidence else count_features(
+            m.children[0]) * 2
+  if isinstance(m, operations.Operation):
+    return count_features(m.children[0])
+  if isinstance(m, metrics.CompositeMetric):
+    return max([count_features(i) for i in m.children])
+  if isinstance(m, metrics.Quantile):
+    if m.one_quantile:
+      return 1
+    return len(m.quantile)
+  return 1

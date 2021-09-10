@@ -935,6 +935,9 @@ class MetricWithCI(Operation):
       visualize the confidence interval nicely in Colab and Jupyter notebook.
     prefix: In the result, the column names will be like "{prefix} SE",
       "{prefix} CI-upper".
+    sql_batch_size: The number of resamples to compute in one SQL run. It only
+      has effect in the 'mixed' mode of compute_on_sql(). Note that you can also
+      specify batch_size in compute_on_sql() directly, which precedes this one.
     And all other attributes inherited from Operation.
   """
 
@@ -944,6 +947,7 @@ class MetricWithCI(Operation):
                confidence: Optional[float] = None,
                name_tmpl: Optional[Text] = None,
                prefix: Optional[Text] = None,
+               sql_batch_size=None,
                **kwargs):
     if confidence and not 0 < confidence < 1:
       raise ValueError('Confidence must be in (0, 1).')
@@ -952,6 +956,7 @@ class MetricWithCI(Operation):
     super(MetricWithCI, self).__init__(child, name_tmpl, **kwargs)
     self.apply_name_tmpl = False
     self.prefix = prefix
+    self.sql_batch_size = sql_batch_size
     if not self.prefix and self.name_tmpl:
       self.prefix = prefix or self.name_tmpl.format('').strip()
 
@@ -1237,36 +1242,29 @@ class MetricWithCI(Operation):
         top 3 layeres computed in Python and the bottom in SQL. In summary,
         everything can be computed in SQL is computed in SQL.
       batch_size: The number of resamples to compute in one SQL run. It only has
-        effect in the 'mixed' mode.
+        effect in the 'mixed' mode. It precedes self.batch_size.
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
-    self._batch_size = batch_size
-    return super(MetricWithCI, self).compute_on_sql(table, split_by, execute,
-                                                    melted, mode)
+    self._runtime_batch_size = batch_size
+    try:
+      return super(MetricWithCI, self).compute_on_sql(table, split_by, execute,
+                                                      melted, mode)
+    finally:
+      self._runtime_batch_size = None
 
   def compute_through_sql(self, table, split_by, execute, mode):
-    if mode not in (None, 'sql', 'mixed'):
+    if mode not in (None, 'sql', 'mixed', 'magic'):
       raise ValueError('Mode %s is not supported!' % mode)
-    if not self.children:
-      mode = 'sql'
     if mode in (None, 'sql'):
-      computable_in_pure_sql = True
-      for m in self.traverse(False):
-        if not m.computable_in_pure_sql:
-          computable_in_pure_sql = False
-          if mode == 'sql':
-            raise ValueError('%s is not computable in pure SQL.' % self.name)
-          break
-      if computable_in_pure_sql:
+      if self.all_computable_in_pure_sql(False):
         try:
           return self.compute_on_sql_sql_mode(table, split_by, execute)
         except Exception as e:  # pylint: disable=broad-except
-          raise Exception(
-              "Please see the root cause of the failure above. If it's caused "
-              'by the query being too complex, you can try '
-              "compute_on_sql(..., mode='mixed', batch_size=int).") from e
+          raise utils.MaybeBadSqlModeError(use_batch_size=True) from e
+      elif mode == 'sql':
+        raise ValueError('%s is not computable in pure SQL.' % self.name)
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
@@ -1326,18 +1324,15 @@ class MetricWithCI(Operation):
     return self._add_base_to_res(res, base)
 
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
+    batch_size = self._runtime_batch_size or self.sql_batch_size
     try:
       replicates = self.compute_children_sql(table, split_by, execute, mode,
-                                             self._batch_size)
+                                             batch_size)
+    except utils.MaybeBadSqlModeError:
+      raise
     except Exception as e:  # pylint: disable=broad-except
-      raise Exception(
-          "Please see the root cause of the failure above. If it's caused "
-          'by the query being too large, you can try reducing the '
-          'batch_size in compute_on_sql(). Current batch_size is %s.' %
-          self._batch_size) from e
+      raise utils.MaybeBadSqlModeError(batch_size=batch_size) from e
     std = self.compute_on_children(replicates, split_by)
-    if self.where:
-      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     point_est = self.children[0].compute_on_sql(table, split_by, execute, True,
                                                 mode)
     res = point_est.join(utils.melt(std))
