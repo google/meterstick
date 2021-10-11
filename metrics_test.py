@@ -89,6 +89,18 @@ class SimpleMetricTest(unittest.TestCase):
       'grp': ['A'] * 3 + ['B'] * 4
   })
 
+  def test_list_where(self):
+    metric = metrics.Mean('X', where=['grp == "A"'])
+    output = metric.compute_on(self.df, return_dataframe=False)
+    expected = self.df.query('grp == "A"')['X'].mean()
+    self.assertEqual(output, expected)
+
+  def test_single_list_where(self):
+    metric = metrics.Mean('X', where=['grp == "A"', 'Y < 2'])
+    output = metric.compute_on(self.df, return_dataframe=False)
+    expected = self.df.query('grp == "A" and Y < 2')['X'].mean()
+    self.assertEqual(output, expected)
+
   def test_count_not_df(self):
     metric = metrics.Count('X')
     output = metric.compute_on(self.df, return_dataframe=False)
@@ -1229,7 +1241,8 @@ class TestMetricList(unittest.TestCase):
         data={
             'asum(X)b': [6],
             'amean(X)b': [1.5]
-        }, columns=['asum(X)b', 'amean(X)b'])
+        },
+        columns=['asum(X)b', 'amean(X)b'])
     testing.assert_frame_equal(output, expected)
 
   def test_operations(self):
@@ -1281,7 +1294,8 @@ class TestMetricList(unittest.TestCase):
         data={
             'sum(X) / sum(X)': [1.],
             'sum(X) / foo': [3.]
-        }, columns=['sum(X) / sum(X)', 'sum(X) / foo'])
+        },
+        columns=['sum(X) / sum(X)', 'sum(X) / foo'])
     testing.assert_frame_equal(output, expected)
 
 

@@ -18,7 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
-from typing import Any, Iterable, List, Optional, Text, Tuple, Union
+from typing import Any, Iterable, List, Optional, Sequence, Text, Tuple, Union
 import warnings
 
 from meterstick import confidence_interval_display
@@ -71,7 +71,8 @@ class Operation(metrics.Metric):
       precompute_child is True, in the precompute(), we return
       self.children[0].compute_on(df, split_by + self.extra_index). Otherwise
       the original input data is returned.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     cache_key: What key to use to cache the df. You can use anything that can be
       a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ...).
     And all other attributes inherited from Metric.
@@ -82,7 +83,7 @@ class Operation(metrics.Metric):
                name_tmpl: Optional[Text] = None,
                extra_index: Optional[Union[Text, Iterable[Text]]] = None,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     if name_tmpl and not name:
       name = name_tmpl.format(utils.get_name(child))

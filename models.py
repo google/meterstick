@@ -54,7 +54,8 @@ class Model(operations.Operation):
         model.coef_ and model.intercept_.
       model_name: The name of the model, will be used to auto-generate a name if
         name is not given.
-      where: A string that will be passed to df.query() as a prefilter.
+      where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
       name: The name to use for the model.
       fit_intercept: If to include intercept in the model.
       normalize: This parameter is ignored when fit_intercept is False. If True,

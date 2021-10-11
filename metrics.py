@@ -158,7 +158,8 @@ class Metric(object):
     name: Name of the Metric.
     children: An iterable of Metric(s) this Metric based upon.
     cache: A dict to store cached results.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     precompute: A function. See the workflow chart above for its behavior.
     compute: A function. See the workflow chart above for its behavior.
     postcompute: A function. See the workflow chart above for its behavior.
@@ -180,7 +181,7 @@ class Metric(object):
                name: Text,
                children: Optional[Union['Metric', Sequence[Union['Metric', int,
                                                                  float]]]] = (),
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                name_tmpl=None,
                precompute=None,
                compute: Optional[Callable[[pd.DataFrame], Any]] = None,
@@ -192,6 +193,8 @@ class Metric(object):
     self.cache_key = None
     self.children = [children] if isinstance(children,
                                              Metric) else children or []
+    if isinstance(where, List):
+      where = ' and '.join(where)
     self.where = where
     self.extra_index = []
     self.computable_in_pure_sql = True
@@ -728,7 +731,8 @@ class MetricList(Metric):
     name: Name of the Metric.
     children: An sequence of Metrics.
     names: A list of names of children.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     cache: A dict to store cached results.
     cache_key: The key currently being used in computation.
     children_return_dataframe: Whether to convert the result to a children
@@ -739,7 +743,7 @@ class MetricList(Metric):
 
   def __init__(self,
                children: Sequence[Metric],
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                children_return_dataframe: bool = True,
                name_tmpl=None):
     for m in children:
@@ -883,7 +887,8 @@ class CompositeMetric(Metric):
       when further operations (e.g., subtraction) need to be performed between
       two multiple-column DataFrames, which require that the DataFrames have
       matching column names.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     cache: A dict to store cached results.
     cache_key: The key currently being used in computation.
     And all other attributes inherited from Metric.
@@ -1122,7 +1127,7 @@ class SimpleMetric(Metric):
                var: Text,
                name: Optional[Text] = None,
                name_tmpl=None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     name = name or name_tmpl.format(var)
     self.var = var
@@ -1147,7 +1152,8 @@ class Count(SimpleMetric):
   Attributes:
     var: Column to compute on.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     distinct: Whether to count distinct values.
     kwargs: Other kwargs passed to pd.DataFrame.count() or nunique().
     And all other attributes inherited from Metric.
@@ -1156,7 +1162,7 @@ class Count(SimpleMetric):
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                distinct: bool = False,
                **kwargs):
     self.distinct = distinct
@@ -1182,7 +1188,8 @@ class Sum(SimpleMetric):
   Attributes:
     var: Column to compute on.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.sum().
     And all other attributes inherited from SimpleMetric.
   """
@@ -1190,7 +1197,7 @@ class Sum(SimpleMetric):
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     super(Sum, self).__init__(var, name, 'sum({})', where, **kwargs)
 
@@ -1209,7 +1216,8 @@ class Dot(SimpleMetric):
     var2: The second column in the inner product.
     normalize: If to normalize by the length.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.sum() or .mean(). And all other
       attributes inherited from SimpleMetric.
   """
@@ -1219,7 +1227,7 @@ class Dot(SimpleMetric):
                var2: Text,
                normalize=False,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     self.var2 = var2
     self.normalize = normalize
@@ -1249,7 +1257,8 @@ class Mean(SimpleMetric):
     var: Column to compute on.
     weight: The column of weights.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.mean(). Only has effect if no
       weight is specified.
     And all other attributes inherited from SimpleMetric.
@@ -1259,7 +1268,7 @@ class Mean(SimpleMetric):
                var: Text,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     name_tmpl = '%s-weighted mean({})' % weight if weight else 'mean({})'
     super(Mean, self).__init__(var, name, name_tmpl, where, **kwargs)
@@ -1292,7 +1301,8 @@ class Max(SimpleMetric):
   Attributes:
     var: Column to compute on.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.max().
     And all other attributes inherited from SimpleMetric.
   """
@@ -1300,7 +1310,7 @@ class Max(SimpleMetric):
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     super(Max, self).__init__(var, name, 'max({})', where, **kwargs)
 
@@ -1317,7 +1327,8 @@ class Min(SimpleMetric):
   Attributes:
     var: Column to compute on.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.min().
     And all other attributes inherited from SimpleMetric.
   """
@@ -1325,7 +1336,7 @@ class Min(SimpleMetric):
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     super(Min, self).__init__(var, name, 'min({})', where, **kwargs)
 
@@ -1347,7 +1358,8 @@ class Quantile(SimpleMetric):
       'weight' is specified.
     one_quantile: If quantile is a number or an iterable.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.quantile().
     And all other attributes inherited from SimpleMetric.
   """
@@ -1358,7 +1370,7 @@ class Quantile(SimpleMetric):
                weight: Optional[Text] = None,
                interpolation='linear',
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     self.one_quantile = isinstance(quantile, (int, float))
     if not self.one_quantile:
@@ -1443,7 +1455,8 @@ class Variance(SimpleMetric):
     ddof: Degree of freedom to use in pd.DataFrame.var().
     weight: The column of weights.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.var(). Only has effect if no
       weight is specified.
     And all other attributes inherited from SimpleMetric.
@@ -1454,7 +1467,7 @@ class Variance(SimpleMetric):
                unbiased: bool = True,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
@@ -1501,7 +1514,8 @@ class StandardDeviation(SimpleMetric):
     ddof: Degree of freedom to use in pd.DataFrame.std().
     weight: The column of weights.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.std(). Only has effect if no
       weight is specified.
     And all other attributes inherited from SimpleMetric.
@@ -1512,7 +1526,7 @@ class StandardDeviation(SimpleMetric):
                unbiased: bool = True,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
@@ -1624,7 +1638,8 @@ class CV(SimpleMetric):
     var: Column to compute on.
     ddof: Degree of freedom to use.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to both pd.DataFrame.std() and
       pd.DataFrame.mean().
     And all other attributes inherited from SimpleMetric.
@@ -1634,7 +1649,7 @@ class CV(SimpleMetric):
                var: Text,
                unbiased: bool = True,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     self.ddof = 1 if unbiased else 0
     super(CV, self).__init__(var, name, 'cv({})', where, **kwargs)
@@ -1666,7 +1681,8 @@ class Correlation(SimpleMetric):
     name: Name of the Metric.
     method: Method of correlation. The same arg in pd.Series.corr(). Only has
       effect if no weight is specified.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to pd.DataFrame.corr(). Only has effect if no
       weight is specified.
     And all other attributes inherited from SimpleMetric.
@@ -1678,7 +1694,7 @@ class Correlation(SimpleMetric):
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
                method='pearson',
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     name_tmpl = 'corr({}, {})'
     if weight:
@@ -1737,7 +1753,8 @@ class Cov(SimpleMetric):
     weight: Column name of aweights passed to np.cov(). If you need fweights,
       pass it in kwargs.
     name: Name of the Metric.
-    where: A string that will be passed to df.query() as a prefilter.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
     kwargs: Other kwargs passed to np.cov().
     And all other attributes inherited from SimpleMetric.
   """
@@ -1749,7 +1766,7 @@ class Cov(SimpleMetric):
                ddof: Optional[int] = None,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     name_tmpl = 'cov({}, {})'
     if weight:
