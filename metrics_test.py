@@ -48,14 +48,15 @@ class MetricTest(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
   def test_postcompute(self):
-    metric = metrics.Metric(
-        'foo',
-        compute=lambda df: str(df.X.sum()),
-        postcompute=lambda df, split_by: df + split_by)
-    output = metric.compute_on(self.df, 'Y')
-    expected = pd.DataFrame({'foo': ['0Y', '3Y', '3Y']}, index=range(3))
-    expected.index.name = 'Y'
-    testing.assert_frame_equal(output, expected)
+    def postcompute(values, split_by):
+      del split_by
+      return values / values.sum()
+
+    output = metrics.Sum('X', postcompute=postcompute).compute_on(self.df, 'Y')
+    expected = operations.Distribution('Y',
+                                       metrics.Sum('X')).compute_on(self.df)
+    expected.columns = ['sum(X)']
+    testing.assert_frame_equal(output.astype(float), expected)
 
   def test_compute_slices(self):
 

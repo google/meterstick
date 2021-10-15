@@ -1131,8 +1131,18 @@ class SimpleMetric(Metric):
                **kwargs):
     name = name or name_tmpl.format(var)
     self.var = var
+    precompute = kwargs.pop('precompute', None)
+    postcompute = kwargs.pop('postcompute', None)
+    final_compute = kwargs.pop('final_compute', None)
     self.kwargs = kwargs
-    super(SimpleMetric, self).__init__(name, None, where, name_tmpl)
+    super(SimpleMetric, self).__init__(
+        name,
+        None,
+        where,
+        name_tmpl,
+        precompute=precompute,
+        postcompute=postcompute,
+        final_compute=final_compute)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
