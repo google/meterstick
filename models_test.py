@@ -218,6 +218,62 @@ class ModelsTest(unittest.TestCase):
     expected.index.names = ['coefficient']
     pd.testing.assert_frame_equal(output, expected)
 
+  def test_elastic_net(self):
+    m = models.ElasticNet(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1')
+    output = m.compute_on(self.df)
+    model = linear_model.ElasticNet()
+    model.fit(self.grped1[['X1']], self.grped1[['Y']])
+    expected = pd.DataFrame(
+        {'ElasticNet(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0]]},
+        index=['intercept', 'sum(X1)'])
+    expected.index.names = ['coefficient']
+    pd.testing.assert_frame_equal(output, expected)
+
+  def test_elastic_net_multi_var(self):
+    m = models.ElasticNet(
+        metrics.Sum('Y'),
+        [metrics.Sum('X1'), metrics.Sum('X2')], 'grp1')
+    output = m.compute_on(self.df)
+    model = linear_model.ElasticNet()
+    model.fit(self.grped1[['X1', 'X2']], self.grped1[['Y']])
+    expected = pd.DataFrame(
+        {
+            'ElasticNet(sum(Y) ~ sum(X1) + sum(X2))':
+                [model.intercept_[0], model.coef_[0], model.coef_[1]]
+        },
+        index=['intercept', 'sum(X1)', 'sum(X2)'])
+    expected.index.names = ['coefficient']
+    pd.testing.assert_frame_equal(output, expected)
+
+  def test_elastic_net_split_by(self):
+    m = models.ElasticNet(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1')
+    output = m.compute_on(self.df, 'grp2')
+    model = linear_model.ElasticNet()
+    model.fit(self.grped2.loc['bar'][['X1']], self.grped2.loc['bar'][['Y']])
+    expected1 = pd.DataFrame(
+        {'ElasticNet(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0]]},
+        index=['intercept', 'sum(X1)'])
+    model.fit(self.grped2.loc['foo'][['X1']], self.grped2.loc['foo'][['Y']])
+    expected2 = pd.DataFrame(
+        {'ElasticNet(sum(Y) ~ sum(X1))': [model.intercept_[0], model.coef_[0]]},
+        index=['intercept', 'sum(X1)'])
+    expected = pd.concat([expected1, expected2],
+                         keys=['bar', 'foo'],
+                         names=['grp2'])
+    expected.index.names = ['grp2', 'coefficient']
+    pd.testing.assert_frame_equal(output, expected)
+
+  def test_elastic_net_no_intercept(self):
+    m = models.ElasticNet(
+        metrics.Sum('Y'), metrics.Sum('X1'), 'grp1', fit_intercept=False)
+    output = m.compute_on(self.df)
+    model = linear_model.ElasticNet(fit_intercept=False)
+    model.fit(self.grped1[['X1']], self.grped1[['Y']])
+    expected = pd.DataFrame({'ElasticNet(sum(Y) ~ sum(X1))': model.coef_[0]},
+                            index=['sum(X1)'])
+    expected.index.names = ['coefficient']
+    pd.testing.assert_frame_equal(output, expected)
+
   def test_logistic_regression(self):
     m = models.LogisticRegression(metrics.Sum('grp2'), metrics.Sum('X1'), 'X1')
     output = m.compute_on(self.df)

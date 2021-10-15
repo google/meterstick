@@ -343,6 +343,49 @@ class Lasso(Model):
                                 fit_intercept, normalize)
 
 
+class ElasticNet(Model):
+  """A class that can fit a ElasticNet regression."""
+
+  def __init__(self,
+               y: metrics.Metric,
+               x: Union[metrics.Metric, Sequence[metrics.Metric],
+                        metrics.MetricList],
+               group_by: Optional[Union[Text, List[Text]]] = None,
+               alpha=1,
+               l1_ratio=0.5,
+               fit_intercept: bool = True,
+               normalize: bool = False,
+               where: Optional[str] = None,
+               name: Optional[str] = None,
+               precompute=False,
+               copy_X=True,
+               max_iter=1000,
+               tol=0.0001,
+               warm_start=False,
+               positive=False,
+               random_state=None,
+               selection='cyclic'):
+    """Initialize a sklearn.ElasticNet model."""
+    model = linear_model.ElasticNet(
+        alpha=alpha,
+        l1_ratio=l1_ratio,
+        fit_intercept=fit_intercept,
+        normalize=normalize,
+        copy_X=copy_X,
+        max_iter=max_iter,
+        tol=tol,
+        warm_start=warm_start,
+        positive=positive,
+        random_state=random_state,
+        selection=selection)
+    super(ElasticNet, self).__init__(y, x, group_by, model, 'ElasticNet', where,
+                                     name, fit_intercept, normalize)
+    self.alpha = alpha
+    self.tol = tol
+    self.max_iter = max_iter
+    self.l1_ratio = l1_ratio
+
+
 class LogisticRegression(Model):
   """A class that can fit a logistic regression."""
 
