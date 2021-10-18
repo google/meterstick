@@ -408,22 +408,24 @@ class Columns(SqlComponents):
   """Represents a bunch of SQL columns."""
 
   def __init__(self, columns=None, distinct=None):  # pylint: disable=super-init-not-called
-    self.columns = collections.OrderedDict()
+    super(Columns, self).__init__()
     self.add(columns)
     self.distinct = distinct
     if distinct is None and isinstance(columns, Columns):
       self.distinct = columns.distinct
 
   @property
-  def children(self):
-    return tuple(self.columns.values())
-
-  @property
   def aliases(self):
     return [c.alias for c in self]
 
   def get_alias(self, expression):
-    res = [k for k, v in self.columns.items() if v.expression == expression]
+    res = [c for c in self if c.expression == expression]
+    if res:
+      return res[0].alias
+    return None
+
+  def get_column(self, alias):
+    res = [c for c in self if c.alias == alias]
     if res:
       return res[0]
     return None
@@ -459,12 +461,10 @@ class Columns(SqlComponents):
     if found:
       children.set_alias(found)
       return self
-    if alias not in self.columns:
-      self.columns[alias] = children
+    if alias not in self.aliases:
+      self.children.append(children)
       return self
     else:
-      if children == self.columns[alias]:
-        return self
       children.add_suffix()
       return self.add(children)
 
