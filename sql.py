@@ -505,7 +505,7 @@ class Datasource(SqlComponent):
       self.table = table.table
       self.alias = alias or table.alias
     self.alias = escape_alias(self.alias)
-    self.is_table = not str(self.table).startswith('SELECT')
+    self.is_table = not str(self.table).strip().upper().startswith('SELECT')
 
   def get_expression(self, form='FROM'):
     """Gets the expression that can be used in a FROM or WITH clause."""
