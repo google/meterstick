@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import itertools
 from typing import List, Optional, Sequence, Text, Union
 
 from meterstick import metrics
@@ -54,8 +55,8 @@ class Model(operations.Operation):
         model.coef_ and model.intercept_.
       model_name: The name of the model, will be used to auto-generate a name if
         name is not given.
-      where: A string or list of strings to be concatenated that will be passed to
-      df.query() as a prefilter.
+      where: A string or list of strings to be concatenated that will be passed
+        to df.query() as a prefilter.
       name: The name to use for the model.
       fit_intercept: If to include intercept in the model.
       normalize: This parameter is ignored when fit_intercept is False. If True,
@@ -75,9 +76,13 @@ class Model(operations.Operation):
       x_names = [m.name for m in x] if isinstance(
           x, metrics.MetricList) else [x.name]
       name = '%s(%s ~ %s)' % (model_name, y.name, ' + '.join(x_names))
-    self.name = name
+    name_tmpl = name + ' Coefficient: {}'
     super(Model, self).__init__(
-        metrics.MetricList((y, x)), name, group_by, where=where)
+        metrics.MetricList((y, x)),
+        name_tmpl,
+        group_by,
+        name=name,
+        where=where)
     self.computable_in_pure_sql = False
     self.fit_intercept = fit_intercept
     self.normalize = normalize
@@ -90,16 +95,7 @@ class Model(operations.Operation):
       intercept = self.model.intercept_
       coef = [intercept] + list(coef)
       names = ['intercept'] + names
-    return pd.Series(coef, index=pd.Index(names, name='coefficient'))
-
-  def manipulate(self,
-                 res,
-                 melted,
-                 return_dataframe=True,
-                 apply_name_tmpl=False):
-    return super(operations.Operation,
-                 self).manipulate(res, melted, return_dataframe,
-                                  apply_name_tmpl)
+    return pd.DataFrame([coef], columns=names)
 
   def compute_through_sql(self, table, split_by, execute, mode):
     if mode not in (None, 'sql', 'mixed', 'magic'):
@@ -122,7 +118,8 @@ class Model(operations.Operation):
         raise utils.MaybeBadSqlModeError('magic') from e
     if self.all_computable_in_pure_sql(False):
       try:
-        return self.compute_on_sql_magic_mode(table, split_by, execute)
+        res = self.compute_on_sql_magic_mode(table, split_by, execute)
+        return utils.apply_name_tmpl(self.name_tmpl, res)
       except Exception as e:  # pylint: disable=broad-except
         raise utils.MaybeBadSqlModeError('mixed') from e
 
@@ -188,8 +185,8 @@ def compute_linear_or_ridge_coefficiens(m, table, split_by, execute=None):
   if split_by:
     sufficient_stats.columns = split_by + list(
         sufficient_stats.columns)[len(split_by):]
-    return sufficient_stats.groupby(split_by).apply(fn).stack()
-  return sufficient_stats.apply(fn, 1).stack()
+    return sufficient_stats.groupby(split_by).apply(fn)
+  return fn(sufficient_stats)
 
 
 def compute_coef_from_sufficient_stats(sufficient_stats, xs, m):
@@ -229,13 +226,13 @@ def compute_coef_from_sufficient_stats(sufficient_stats, xs, m):
   if cond > 20:
     print(
         "WARNING: The condition number of X'X is %i, which might be too large."
-        " The model coefficients might be inaccurate."
+        ' The model coefficients might be inaccurate.'
         % cond)
   coef = np.linalg.solve(x_t_x, x_t_y)
   xs = [n.replace('macro_', '$').strip('`') for n in xs]
   if fit_intercept:
     xs = ['intercept'] + xs
-  return pd.Series(coef, index=pd.Index(xs, name='coefficient'))
+  return pd.DataFrame([coef], columns=xs)
 
 
 def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
@@ -259,7 +256,7 @@ def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
   if cond > 20:
     print(
         "WARNING: The condition number of X'X is %i, which might be too large."
-        " The model coefficients might be inaccurate."
+        ' The model coefficients might be inaccurate.'
         % cond)
   coef = np.linalg.solve(x_t_x, x_t_y)
   xs = [n.replace('macro_', '$').strip('`') for n in xs]
@@ -267,7 +264,7 @@ def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
       [sufficient_stats['x%s' % i] for i in range(n)])
   coef = [intercept] + list(coef)
   xs = ['intercept'] + xs
-  return pd.Series(coef, index=pd.Index(xs, name='coefficient'))
+  return pd.DataFrame([coef], columns=xs)
 
 
 class Ridge(Model):
@@ -443,20 +440,16 @@ class LogisticRegression(Model):
         intercept = intercept[0]
         coef = [intercept] + list(coef)
         names = ['intercept'] + names
-      return pd.Series(coef, index=pd.Index(names, name='coefficient'))
+      return pd.DataFrame([coef], columns=names)
     else:
-      res = pd.DataFrame(
-          coef,
-          index=pd.Index(self.model.classes_, name='class'),
-          columns=names)
+      # Multi class
       if self.fit_intercept:
-        intercept = pd.DataFrame(
-            self.model.intercept_,
-            index=pd.Index(self.model.classes_, name='class'),
-            columns=['intercept'])
-        res = intercept.join(res)
-      res = res.stack()
-      res.index.set_names('coefficient', -1, inplace=True)
+        coef = np.hstack((self.model.intercept_.reshape(-1, 1), coef))
+        names = ['intercept'] + names
+      res = pd.DataFrame(
+          coef.reshape(1, -1),
+          columns=('%s for class %s' % (n, c)
+                   for c, n in itertools.product(self.model.classes_, names)))
       return res
 
 

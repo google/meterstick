@@ -320,7 +320,8 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
         res.index.set_levels(
             map(name_tmpl.format, res.index.levels[0]), 0, inplace=True)
       else:
-        res.index = map(name_tmpl.format, res.index)
+        res.index = pd.Index(
+            map(name_tmpl.format, res.index), name=res.index.name)
     else:
       if len(res.columns.names) > 1:
         res.columns.set_levels(

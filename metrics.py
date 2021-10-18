@@ -545,7 +545,7 @@ class Metric(object):
     """
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
     res = self.compute_through_sql(table, split_by, execute, mode)
-    # res from compute_on_sql() already has name_tmpl applied.
+    # res from compute_through_sql() already has name_tmpl applied.
     res = self.manipulate(res, melted, apply_name_tmpl=False)
     return self.final_compute(res, melted, True, split_by, table)
 
