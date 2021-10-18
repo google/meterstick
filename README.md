@@ -190,6 +190,22 @@ a variable.
 Example Usage: `Sum("Queries") | Distribution("Device")` calculates the
 proportion of queries that come from each device.
 
+### Models
+
+A Meterstick **Model** fits a model on data computed by children Metrics.
+
+`Model(y, x, groupby).compute_on(data)` is equivalent to
+
+1.  Computes `y.compute_on(data, groupby)` and `x.compute_on(data, groupby)`.
+2.  Fits the underlying model on the results from #1.
+
+We have built-in support for `LinearRegression`, `Ridge`, `Lasso`, `ElasticNet`
+and `LogisticRegression`. Example Usage: `LinearRegression(Sum('Y'), Sum('X'),
+'country')` calculates the sum of Y and X by country respectively, then fits a
+linear regression between them.
+
+Note that `x`, the 2nd arg, can be a Metric, a MetricList, or a list of Metrics.
+
 ### Filtering
 
 We can restrict our metrics to subsets of the data. For instance to calculate
