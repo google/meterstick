@@ -2321,7 +2321,8 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
   split_by_and_unit = sql.Columns(split_by).add(metric.unit)
   all_slices = sql.Datasource(
       sql.Sql(
-          sql.Columns(split_by_and_unit, distinct=True), unit_slice_ct_alias))
+          sql.Columns(split_by_and_unit.aliases, distinct=True),
+          unit_slice_ct_alias))
   if split_by:
     loo_from = all_slices.join(
         sql.Datasource(total_ct_alias, 'total'), using=split_by, join='LEFT')
