@@ -46,15 +46,19 @@ class Operation(metrics.Metric):
     children: A Length-1 tuple of the child Metric(s) whose results will be the
       input to the Operation. Might be None in __init__, but must be assigned
       before compute().
-    extra_index: Many Operations rely on adding extra split_by columns to child
-      Metric. For example,
+    extra_split_by: Many Operations rely on adding extra split_by columns to
+      child Metric. For example,
       PercentChange('condition', base_value, Sum('X')).compute_on(df, 'grp')
       would compute Sum('X').compute_on(df, ['grp', 'condition']) then get the
       change. As the result, the CacheKey used in PercentChange is different to
       that used in Sum('X'). The latter has more columns in the split_by.
-      extra_index records what columns need to be added to children Metrics so
-      we can flush the cache correctly. The convention is extra_index comes
-      after split_by. If not, you need to overwrite flush_children().
+      extra_split_by records what columns need to be added to children Metrics
+      so we can flush the cache correctly. The convention is extra_split_by
+      comes after split_by. If not, you need to overwrite flush_children().
+    extra_index: Not every extra_split_by show up in the result. For example,
+      the group_by columns in Models don't show up in the final output.
+      extra_index stores the columns that will show up and should be a subset of
+      extra_split_by. If not given, it's same as extra_split_by.
     precomputable_in_jk: Indicates whether it is possible to cut corners to
       obtain leave-one-out (LOO) estimates for the Jackknife. This attribute is
       True if the input df is only used in compute_on() and compute_child().
@@ -81,6 +85,7 @@ class Operation(metrics.Metric):
   def __init__(self,
                child: Optional[metrics.Metric] = None,
                name_tmpl: Optional[Text] = None,
+               extra_split_by: Optional[Union[Text, Iterable[Text]]] = None,
                extra_index: Optional[Union[Text, Iterable[Text]]] = None,
                name: Optional[Text] = None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
@@ -89,8 +94,13 @@ class Operation(metrics.Metric):
       name = name_tmpl.format(utils.get_name(child))
     super(Operation, self).__init__(name, child or (), where, name_tmpl,
                                     **kwargs)
-    self.extra_index = [extra_index] if isinstance(extra_index,
-                                                   str) else extra_index or []
+    self.extra_split_by = [extra_split_by] if isinstance(
+        extra_split_by, str) else extra_split_by or []
+    if extra_index is None:
+      self.extra_index = self.extra_split_by
+    else:
+      self.extra_index = [extra_index] if isinstance(extra_index,
+                                                     str) else extra_index
     self.precomputable_in_jk = True
     self.precompute_child = True
     self.apply_name_tmpl = True
@@ -135,7 +145,7 @@ class Operation(metrics.Metric):
                      where=None,
                      recursive=True,
                      prune=True):
-    split_by = (split_by or []) + self.extra_index
+    split_by = (split_by or []) + self.extra_split_by
     super(Operation, self).flush_children(key, split_by, where, recursive,
                                           prune)
 
@@ -151,7 +161,7 @@ class Distribution(Operation):
   """Computes the normalized values of a Metric over column(s).
 
   Attributes:
-    extra_index: A list of column(s) to normalize over.
+    extra_split_by: A list of column(s) to normalize over.
     children: A tuple of a Metric whose result we normalize on.
     And all other attributes inherited from Operation.
   """
@@ -216,7 +226,7 @@ class CumulativeDistribution(Operation):
   """Computes the normalized cumulative sum.
 
   Attributes:
-    extra_index: A list of column(s) to normalize over.
+    extra_split_by: A list of column(s) to normalize over.
     children: A tuple of a Metric whose result we compute the cumulative
       distribution on.
     order: An iterable. The over column will be ordered by it before computing
@@ -271,7 +281,7 @@ class CumulativeDistribution(Operation):
         clause.
     """
     local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
-    util_metric = Distribution(self.extra_index, self.children[0])
+    util_metric = Distribution(self.extra_split_by, self.children[0])
     child_sql, with_data = util_metric.get_sql_and_with_clause(
         table, split_by, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'CumulativeDistributionRaw')
@@ -386,7 +396,7 @@ class Comparison(Operation):
     local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
 
     child = self.children[0]
-    cond_cols = sql.Columns(self.extra_index)
+    cond_cols = sql.Columns(self.extra_split_by)
     groupby = sql.Columns(split_by).add(cond_cols)
     alias_tmpl = self.name_tmpl
     raw_table_sql, with_data = child.get_sql_and_with_clause(
@@ -433,7 +443,7 @@ class PercentChange(Comparison):
   """Percent change estimator on a Metric.
 
   Attributes:
-    extra_index: The column(s) that contains the conditions.
+    extra_split_by: The column(s) that contains the conditions.
     baseline_key: The value of the condition that represents the baseline (e.g.,
       "Control"). All conditions will be compared to this baseline. If
       condition_column contains multiple columns, then baseline_key should be a
@@ -457,8 +467,8 @@ class PercentChange(Comparison):
   def compute_on_children(self, child, split_by):
     level = None
     if split_by:
-      level = self.extra_index[0] if len(
-          self.extra_index) == 1 else self.extra_index
+      level = self.extra_split_by[0] if len(
+          self.extra_split_by) == 1 else self.extra_index
     res = (child / child.xs(self.baseline_key, level=level) - 1) * 100
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]

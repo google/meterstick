@@ -260,6 +260,15 @@ class MiscellaneousTests(absltest.TestCase):
     expected = a - b
     pd.testing.assert_frame_equal(output, expected)
 
+  def test_interaction_with_other_metric(self):
+    m = models.LinearRegression(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1')
+    s = metrics.Sum('X1')
+    ms = metrics.MetricList((m, s))
+    jk = operations.Jackknife('grp2', confidence=0.9)
+    output = jk(ms).compute_on(DF)
+    expected = pd.concat((jk(m).compute_on(DF), jk(s).compute_on(DF)), 1)
+    pd.testing.assert_frame_equal(output, expected)
+
   def test_count_features(self):
     s = metrics.Sum('x')
     self.assertEqual(models.count_features(metrics.Sum('x')), 1)

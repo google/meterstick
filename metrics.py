@@ -165,6 +165,7 @@ class Metric(object):
     postcompute: A function. See the workflow chart above for its behavior.
     compute_slices: A function. See the workflow chart above for its behavior.
     final_compute: A function. See the workflow chart above for its behavior.
+    extra_split_by: Used by Operation. See the doc there.
     extra_index: Used by Operation. See the doc there.
     computable_in_pure_sql: If the Metric can be completely computed in SQL. For
       example, all Models can't.
@@ -196,6 +197,7 @@ class Metric(object):
     if isinstance(where, List):
       where = ' and '.join(where)
     self.where = where
+    self.extra_split_by = []
     self.extra_index = []
     self.computable_in_pure_sql = True
     self.name_tmpl = name_tmpl
@@ -222,7 +224,7 @@ class Metric(object):
     """Applies compute() to all slices. Each slice needs a unique cache_key."""
     if self.children:
       try:
-        df = self.compute_children(df, split_by + self.extra_index)
+        df = self.compute_children(df, split_by + self.extra_split_by)
         return self.compute_on_children(df, split_by)
       except NotImplementedError:
         pass
@@ -675,7 +677,7 @@ class Metric(object):
       else:
         children.append(
             c.compute_on_sql(
-                table, split_by + self.extra_index, execute, mode=mode))
+                table, split_by + self.extra_split_by, execute, mode=mode))
     return children[0] if len(self.children) == 1 else children
 
   def __or__(self, fn):

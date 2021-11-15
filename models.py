@@ -80,7 +80,7 @@ class Model(operations.Operation):
     super(Model, self).__init__(
         metrics.MetricList((y, x)),
         name_tmpl,
-        group_by,
+        group_by, [],
         name=name,
         where=where)
     self.computable_in_pure_sql = False
