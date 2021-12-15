@@ -28,6 +28,7 @@ from meterstick import utils
 import numpy as np
 import pandas as pd
 from scipy import stats
+from sklearn import linear_model
 
 
 class Operation(metrics.Metric):
@@ -459,17 +460,21 @@ class PercentChange(Comparison):
                baseline_key,
                child: Optional[metrics.Metric] = None,
                include_base: bool = False,
+               name_tmpl=None,
                **kwargs):
+    name_tmpl = name_tmpl or '{} Percent Change'
     super(PercentChange,
           self).__init__(condition_column, baseline_key, child, include_base,
-                         '{} Percent Change', **kwargs)
+                         name_tmpl, **kwargs)
 
   def compute_on_children(self, child, split_by):
     level = None
     if split_by:
-      level = self.extra_split_by[0] if len(
-          self.extra_split_by) == 1 else self.extra_index
+      level = self.extra_index[0] if len(
+          self.extra_index) == 1 else self.extra_index
     res = (child / child.xs(self.baseline_key, level=level) - 1) * 100
+    if len(child.index.names) > 1:  # xs might mess up the level order.
+      res = res.reorder_levels(child.index.names)
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
@@ -511,11 +516,135 @@ class AbsoluteChange(Comparison):
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
     res = child - child.xs(self.baseline_key, level=level)
+    if len(child.index.names) > 1:  # xs might mess up the level order.
+      res = res.reorder_levels(child.index.names)
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
       res = res[~idx_to_match.isin([self.baseline_key])]
     return res
+
+
+class PrePostChange(PercentChange):
+  """PrePost Percent change estimator on a Metric.
+
+  Computes the percent change after controlling for preperiod metrics.
+  Essentially, if the data only has a baseline and a treatment slice, PrePost
+  1. centers the covariates
+  2. fit child ~ intercept + was_treated * covariate.
+  As covariate is centered, the intercept is the mean value for the baseline.
+  The coefficient for the was_treated term is the mean effect of treatment.
+  PrePostChange returns the latter / the former * 100.
+  See https://arxiv.org/pdf/1711.00562.pdf for more details.
+  For data with multiple treatments, the result is same as applying the method
+  to every pair of baseline and treatment.
+  If child returns multiple columns, the result is same as applying the method
+  to every column in it.
+
+  Attributes:
+    extra_split_by: The column(s) that contains the conditions.
+    baseline_key: The value of the condition that represents the baseline (e.g.,
+      "Control"). All conditions will be compared to this baseline. If
+      condition_column contains multiple columns, then baseline_key should be a
+      tuple.
+    children: A tuple of a Metric whose result we compute percentage change on.
+    stratified_by: The columns to preaggregate and perform adjustment using
+      preperiod metrics.
+    covariates: The Metric(s) we want to use to reduce variance. Usually they
+      are some metrics during the preperiod.
+    include_base: A boolean for whether the baseline condition should be
+      included in the output.
+    And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               condition_column,
+               baseline_key,
+               child=None,
+               covariates=None,
+               stratified_by=None,
+               include_base=False,
+               **kwargs):
+    if isinstance(covariates, (List, Tuple)):
+      covariates = metrics.MetricList(covariates)
+    if not isinstance(covariates, metrics.Metric):
+      raise ValueError('Covariates must be a Metric or an iterable of Metrics!')
+    self.stratified_by = [stratified_by] if isinstance(
+        stratified_by, str) else stratified_by or []
+    condition_column = [condition_column] if isinstance(
+        condition_column, str) else condition_column
+    super(PrePostChange, self).__init__(self.stratified_by + condition_column,
+                                        baseline_key, child, include_base,
+                                        '{} PrePost Percent Change', **kwargs)
+    self.extra_index = condition_column
+    self.covariates = covariates
+    self.precomputable_in_jk = False
+    self.computable_in_pure_sql = False
+
+  def compute_children(self,
+                       df,
+                       split_by,
+                       melted=False,
+                       return_dataframe=True,
+                       cache_key=None):
+    child = super(PrePostChange, self).compute_children(
+        df, split_by, cache_key=cache_key)
+    covariates = self.covariates.compute_on(df, split_by)
+    original_split_by = [s for s in split_by if s not in self.extra_split_by]
+    return self.adjust_value(child, covariates, original_split_by)
+
+  def adjust_value(self, child, covariates, split_by):
+    """Adjust the raw value by controlling for Pre-metrics.
+
+    As described in the class doc, PrePost fits a linear model,
+    child ~ β0 + β1 * treated + β2 * covariate + β3 * treated * covariate,
+    to adjust the effect, where β0 is the average effect of the control while
+    β0 + β1 is that of the treatment group. Note that we center covariate first
+    so in practice β0 and β1 can be achieved by fitting small models. β0_c in
+    child ~ β0_c + β1_c * covariate,
+    when fitted on control data only, would be equal to β0. And β0_t in
+    child ~ β0_t + β1_t * covariate, when fitted on treatment data only, would
+    equal to β0 + β1. The principle holds for multiple treatments. Here we fit
+    child ~ 1 + covariate
+    on every slice of data instead of fitting a large model on the whole data.
+
+    Args:
+      child: A pandas DataFrame. The result of the child Metric.
+      covariates: A pandas DataFrame. The result of the covariates Metric.
+      split_by: The split_by passed to self.compute_on().
+
+    Returns:
+      The adjusted values of the child (post metrics).
+    """
+    # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
+    # has different implementations for __sub__ and __isub__. ___isub__ tries
+    # to reindex to update in place which sometimes lead to lots of NAs.
+    if split_by:
+      covariates = covariates - covariates.groupby(split_by).mean()
+    else:
+      covariates = covariates - covariates.mean()
+    # Align child with covariates in case there is any missing slices.
+    covariates = covariates.reorder_levels(child.index.names)
+    aligned = pd.concat([child, covariates], axis=1)
+    len_child = child.shape[1]
+    lm = linear_model.LinearRegression()
+
+    def adjust(df_slice):
+      child_slice = df_slice.iloc[:, :len_child]
+      cov = df_slice.iloc[:, len_child:]
+      adjusted = [lm.fit(cov, child_slice[c]).intercept_ for c in child_slice]
+      return pd.DataFrame([adjusted], columns=child_slice.columns)
+
+    adjusted = metrics.Metric('Adjusted', compute=adjust)
+    return adjusted.compute_on(aligned, split_by + self.extra_index)
+
+  def compute_children_sql(self, table, split_by, execute, mode=None):
+    split_by_with_extra = split_by + self.extra_split_by
+    child = super(PrePostChange,
+                  self).compute_children_sql(table, split_by, execute, mode)
+    covariates = self.covariates.compute_on_sql(table, split_by_with_extra,
+                                                execute, mode)
+    return self.adjust_value(child, covariates, split_by)
 
 
 class MH(Comparison):
@@ -1691,6 +1820,8 @@ class Jackknife(MetricWithCI):
     Returns:
       The input df. All we do here is saving precomputed stuff to cache.
     """
+    if not self.can_precompute:
+      return df
     original_sum_compute_slices = metrics.Sum.compute_slices
     original_ct_compute_slices = metrics.Count.compute_slices
     original_mean_compute_slices = metrics.Mean.compute_slices

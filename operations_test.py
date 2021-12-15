@@ -25,6 +25,8 @@ import numpy as np
 import pandas as pd
 from pandas import testing
 from scipy import stats
+from sklearn import linear_model
+
 import unittest
 
 
@@ -805,6 +807,252 @@ class AbsoluteChangeTests(unittest.TestCase):
     self.assertIsNone(jk.cache_key)
     self.assertIsNone(m.cache_key)
     self.assertIsNone(sum_x.cache_key)
+
+
+class PrePostChangeTests(unittest.TestCase):
+
+  np.random.seed(42)
+  n = 40
+  df = pd.DataFrame({
+      'clicks': np.random.choice(range(20), n),
+      'impressions': np.random.choice(range(20), n),
+      'pre_clicks': np.random.choice(range(20), n),
+      'cookie': np.random.choice(range(4), n),
+      'condition': np.random.choice(range(2), n),
+      'grp': np.random.choice(('A', 'B', 'C'), n),
+  })
+  sum_click = metrics.Sum('clicks')
+  sum_preclick = metrics.Sum('pre_clicks')
+  df_agg = df.groupby(['cookie', 'condition']).sum().reset_index()
+  df_agg.pre_clicks = df_agg.pre_clicks - df_agg.pre_clicks.mean()
+  df_agg['interaction'] = df_agg.pre_clicks * df_agg.condition
+  x = df_agg[['condition', 'pre_clicks', 'interaction']]
+  y = df_agg['clicks']
+
+  def test_basic(self):
+    metric = operations.PrePostChange('condition', 0, self.sum_click,
+                                      self.sum_preclick, 'cookie')
+    output = metric.compute_on(self.df)
+    lm = linear_model.LinearRegression()
+    lm.fit(self.x, self.y)
+    expected = pd.DataFrame([[100 * lm.coef_[0] / lm.intercept_]],
+                            columns=['sum(clicks) PrePost Percent Change'],
+                            index=[1])
+    expected.index.name = 'condition'
+    testing.assert_frame_equal(output, expected)
+
+  def test_include_base(self):
+    metric = operations.PrePostChange('condition', 0, self.sum_click,
+                                      self.sum_preclick, 'cookie', True)
+    output = metric.compute_on(self.df)
+    lm = linear_model.LinearRegression()
+    lm.fit(self.x, self.y)
+    expected = pd.DataFrame([0, 100 * lm.coef_[0] / lm.intercept_],
+                            columns=['sum(clicks) PrePost Percent Change'],
+                            index=[0, 1])
+    expected.index.name = 'condition'
+    testing.assert_frame_equal(output, expected)
+
+  def test_split_by(self):
+    metric = operations.PrePostChange('condition', 0, self.sum_click,
+                                      self.sum_preclick, 'cookie')
+    output = metric.compute_on(self.df, 'grp')
+    expected_a = metric.compute_on(self.df[self.df.grp == 'A'])
+    expected_b = metric.compute_on(self.df[self.df.grp == 'B'])
+    expected_c = metric.compute_on(self.df[self.df.grp == 'C'])
+    expected = pd.concat((expected_a, expected_b, expected_c),
+                         keys=('A', 'B', 'C'),
+                         names=['grp'])
+    testing.assert_frame_equal(output, expected)
+
+  def test_split_by_multiple(self):
+    metric = operations.PrePostChange('condition', 0, self.sum_click,
+                                      self.sum_preclick, 'cookie')
+    output = metric.compute_on(self.df, 'grp')
+    expected_a = metric.compute_on(self.df[self.df.grp == 'A'])
+    expected_b = metric.compute_on(self.df[self.df.grp == 'B'])
+    expected_c = metric.compute_on(self.df[self.df.grp == 'C'])
+    expected = pd.concat((expected_a, expected_b, expected_c),
+                         keys=('A', 'B', 'C'),
+                         names=['grp'])
+    testing.assert_frame_equal(output, expected)
+
+  def test_multiple_conditions(self):
+    metric = operations.PrePostChange(['condition', 'grp'], (0, 'C'),
+                                      self.sum_click, self.sum_preclick,
+                                      'cookie')
+    output = metric.compute_on(self.df)
+    df = self.df.copy()
+    df['condition_and_grp'] = df[['condition', 'grp']].apply(tuple, 1)
+    expected_metric = operations.PrePostChange('condition_and_grp', (0, 'C'),
+                                               self.sum_click,
+                                               self.sum_preclick, 'cookie')
+    expected = expected_metric.compute_on(df)
+    expected = pd.DataFrame(
+        expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_multiple_stratified_by(self):
+    metric = operations.PrePostChange('condition', 0,
+                                      self.sum_click, self.sum_preclick,
+                                      ['cookie', 'grp'])
+    output = metric.compute_on(self.df)
+    df_agg = self.df.groupby(['cookie', 'grp', 'condition']).sum().reset_index()
+    df_agg.pre_clicks = df_agg.pre_clicks - df_agg.pre_clicks.mean()
+    df_agg['interaction'] = df_agg.pre_clicks * df_agg.condition
+    lm = linear_model.LinearRegression()
+    lm.fit(df_agg[['condition', 'pre_clicks', 'interaction']], df_agg['clicks'])
+    expected = pd.DataFrame([100 * lm.coef_[0] / lm.intercept_],
+                            columns=['sum(clicks) PrePost Percent Change'],
+                            index=[1])
+    expected.index.name = 'condition'
+    testing.assert_frame_equal(output, expected)
+
+  def test_multiple_metrics(self):
+    metric = operations.PrePostChange(
+        'condition', 0,
+        metrics.MetricList([self.sum_click,
+                            metrics.Sum('impressions')]), self.sum_preclick,
+        'cookie')
+    output = metric.compute_on(self.df)
+    expected1 = operations.PrePostChange('condition', 0, self.sum_click,
+                                         self.sum_preclick,
+                                         'cookie').compute_on(self.df)
+    expected2 = operations.PrePostChange('condition', 0,
+                                         metrics.Sum('impressions'),
+                                         self.sum_preclick,
+                                         'cookie').compute_on(self.df)
+    expected = pd.concat((expected1, expected2), 1)
+    testing.assert_frame_equal(output, expected)
+
+  def test_multiple_covariates(self):
+    metric = operations.PrePostChange(
+        'condition', 0, self.sum_click,
+        [self.sum_preclick, metrics.Sum('impressions')], 'cookie')
+    output = metric.compute_on(self.df)
+    df = self.df.copy()
+    df_agg = df.groupby(['cookie', 'condition']).sum().reset_index()
+    df_agg.pre_clicks = df_agg.pre_clicks - df_agg.pre_clicks.mean()
+    df_agg.impressions = df_agg.impressions - df_agg.impressions.mean()
+    df_agg['interaction1'] = df_agg.pre_clicks * df_agg.condition
+    df_agg['interaction2'] = df_agg.impressions * df_agg.condition
+    lm = linear_model.LinearRegression()
+    lm.fit(
+        df_agg[[
+            'condition', 'pre_clicks', 'impressions', 'interaction1',
+            'interaction2'
+        ]], df_agg['clicks'])
+    expected = pd.DataFrame([100 * lm.coef_[0] / lm.intercept_],
+                            columns=['sum(clicks) PrePost Percent Change'],
+                            index=[1])
+    expected.index.name = 'condition'
+    testing.assert_frame_equal(output, expected)
+
+  def test_complex(self):
+    np.random.seed(42)
+    n = 50
+    df = pd.DataFrame({
+        'clicks': np.random.choice(range(20), n),
+        'impressions': np.random.choice(range(20), n),
+        'pre_clicks': np.random.choice(range(20), n),
+        'cookie': np.random.choice(range(5), n),
+        'condition1': np.random.choice(range(2), n),
+        'condition2': np.random.choice(('A', 'B', 'C'), n),
+        'grp1': np.random.choice(('foo', 'bar', 'baz'), n),
+        'grp2': np.random.choice(('US', 'non-US'), n),
+        'grp3': np.random.choice(('desktop', 'mobile', 'tablet'), n),
+    })
+    post = [self.sum_click, self.sum_click**2]
+    pre = [self.sum_preclick, metrics.Sum('impressions')]
+    metric = operations.PrePostChange(['condition1', 'condition2'], (1, 'C'),
+                                      metrics.MetricList(post), pre,
+                                      ['cookie', 'grp1'])
+    output = metric.compute_on(df, ['grp2', 'grp3'])
+    df['condition'] = df[['condition1', 'condition2']].apply(tuple, 1)
+    df['agg'] = df[['cookie', 'grp1']].apply(tuple, 1)
+
+    expected = [
+        operations.PrePostChange('condition', (1, 'C'), m, pre,
+                                 'agg').compute_on(df, ['grp2', 'grp3'])
+        for m in post
+    ]
+    expected = pd.concat(expected, axis=1)
+    expected = expected.reset_index('condition')
+    expected[['condition1', 'condition2']] = expected.condition.to_list()
+    expected = expected.set_index(['condition1', 'condition2'], append=True)
+    expected = expected.drop(columns=['condition'])
+    testing.assert_frame_equal(output, expected)
+
+  def test_where(self):
+    metric = operations.PrePostChange(
+        'condition',
+        0,
+        self.sum_click,
+        self.sum_preclick,
+        'cookie',
+        where='grp == "A"')
+    metric_no_filter = operations.PrePostChange('condition', 0, self.sum_click,
+                                                self.sum_preclick, 'cookie')
+    output = metric.compute_on(self.df)
+    expected = metric_no_filter.compute_on(self.df[self.df.grp == 'A'])
+    testing.assert_frame_equal(output, expected)
+
+  def test_with_jackknife(self):
+    df = self.df.copy()
+    df['grp2'] = np.random.choice(range(3), self.n)
+    m = operations.PrePostChange('condition', 0, self.sum_click,
+                                 self.sum_preclick, 'grp2')
+    jk = operations.Jackknife('cookie', m)
+    output = jk.compute_on(df)
+    loo = []
+    for g in df.cookie.unique():
+      loo.append(m.compute_on(df[df.cookie != g]))
+    loo = pd.concat(loo)
+    dof = len(df.cookie.unique()) - 1
+    expected = pd.DataFrame(
+        [[
+            m.compute_on(df).iloc[0, 0],
+            loo.std().values[0] * dof / np.sqrt(dof + 1)
+        ]],
+        index=[1],
+        columns=pd.MultiIndex.from_product(
+            [['sum(clicks) PrePost Percent Change'], ['Value', 'Jackknife SE']],
+            names=['Metric', None]))
+    expected.index.name = 'condition'
+    testing.assert_frame_equal(output, expected)
+
+  def test_with_jackknife_with_overlapping_column(self):
+    df = self.df.copy()
+    m = operations.PrePostChange('condition', 0, self.sum_click,
+                                 self.sum_preclick, 'cookie')
+    jk = operations.Jackknife('cookie', m)
+    output = jk.compute_on(df)
+    loo = []
+    for g in df.cookie.unique():
+      loo.append(m.compute_on(df[df.cookie != g]))
+    loo = pd.concat(loo)
+    dof = len(df.cookie.unique()) - 1
+    expected = pd.DataFrame(
+        [[
+            m.compute_on(df).iloc[0, 0],
+            loo.std().values[0] * dof / np.sqrt(dof + 1)
+        ]],
+        index=[1],
+        columns=pd.MultiIndex.from_product(
+            [['sum(clicks) PrePost Percent Change'], ['Value', 'Jackknife SE']],
+            names=['Metric', None]))
+    expected.index.name = 'condition'
+    testing.assert_frame_equal(output, expected)
+
+  def test_display(self):
+    df = self.df.copy()
+    jk = operations.Jackknife('cookie', confidence=0.9)
+    prepost = operations.PrePostChange('condition', 0, self.sum_click,
+                                       self.sum_preclick, 'cookie')
+    pct = operations.PercentChange('condition', 0, self.sum_click)
+    output = jk(prepost).compute_on(df).display(return_formatted_df=True)
+    expected = jk(pct).compute_on(df).display(return_formatted_df=True)
+    self.assertEqual(output.shape, expected.shape)
 
 
 class MHTests(unittest.TestCase):

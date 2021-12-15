@@ -248,14 +248,17 @@ class Metric(object):
           slices.append(slice_i)
         finally:
           self.cache_key = cache_key
-      if isinstance(result[0], (pd.Series, pd.DataFrame)):
-        res = pd.concat(result, keys=slices, names=split_by, sort=False)
+      if len(split_by) == 1:
+        # slices might be a list of tuples so tupleize_cols needs to be False.
+        ind = pd.Index(slices, name=split_by[0], tupleize_cols=False)
       else:
-        if len(split_by) == 1:
-          ind = pd.Index(slices, name=split_by[0])
-        else:
-          ind = pd.MultiIndex.from_tuples(slices, names=split_by)
-        res = pd.Series(result, index=ind)
+        ind = pd.MultiIndex.from_tuples(slices, names=split_by)
+      if isinstance(result[0], (pd.Series, pd.DataFrame)):
+        res = pd.concat(result, sort=False)
+        res.index = ind
+        return res
+      else:
+        return pd.Series(result, index=ind)
     else:
       # Derived Metrics might do something in split_data().
       df, _ = next(self.split_data(df, split_by))
