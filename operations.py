@@ -135,6 +135,19 @@ class Operation(metrics.Metric):
     cache_key = self.wrap_cache_key(cache_key, split_by)
     return child.compute_on(df, split_by, melted, return_dataframe, cache_key)
 
+  def compute_child_sql(self,
+                        table,
+                        split_by,
+                        execute,
+                        melted=False,
+                        mode=None,
+                        cache_key=None):
+    child = self.children[0]
+    cache_key = cache_key or self.cache_key or self.RESERVED_KEY
+    cache_key = self.wrap_cache_key(cache_key, split_by)
+    return child.compute_on_sql(table, split_by, execute, melted, mode,
+                                cache_key)
+
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
     res = super(Operation,
                 self).compute_on_sql_mixed_mode(table, split_by, execute, mode)
@@ -872,6 +885,7 @@ class MH(Comparison):
             table,
             split_by + self.extra_index + self.stratified_by,
             execute,
+            cache_key=self.cache_key or self.RESERVED_KEY,
             mode=mode)
         children.append(c)
       return children
@@ -880,6 +894,7 @@ class MH(Comparison):
         table,
         split_by + self.extra_index + self.stratified_by,
         execute,
+        cache_key=self.cache_key or self.RESERVED_KEY,
         mode=mode)
 
   def flush_children(self,
@@ -1326,7 +1341,7 @@ class MetricWithCI(Operation):
     if execute is None:
       base = change.compute_child(df, to_split)
     else:
-      base = change.children[0].compute_on_sql(df, to_split, execute, mode=mode)
+      base = change.compute_child_sql(df, to_split, execute, mode=mode)
     base.columns = [change.name_tmpl.format(c) for c in base.columns]
     base = utils.melt(base)
     base.columns = ['_base_value']
@@ -1508,6 +1523,7 @@ class MetricWithCI(Operation):
       execute=None,
       melted=False,
       mode=None,
+      cache_key=None,
       batch_size=None,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
@@ -1530,6 +1546,9 @@ class MetricWithCI(Operation):
         recursively from the root to leaf Metrics, so a Metric tree could have
         top 3 layeres computed in Python and the bottom in SQL. In summary,
         everything can be computed in SQL is computed in SQL.
+      cache_key: What key to use to cache the result. You can use anything that
+        can be a key of a dict except '_RESERVED' and tuples like
+        ('_RESERVED', ..).
       batch_size: The number of resamples to compute in one SQL run. It only has
         effect in the 'mixed' mode. It precedes self.batch_size.
 
@@ -1539,7 +1558,7 @@ class MetricWithCI(Operation):
     self._runtime_batch_size = batch_size
     try:
       return super(MetricWithCI, self).compute_on_sql(table, split_by, execute,
-                                                      melted, mode)
+                                                      melted, mode, cache_key)
     finally:
       self._runtime_batch_size = None
 
@@ -1622,8 +1641,8 @@ class MetricWithCI(Operation):
     except Exception as e:  # pylint: disable=broad-except
       raise utils.MaybeBadSqlModeError(batch_size=batch_size) from e
     std = self.compute_on_children(replicates, split_by)
-    point_est = self.children[0].compute_on_sql(table, split_by, execute, True,
-                                                mode)
+    point_est = self.compute_child_sql(
+        table, split_by, execute, True, mode=mode)
     res = point_est.join(utils.melt(std))
     if self.confidence:
       res[self.prefix +
@@ -2057,8 +2076,9 @@ class Jackknife(MetricWithCI):
         if pd.api.types.is_numeric_dtype(slice_and_units[self.unit]):
           loo_where = '%s != %s' % (self.unit, unit)
         loo_sql.where = sql.Filters((self.where, loo_where))
-        loo = self.children[0].compute_on_sql(
-            loo_sql, split_by, execute, mode=mode)
+        key = ('_RESERVED', 'Jackknife', self.unit, unit)
+        loo = self.compute_child_sql(loo_sql, split_by, execute, False, mode,
+                                     key)
         # If a slice doesn't have the unit in the input data, we should exclude
         # the slice in the loo.
         if split_by:
@@ -2074,8 +2094,9 @@ class Jackknife(MetricWithCI):
             sql.Column('*', auto_alias=False),
             sql.Datasource('UNNEST(%s)' % units, '_resample_idx').join(
                 table, on='_resample_idx != %s' % self.unit), self.where)
-        loo = self.children[0].compute_on_sql(loo, split_by + ['_resample_idx'],
-                                              execute, True, mode)
+        key = ('_RESERVED', 'Jackknife', self.unit, tuple(units))
+        loo = self.compute_child_sql(loo, split_by + ['_resample_idx'], execute,
+                                     True, mode, key)
         # If a slice doesn't have the unit in the input data, we should exclude
         # the slice in the loo.
         if split_by:

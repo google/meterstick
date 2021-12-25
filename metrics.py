@@ -44,7 +44,10 @@ def compute_on_sql(
     execute=None,
     melted=False,
     mode=None,
+    cache_key=None,
+    **kwargs
 ):
+  """A wrapper that metric | compute_on_sql() === metric.compute_on_sql()."""
   # pylint: disable=g-long-lambda
   return lambda m: m.compute_on_sql(
       table,
@@ -52,6 +55,8 @@ def compute_on_sql(
       execute,
       melted,
       mode,
+      cache_key,
+      **kwargs
   )
   # pylint: enable=g-long-lambda
 
@@ -531,6 +536,7 @@ class Metric(object):
       execute=None,
       melted=False,
       mode=None,
+      cache_key=None,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
 
@@ -552,15 +558,42 @@ class Metric(object):
         recursively from the root to leaf Metrics, so a Metric tree could have
         top 3 layeres computed in Python and the bottom in SQL. In summary,
         everything can be computed in SQL is computed in SQL.
+      cache_key: What key to use to cache the result. You can use anything that
+        can be a key of a dict except '_RESERVED' and tuples like
+        ('_RESERVED', ..).
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
-    res = self.compute_through_sql(table, split_by, execute, mode)
-    # res from compute_through_sql() already has name_tmpl applied.
-    res = self.manipulate(res, melted, apply_name_tmpl=False)
-    return self.final_compute(res, melted, True, split_by, table)
+    need_clean_up = True
+    try:
+      if cache_key is not None:
+        cache_key = self.wrap_cache_key(cache_key, split_by)
+        if self.in_cache(cache_key):
+          need_clean_up = False
+          res = self.get_cached(cache_key)
+          res = self.manipulate(res, melted, apply_name_tmpl=False)
+          return self.final_compute(res, melted, True, split_by, table)
+        else:
+          self.cache_key = cache_key
+          raw_res = self.compute_through_sql(table, split_by, execute, mode)
+          res = raw_res
+          # For simple metrics we save a pd.Series to be consistent with
+          # compute_on().
+          if isinstance(raw_res, pd.DataFrame
+                       ) and raw_res.shape[1] == 1 and not is_operation(self):
+            raw_res = raw_res.iloc[:, 0]
+          self.save_to_cache(cache_key, raw_res)
+          if utils.is_tmp_key(cache_key):
+            self.tmp_cache_keys.add(cache_key)
+      else:
+        res = self.compute_through_sql(table, split_by, execute, mode)
+      res = self.manipulate(res, melted, apply_name_tmpl=False)
+      return self.final_compute(res, melted, True, split_by, table)
+    finally:
+      if need_clean_up:
+        self.flush_tmp_cache()
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
@@ -687,8 +720,8 @@ class Metric(object):
         children.append(c)
       else:
         children.append(
-            c.compute_on_sql(
-                table, split_by + self.extra_split_by, execute, mode=mode))
+            c.compute_on_sql(table, split_by + self.extra_split_by, execute,
+                             False, mode, self.cache_key or self.RESERVED_KEY))
     return children[0] if len(self.children) == 1 else children
 
   def __or__(self, fn):
