@@ -248,22 +248,30 @@ class Metric(object):
           slices.append(slice_i)
         finally:
           self.cache_key = cache_key
-      if len(split_by) == 1:
-        # slices might be a list of tuples so tupleize_cols needs to be False.
-        ind = pd.Index(slices, name=split_by[0], tupleize_cols=False)
-      else:
-        ind = pd.MultiIndex.from_tuples(slices, names=split_by)
       if isinstance(result[0], (pd.Series, pd.DataFrame)):
-        res = pd.concat(result, sort=False)
-        res.index = ind
-        return res
+        try:
+          return pd.concat(result, keys=slices, names=split_by, sort=False)
+        except ValueError:
+          if len(split_by) == 1:
+            # slices are tuples so pd unpacked it then the lengths didn't match.
+            split = split_by[0]
+            for r, s in zip(result, slices):
+              r[split] = [s] * len(r)
+              r.set_index(split, append=True, inplace=True)
+            res = pd.concat(result, sort=False)
+            if len(res.index.names) > 1:
+              res = res.reorder_levels(np.roll(res.index.names, 1))
+            return res
       else:
+        if len(split_by) == 1:
+          ind = pd.Index(slices, name=split_by[0])
+        else:
+          ind = pd.MultiIndex.from_tuples(slices, names=split_by)
         return pd.Series(result, index=ind)
     else:
       # Derived Metrics might do something in split_data().
       df, _ = next(self.split_data(df, split_by))
-      res = self.compute_with_split_by(df)
-    return res
+      return self.compute_with_split_by(df)
 
   def compute_children(self, df, split_by):
     raise NotImplementedError

@@ -502,10 +502,11 @@ class AbsoluteChange(Comparison):
                baseline_key,
                child: Optional[metrics.Metric] = None,
                include_base: bool = False,
+               name_tmpl=None,
                **kwargs):
-    super(AbsoluteChange,
-          self).__init__(condition_column, baseline_key, child, include_base,
-                         '{} Absolute Change', **kwargs)
+    name_tmpl = name_tmpl or '{} Absolute Change'
+    super(AbsoluteChange, self).__init__(condition_column, baseline_key, child,
+                                         include_base, name_tmpl, **kwargs)
 
   def compute_on_children(self, child, split_by):
     level = None
@@ -642,6 +643,114 @@ class PrePostChange(PercentChange):
     split_by_with_extra = split_by + self.extra_split_by
     child = super(PrePostChange,
                   self).compute_children_sql(table, split_by, execute, mode)
+    covariates = self.covariates.compute_on_sql(table, split_by_with_extra,
+                                                execute, mode)
+    return self.adjust_value(child, covariates, split_by)
+
+
+class CUPED(AbsoluteChange):
+  """CUPED change estimator on a Metric.
+
+  Computes the absolute change after controlling for preperiod metrics.
+  Essentially, if the data only has a baseline and a treatment slice, CUPED
+  1. centers the covariates
+  2. fit child ~ intercept + covariate.
+  And the intercept is the adjusted effect and has a smaller variance than
+  child. See https://exp-platform.com/cuped for more details.
+  If child returns multiple columns, the result is same as applying the method
+  to every column in it.
+
+  Attributes:
+    extra_split_by: The column(s) that contains the conditions.
+    baseline_key: The value of the condition that represents the baseline (e.g.,
+      "Control"). All conditions will be compared to this baseline. If
+      condition_column contains multiple columns, then baseline_key should be a
+      tuple.
+    children: A tuple of a Metric whose result we compute percentage change on.
+    stratified_by: The columns to preaggregate and perform adjustment using
+      preperiod metrics.
+    covariates: The Metric(s) we want to use to reduce variance. Usually they
+      are some metrics from the preperiod.
+    include_base: A boolean for whether the baseline condition should be
+      included in the output. And all other attributes inherited from Operation.
+  """
+
+  def __init__(self,
+               condition_column,
+               baseline_key,
+               child=None,
+               covariates=None,
+               stratified_by=None,
+               include_base=False,
+               **kwargs):
+    if isinstance(covariates, (List, Tuple)):
+      covariates = metrics.MetricList(covariates)
+    if not isinstance(covariates, metrics.Metric):
+      raise ValueError('Covariates must be a Metric or an iterable of Metrics!')
+    self.stratified_by = [stratified_by] if isinstance(
+        stratified_by, str) else stratified_by or []
+    condition_column = [condition_column] if isinstance(
+        condition_column, str) else condition_column
+    super(CUPED, self).__init__(self.stratified_by + condition_column,
+                                baseline_key, child, include_base,
+                                '{} CUPED Change', **kwargs)
+    self.extra_index = condition_column
+    self.covariates = covariates
+    self.precomputable_in_jk = False
+    self.computable_in_pure_sql = False
+
+  def compute_children(self,
+                       df,
+                       split_by,
+                       melted=False,
+                       return_dataframe=True,
+                       cache_key=None):
+    child = super(CUPED, self).compute_children(
+        df, split_by, cache_key=cache_key)
+    covariates = self.covariates.compute_on(df, split_by)
+    original_split_by = [s for s in split_by if s not in self.extra_split_by]
+    return self.adjust_value(child, covariates, original_split_by)
+
+  def adjust_value(self, child, covariates, split_by):
+    """Adjust the raw value by controlling for Pre-metrics.
+
+    Args:
+      child: A pandas DataFrame. The result of the child Metric.
+      covariates: A pandas DataFrame. The result of the covariates Metric.
+      split_by: The split_by passed to self.compute_on().
+
+    Returns:
+      The adjusted values of the child (post metrics).
+    """
+    # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
+    # has different implementations for __sub__ and __isub__. ___isub__ tries
+    # to reindex to update in place which sometimes lead to lots of NAs.
+    if split_by:
+      covariates = covariates - covariates.groupby(split_by).mean()
+    else:
+      covariates = covariates - covariates.mean()
+    # Align child with covariates in case there is any missing slices.
+    covariates = covariates.reorder_levels(child.index.names)
+    aligned = pd.concat([child, covariates], axis=1)
+    len_child = child.shape[1]
+    lm = linear_model.LinearRegression()
+
+    def adjust(df_slice):
+      child_slice = df_slice.iloc[:, :len_child]
+      cov = df_slice.iloc[:, len_child:]
+      adjusted = df_slice.groupby(self.extra_index).mean()
+      for c in aligned.iloc[:, :len_child]:
+        theta = lm.fit(cov, child_slice[c]).coef_
+        adjusted[c] = adjusted[c] - adjusted.iloc[:, len_child:].dot(theta)
+      return adjusted.iloc[:, :len_child]
+
+    adjusted = metrics.Metric('Adjusted', compute=adjust)
+    return adjusted.compute_on(aligned, split_by)
+
+  def compute_children_sql(self, table, split_by, execute, mode=None):
+    split_by_with_extra = split_by + self.extra_split_by
+    child = super(CUPED, self).compute_children_sql(table, split_by, execute,
+                                                    mode)
     covariates = self.covariates.compute_on_sql(table, split_by_with_extra,
                                                 execute, mode)
     return self.adjust_value(child, covariates, split_by)
