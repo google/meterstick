@@ -139,6 +139,14 @@ Built-in comparisons include:
     The metric being computed must be a `Ratio` or a `MetricList` of `Ratio`s.
     The `stratified_by` argument specifies the strata over which the MH
     estimator is computed.
++   `CUPED(condition_column, baseline, covariates, stratified_by)` : Computes
+    the absolute change that has been adjusted using the
+    [CUPED](http://bit.ly/expCUPED) approach. See the
+    [demo](https://colab.research.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb#scrollTo=_jqCd-ZHwv8i) for details.
++   `PrePostChange(condition_column, baseline, covariates, stratified_by)` :
+    Computes the percent change that has been adjusted using the
+    [PrePost](https://arxiv.org/pdf/1711.00562.pdf) approach. See the
+    [demo](https://colab.research.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb#scrollTo=x1wSwf3MT5Yf) for details.
 
 Example Usage: `... | PercentChange("Experiment", "Control")`
 
