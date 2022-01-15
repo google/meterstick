@@ -2145,7 +2145,7 @@ class Bootstrap(MetricWithCI):
         yield ('_RESERVED', 'Bootstrap', None), to_sample.sample(
             frac=1, replace=True)
     else:
-      df = df.set_index(split_by + [self.unit])
+      df = df.set_index(split_by + [self.unit]).sort_index()
       if split_by:
         to_samples = [
             i.unique().to_series() for i in df.groupby(split_by).groups.values()
