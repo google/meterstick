@@ -1404,6 +1404,7 @@ class MetricWithCI(Operation):
 
   def get_ci_width(self, stderrs, dof):
     """You can return asymmetrical confidence interval."""
+    dof = dof.fillna(0).astype(int)  # Scipy might not recognize the Int64 type.
     half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)
     return half_width, half_width
 
