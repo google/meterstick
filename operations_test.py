@@ -17,6 +17,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
+
+from absl.testing import parameterized
 from meterstick import metrics
 from meterstick import operations
 from meterstick import utils
@@ -130,13 +133,6 @@ class DistributionTests(unittest.TestCase):
         index=['A', 'B'],
         columns=['Distribution of sum(X)', 'Distribution of count(X)'])
     expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_distribution_where(self):
-    metric = operations.Distribution('grp', self.sum_x, where='country == "US"')
-    metric_no_filter = operations.Distribution('grp', self.sum_x)
-    output = metric.compute_on(self.df)
-    expected = metric_no_filter.compute_on(self.df[self.df.country == 'US'])
     testing.assert_frame_equal(output, expected)
 
   def test_distribution_pipeline(self):
@@ -309,15 +305,6 @@ class CumulativeDistributionTests(unittest.TestCase):
             'Cumulative Distribution of count(X)'
         ])
     expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_cumulative_distribution_where(self):
-    metric = operations.CumulativeDistribution(
-        'grp', metrics.Count('X'), where='country == "US"')
-    metric_no_filter = operations.CumulativeDistribution(
-        'grp', metrics.Count('X'))
-    output = metric.compute_on(self.df)
-    expected = metric_no_filter.compute_on(self.df[self.df.country == 'US'])
     testing.assert_frame_equal(output, expected)
 
   def test_cumulative_distribution_pipeline(self):
@@ -525,15 +512,6 @@ class PercentChangeTests(unittest.TestCase):
     expected = expected_metric.compute_on(df, 'grp2')
     expected = pd.DataFrame(
         expected.values, index=output.index, columns=output.columns)
-    testing.assert_frame_equal(output, expected)
-
-  def test_percent_change_where(self):
-    metric = operations.PercentChange(
-        'Condition', 0, metrics.Sum('X'), where='grp == "A"')
-    metric_no_filter = operations.PercentChange('Condition', 0,
-                                                metrics.Sum('X'))
-    output = metric.compute_on(self.df)
-    expected = metric_no_filter.compute_on(self.df[self.df.grp == 'A'])
     testing.assert_frame_equal(output, expected)
 
   def test_percent_change_pipeline(self):
@@ -744,15 +722,6 @@ class AbsoluteChangeTests(unittest.TestCase):
         expected.values, index=output.index, columns=output.columns)
     testing.assert_frame_equal(output, expected)
 
-  def test_absolute_change_where(self):
-    metric = operations.AbsoluteChange(
-        'Condition', 0, metrics.Sum('X'), where='grp == "A"')
-    metric_no_filter = operations.AbsoluteChange('Condition', 0,
-                                                 metrics.Sum('X'))
-    output = metric.compute_on(self.df)
-    expected = metric_no_filter.compute_on(self.df[self.df.grp == 'A'])
-    testing.assert_frame_equal(output, expected)
-
   def test_absolute_change_pipeline(self):
     metric = operations.AbsoluteChange('Condition', 0)
     output = self.metric_lst | metric | metrics.compute_on(self.df)
@@ -893,9 +862,8 @@ class PrePostChangeTests(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
   def test_multiple_stratified_by(self):
-    metric = operations.PrePostChange('condition', 0,
-                                      self.sum_click, self.sum_preclick,
-                                      ['cookie', 'grp'])
+    metric = operations.PrePostChange('condition', 0, self.sum_click,
+                                      self.sum_preclick, ['cookie', 'grp'])
     output = metric.compute_on(self.df)
     df_agg = self.df.groupby(['cookie', 'grp', 'condition']).sum().reset_index()
     df_agg.pre_clicks = df_agg.pre_clicks - df_agg.pre_clicks.mean()
@@ -1454,15 +1422,6 @@ class MHTests(unittest.TestCase):
     expected = expected_metric.compute_on(df, 'grp2')
     expected = pd.DataFrame(
         expected.values, index=output.index, columns=output.columns)
-    testing.assert_frame_equal(output, expected)
-
-  def test_mh_where(self):
-    metric = operations.MH(
-        'Condition', 0, 'Id', self.metric_lst, True, where='Id != 3')
-    metric_no_filter = operations.MH('Condition', 0, 'Id', self.metric_lst,
-                                     True)
-    output = metric.compute_on(self.df)
-    expected = metric_no_filter.compute_on(self.df[self.df.Id != 3])
     testing.assert_frame_equal(output, expected)
 
   def test_mh_splitby_multiple(self):
@@ -2219,16 +2178,15 @@ class JackknifeTests(unittest.TestCase):
     m = operations.Jackknife('cookie', metrics.Sum('X'), 0.9)
     res = m.compute_on(df)
     output = res.display(return_formatted_df=True)
-    expected = pd.DataFrame(
-        {
-            'sum(X)': [
-                '<div class="ci-display-good-change ci-display-cell"><div>'
-                '<span class="ci-display-ratio">7.5000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[4.1283, 10.8717]</span>'
-                '</div></div>'
-            ]
-        })
+    expected = pd.DataFrame({
+        'sum(X)': [
+            '<div class="ci-display-good-change ci-display-cell"><div>'
+            '<span class="ci-display-ratio">7.5000</span>'
+            '<div class="ci-display-flex-line-break"></div>'
+            '<span class="ci-display-ci-range">[4.1283, 10.8717]</span>'
+            '</div></div>'
+        ]
+    })
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
@@ -2254,8 +2212,7 @@ class JackknifeTests(unittest.TestCase):
                 '<span class="ci-display-ratio">2.5000</span>'
                 '<div class="ci-display-flex-line-break"></div>'
                 '<span class="ci-display-ci-range">[-5.3922, 10.3922]</span>'
-                '</div></div>',
-                '<div class="ci-display-cell"><div>'
+                '</div></div>', '<div class="ci-display-cell"><div>'
                 '<span class="ci-display-ratio">5.0000</span>'
                 '<div class="ci-display-flex-line-break"></div>'
                 '<span class="ci-display-ci-range">[-1.3138, 11.3138]</span>'
@@ -2330,8 +2287,7 @@ class JackknifeTests(unittest.TestCase):
                 '<span class="ci-display-ratio">995.0000</span>'
                 '<div class="ci-display-flex-line-break"></div>'
                 '<span class="ci-display-ci-range">[988.6862, 1001.3138]</span>'
-                '</div></div>',
-                '<div class="ci-display-cell">4.0000</div>',
+                '</div></div>', '<div class="ci-display-cell">4.0000</div>',
                 '<div class="ci-display-cell">'
                 '<div>3005.0000<div class="ci-display-flex-line-break">'
                 '</div><span class="ci-display-ratio">3001.0000</span>'
@@ -2577,6 +2533,70 @@ class BootstrapTests(unittest.TestCase):
     expected = pd.DataFrame([['sum(X) Absolute Change', 'B', 4.5, std]],
                             columns=['Metric', 'grp', 'Value', 'Bootstrap SE'])
     expected.set_index(['Metric', 'grp'], inplace=True)
+    testing.assert_frame_equal(output, expected)
+
+
+@parameterized.named_parameters(
+    ('Distribution', operations.Distribution('condition')),
+    ('CumulativeDistribution', operations.CumulativeDistribution('condition')),
+    ('PercentChange', operations.PercentChange('condition', 0)),
+    ('AbsoluteChange', operations.AbsoluteChange('condition', 0)),
+    ('MH', operations.MH('condition', 0, 'cookie')),
+    ('Jackknife', operations.Jackknife('cookie')))
+class FilterTest(parameterized.TestCase):
+  np.random.seed(42)
+  n = 40
+  df = pd.DataFrame({
+      'clicks': np.random.choice(range(20), n),
+      'impressions': np.random.choice(range(20), n),
+      'cookie': np.random.choice(range(5), n),
+      'condition': np.random.choice(range(2), n),
+  })
+
+  def test_parent(self, op):
+    m = copy.deepcopy(op)
+    m.where = 'clicks > 5'
+    ctr = metrics.Ratio('impressions', 'clicks')
+    output = m(ctr).compute_on(self.df)
+    expected = op(ctr).compute_on(self.df[self.df.clicks > 5])
+    testing.assert_frame_equal(output, expected)
+
+  def test_child(self, op):
+    metric = op(metrics.Ratio('impressions', 'clicks', where='clicks > 5'))
+    output = metric.compute_on(self.df)
+    expected = op(metrics.Ratio('impressions', 'clicks')).compute_on(
+        self.df[self.df.clicks > 5])
+    testing.assert_frame_equal(output, expected)
+
+  def test_children(self, op):
+    m1 = metrics.Ratio('clicks', 'impressions', where='clicks > 5')
+    m2 = metrics.Ratio('impressions', 'clicks', where='clicks > 10')
+    metric = op(metrics.MetricList((m1, m2)))
+    output = metric.compute_on(self.df)
+    expected1 = op(m1).compute_on(self.df)
+    expected2 = op(m2).compute_on(self.df)
+    expected = pd.concat((expected1, expected2), 1)
+    testing.assert_frame_equal(output, expected)
+
+  def test_metriclist_child(self, op):
+    m = metrics.Ratio('impressions', 'clicks', where='clicks > 5')
+    m = metrics.MetricList([m], where='impressions > 4')
+    metric = op(m)
+    output = metric.compute_on(self.df)
+    expected = op(metrics.Ratio('impressions', 'clicks')).compute_on(
+        self.df[(self.df.clicks > 5) & (self.df.impressions > 4)])
+    testing.assert_frame_equal(output, expected)
+
+  def test_metriclist_children(self, op):
+    m1 = metrics.Ratio('clicks', 'impressions', where='clicks > 5')
+    m2 = metrics.Ratio('impressions', 'clicks', where='clicks > 10')
+    m = metrics.Ratio('impressions', 'clicks', where='clicks > 5')
+    m = metrics.MetricList([m1, m2], where='impressions > 4')
+    metric = op(m)
+    output = metric.compute_on(self.df)
+    expected1 = op(m1).compute_on(self.df[self.df.impressions > 4])
+    expected2 = op(m2).compute_on(self.df[self.df.impressions > 4])
+    expected = pd.concat((expected1, expected2), 1)
     testing.assert_frame_equal(output, expected)
 
 

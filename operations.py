@@ -827,12 +827,13 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       children = []
       for m in child.children:
-        util_metric = metrics.MetricList(m.children)
+        util_metric = metrics.MetricList(
+            [metrics.MetricList(m.children, where=m.where)], where=child.where)
         children.append(
             util_metric.compute_on(
                 df, split_by + self.stratified_by, cache_key=cache_key))
       return children
-    util_metric = metrics.MetricList(child.children)
+    util_metric = metrics.MetricList(child.children, where=child.where)
     return util_metric.compute_on(
         df, split_by + self.stratified_by, cache_key=cache_key)
 
@@ -880,7 +881,8 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       children = []
       for m in child.children:
-        util_metric = metrics.MetricList(m.children)
+        util_metric = metrics.MetricList(
+            [metrics.MetricList(m.children, where=m.where)], where=child.where)
         c = util_metric.compute_on_sql(
             table,
             split_by + self.extra_index + self.stratified_by,
@@ -889,7 +891,7 @@ class MH(Comparison):
             mode=mode)
         children.append(c)
       return children
-    util_metric = metrics.MetricList(child.children)
+    util_metric = metrics.MetricList(child.children, where=child.where)
     return util_metric.compute_on_sql(
         table,
         split_by + self.extra_index + self.stratified_by,
@@ -977,14 +979,15 @@ class MH(Comparison):
     child = self.children[0]
     grandchildren = []
     if isinstance(child, metrics.MetricList):
+      grandchildren = []
       for m in child:
-        grandchildren += list(m.children)
+        grandchildren.append(metrics.MetricList(m.children, where=m.where))
+      util_metric = metrics.MetricList(grandchildren, where=child.where)
     else:
-      grandchildren = child.children
+      util_metric = metrics.MetricList(child.children, where=child.where)
 
     cond_cols = sql.Columns(self.extra_index)
     groupby = sql.Columns(split_by).add(cond_cols).add(self.stratified_by)
-    util_metric = metrics.MetricList(grandchildren)
     util_indexes = sql.Columns(indexes).add(self.stratified_by)
     raw_table_sql, with_data = util_metric.get_sql_and_with_clause(
         table, groupby, global_filter, util_indexes, local_filter, with_data)
@@ -1024,13 +1027,15 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       for c in child:
         with_data2 = copy.deepcopy(with_data)
-        numer_sql, with_data2 = c.children[0].get_sql_and_with_clause(
+        util = metrics.MetricList(c.children[:1], where=c.where)
+        numer_sql, with_data2 = util.get_sql_and_with_clause(
             table, groupby, global_filter, util_indexes, local_filter,
             with_data2)
         with_data2.merge(sql.Datasource(numer_sql))
         numer = numer_sql.columns[-1].alias
         with_data2 = copy.deepcopy(with_data)
-        denom_sql, with_data2 = c.children[1].get_sql_and_with_clause(
+        util = metrics.MetricList(c.children[1:], where=c.where)
+        denom_sql, with_data2 = util.get_sql_and_with_clause(
             table, groupby, global_filter, util_indexes, local_filter,
             with_data2)
         with_data2.merge(sql.Datasource(denom_sql))
@@ -1044,12 +1049,14 @@ class MH(Comparison):
                 alias=alias_tmpl.format(c.name)))
     else:
       with_data2 = copy.deepcopy(with_data)
-      numer_sql, with_data2 = child.children[0].get_sql_and_with_clause(
+      util = metrics.MetricList(child.children[:1], where=child.where)
+      numer_sql, with_data2 = util.get_sql_and_with_clause(
           table, groupby, global_filter, util_indexes, local_filter, with_data2)
       with_data2.merge(sql.Datasource(numer_sql))
       numer = numer_sql.columns[-1].alias
       with_data2 = copy.deepcopy(with_data)
-      denom_sql, with_data2 = child.children[1].get_sql_and_with_clause(
+      util = metrics.MetricList(child.children[1:], where=child.where)
+      denom_sql, with_data2 = util.get_sql_and_with_clause(
           table, groupby, global_filter, util_indexes, local_filter, with_data2)
       with_data2.merge(sql.Datasource(denom_sql))
       denom = denom_sql.columns[-1].alias
