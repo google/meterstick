@@ -70,6 +70,8 @@ class Model(operations.Operation):
     self.group_by = [group_by] if isinstance(group_by, str) else group_by or []
     if isinstance(x, Sequence):
       x = metrics.MetricList(x)
+    self.x = x
+    self.y = y
     self.model = model
     self.k = count_features(x)
     if not name:
@@ -176,10 +178,7 @@ def compute_linear_or_ridge_coefficiens(m, table, split_by, execute=None):
   if isinstance(m, Ridge):
     cols.add(sql.Column('COUNT(*)', alias='n_obs'))
   sufficient_stats = sql.Sql(
-      cols,
-      table,
-      groupby=sql.Columns(split_by).aliases,
-      with_data=with_data)
+      cols, table, groupby=sql.Columns(split_by).aliases, with_data=with_data)
   sufficient_stats = execute(str(sufficient_stats))
   fn = lambda row: compute_coef_from_sufficient_stats(row, xs, m)
   if split_by:
@@ -212,9 +211,7 @@ def compute_coef_from_sufficient_stats(sufficient_stats, xs, m):
   x_t_y = sufficient_stats[x_t_y_cols]
   if fit_intercept:
     n += 1
-  x_t_x = np.zeros([n, n])
-  x_t_x[np.tril_indices(n)] = x_t_x_elements
-  x_t_x = x_t_x + x_t_x.T - np.diag(x_t_x.diagonal())
+  x_t_x = symmetrize_triangular(x_t_x_elements)
   if isinstance(m, Ridge):
     n_obs = sufficient_stats['n_obs']
     penalty = np.identity(n)
@@ -226,13 +223,31 @@ def compute_coef_from_sufficient_stats(sufficient_stats, xs, m):
   if cond > 20:
     print(
         "WARNING: The condition number of X'X is %i, which might be too large."
-        ' The model coefficients might be inaccurate.'
-        % cond)
+        ' The model coefficients might be inaccurate.' % cond)
   coef = np.linalg.solve(x_t_x, x_t_y)
   xs = [n.replace('macro_', '$').strip('`') for n in xs]
   if fit_intercept:
     xs = ['intercept'] + xs
   return pd.DataFrame([coef], columns=xs)
+
+
+def symmetrize_triangular(tril_elements):
+  """Converts a list of upper triangular matrix to a symmetric matrix.
+
+  For example, [1, 2, 3] -> [[1, 2], [2, 3]].
+
+  Args:
+    tril_elements: A list that can form a triangular matrix.
+
+  Returns:
+    A symmetric matrix whose upper triangular part is formed from tril_elements.
+  """
+  n = int(np.ceil(len(tril_elements)**0.5))
+  if n * (n + 1) / 2 != len(tril_elements):
+    raise ValueError('The elements cannot form a symmetric matrix!')
+  sym = np.zeros([n, n])
+  sym[np.tril_indices(n)] = tril_elements
+  return sym + sym.T - np.diag(sym.diagonal())
 
 
 def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
@@ -256,8 +271,7 @@ def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
   if cond > 20:
     print(
         "WARNING: The condition number of X'X is %i, which might be too large."
-        ' The model coefficients might be inaccurate.'
-        % cond)
+        ' The model coefficients might be inaccurate.' % cond)
   coef = np.linalg.solve(x_t_x, x_t_y)
   xs = [n.replace('macro_', '$').strip('`') for n in xs]
   intercept = sufficient_stats.y - coef.dot(
@@ -428,6 +442,12 @@ class LogisticRegression(Model):
     super(LogisticRegression,
           self).__init__(y, x, group_by, model, 'LogisticRegression', where,
                          name, fit_intercept)
+    self.penalty = penalty
+    self.tol = tol
+    self.c = C
+    self.intercept_scaling = intercept_scaling or 1
+    self.max_iter = max_iter
+    self.l1_ratio = l1_ratio
 
   def compute(self, df):
     self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
@@ -451,6 +471,249 @@ class LogisticRegression(Model):
           columns=('%s for class %s' % (n, c)
                    for c, n in itertools.product(self.model.classes_, names)))
       return res
+
+  def compute_on_sql_magic_mode(self, table, split_by, execute=None):
+    """Gets the coefficients by minimizing the cost function.
+
+    We use iteratively reweighted least squares algorithm to solve the model.
+    The algorithm is described in
+    https://colab.research.google.com/drive/1Srfs4weM4LO9vt1HbOkGrD4kVbG8cso8.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+
+    Returns:
+      A pd.DataFrame holding model coefficients.
+    """
+    if self.model.class_weight:
+      raise ValueError("Magic mode doesn't support class_weight!")
+    if self.model.multi_class == 'multinomial':
+      raise ValueError("Magic mode doesn't support multi_class!")
+    if self.penalty == 'elasticnet' and (not self.l1_ratio or
+                                         not 0 <= self.l1_ratio <= 1):
+      raise ValueError('l1_ratio must be between 0 and 1; got (l1_ratio="%s")' %
+                       self.l1_ratio)
+    if self.intercept_scaling != 1:
+      raise ValueError('intercept_scaling is not supported in magic mode!')
+    if self.penalty in ('l1', 'elasticnet'):
+      print("WARNING: Our solution for L1 and elasticnet penalty doesn't quite "
+            'achieve sparsity. Please interprete the results with care.')
+
+    y = self.y.compute_on_sql(table, self.group_by, execute)
+    n_y = y.iloc[:, 0].nunique()
+    if n_y != 2:
+      raise ValueError(
+          'Magic mode only support two classes but got %s distinct y values!' %
+          n_y)
+
+    data = self.children[0].to_sql(table, split_by + self.group_by)
+    with_data = data.with_data
+    data.with_data = None
+    table, _ = with_data.merge(sql.Datasource(data, 'DataToFit'))
+    y = data.columns[-self.k - 1].alias
+    xs = data.columns.aliases[-self.k:]
+    if self.fit_intercept:
+      xs.append('1')
+    conds = []
+    if split_by:
+      slices = execute(
+          str(sql.Sql(sql.Columns(split_by, True), table, with_data=with_data)))
+      conds = slices.values
+    self._gradients = None
+
+    def grads(*unused_args):
+      return self._gradients
+
+    def hess(coef, converged):
+      return compute_grads_and_hess(coef, converged)
+
+    def compute_grads_and_hess(coef, converged):
+      """Computes the gradients and Hessian matrices for coef.
+
+      The grads we computes here is a n*k list of gradients, where n is the
+      number of slices and k is the number of features. It has the same shape
+      with coef, and represents the gradients of the coefficients. The
+      gradients are saved to self._gradients as a side effect.
+      Similarly, the Hessian matrices we return is a n*k*k array. Each k*k
+      element is a Hessian matrix.
+
+      Args:
+        coef: A n*k array of coefficients being optimized. n is the number of
+          slices and k is the number of features.
+        converged: A list of the length of the number of slices. Its values
+          indicate whether the coefficients of the slice have converged. If
+          converged, we skip the computation for that slice.
+
+      Returns:
+        A n*k*k Hessian matrices. We also save the gradients to self._gradients
+        as a side effect.
+      """
+      k = len(coef[0])
+      if not split_by:
+        grads, hessian = get_grads_and_hess_query(coef[0])
+      else:
+        grads = []
+        hessian = []
+        split_cols = sql.Columns(split_by).aliases
+        for cond, slice_coef, done in zip(conds, coef, converged):
+          if not done:
+            condition = [
+                '%s = "%s"' % (c, v) if isinstance(v, str) else '%s = %s' %
+                (c, v) for c, v in zip(split_cols, cond)
+            ]
+            condition = ' AND '.join(condition)
+            j, h = get_grads_and_hess_query(slice_coef, condition)
+            grads += j
+            hessian += h
+      for i, c in enumerate(grads):
+        c.set_alias('grads_%s' % i)
+      for i, c in enumerate(hessian):
+        c.set_alias('hess_%s' % i)
+      grads_and_hess = sql.Sql(sql.Columns(grads + hessian), table)
+      grads_and_hess.with_data = with_data
+      grads_and_hess = execute(str(grads_and_hess)).iloc[0]
+      self._gradients = []
+      for done in converged:
+        if done:
+          self._gradients.append(None)
+        else:
+          self._gradients.append(grads_and_hess.values[:k])
+          grads_and_hess = grads_and_hess[k:]
+      hess_elements = list(grads_and_hess.values.reshape(-1, k * (k + 1) // 2))
+      hess_arr = []
+      for done in converged:
+        if done:
+          hess_arr.append(None)
+        else:
+          hess_arr.append(symmetrize_triangular(hess_elements.pop(0)))
+      return hess_arr
+
+    def get_grads_and_hess_query(coef, condition=None):
+      """Get the SQL columns to compute the gradients and Hessian matrixes.
+
+      The formula of gradients and Hessian matrixes can be found in
+      https://colab.research.google.com/drive/1Srfs4weM4LO9vt1HbOkGrD4kVbG8cso8.
+      As the Hessian matrix is symmetric, we only construct the columns for
+      unique values.
+
+      Args:
+        coef: A n*k list of coefficients being optimized, where n is the number
+          of slices and k is the number of features.
+        condition: A condition that can be applied in the WHERE clause. The
+          gradients and Hessian matrixes will be computed on the rows that
+          satisfies the condition.
+
+      Returns:
+        grads: A list of SQL columns which has the same shape with coef. It
+          represents the gradients of the corresponding coefficients.
+        hess: A list of SQL columns that can be used to construct the Hessian
+          matrix. Its elements are the upper triangular part of the Hessian,
+          from left to right, top to down.
+      """
+      # A numerically stable implemntation, adapted from
+      # http://fa.bianp.net/blog/2019/evaluate_logistic.
+      z = ' + '.join('%s * %s' % (coef[i], xs[i]) for i in range(len(xs)))
+      grads = [
+          sql.Column(
+              '%s * %s' % (x, sig_minus_b(z, y)), 'AVG({})', filters=condition)
+          for x in xs
+      ]
+      sig_z = """IF({z} < 0,
+          EXP({z}) / (1 + EXP({z})),
+          1 / (1 + EXP(-({z}))))""".format(z=z)
+      w = '-%s * %s' % (sig_z, sig_minus_b(z, 1))
+      hess = []
+      for i, x1 in enumerate(xs):
+        for x2 in xs[i:]:
+          hess.append(
+              sql.Column(
+                  '%s * %s * %s' % (x1, x2, w), 'AVG({})', filters=condition))
+      hess = np.array(hess)
+      # See here for the behavior of differnt penalties.
+      # https://colab.research.google.com/drive/1Srfs4weM4LO9vt1HbOkGrD4kVbG8cso8
+      n = 'COUNTIF(%s)' % condition if condition else 'COUNT(*)'
+      if self.penalty == 'l1':
+        for i in range(self.k):
+          grads[i] += sql.Column('SIGN(%s) / %s' % (coef[i], n)) / self.c
+      elif self.penalty == 'l2':
+        for i in range(self.k):
+          grads[i] += sql.Column('%s / %s' % (coef[i], n)) / self.c
+        hess_diag_idx = np.arange(len(xs), len(xs) - self.k + 1, -1).cumsum()
+        hess_diag_idx = np.concatenate([[0], hess_diag_idx])
+        hess[hess_diag_idx] += sql.Column('1 / (%s * %s)' % (n, self.c))
+      elif self.penalty == 'elasticnet':
+        l1 = self.l1_ratio / self.c
+        l2 = (1 - self.l1_ratio) / self.c
+        for i in range(self.k):
+          grads[i] += sql.Column('(%s * SIGN(%s) + %s * %s) / %s' %
+                                 (l1, coef[i], l2, coef[i], n))
+        hess_diag_idx = np.arange(len(xs), len(xs) - self.k + 1, -1).cumsum()
+        hess_diag_idx = np.concatenate([[0], hess_diag_idx])
+        hess[hess_diag_idx] += sql.Column('%s / %s' % (l2, n))
+      elif self.penalty != 'none':
+        raise ValueError('LogisticRegression supports only penalties in '
+                         "['l1', 'l2', 'elasticnet', 'none'], got %s." %
+                         self.penalty)
+      return grads, list(hess)
+
+    res = newtons_method(
+        np.zeros((len(conds) or 1, len(xs))), grads, hess, self.tol,
+        self.max_iter, conds)
+    xs = [n.replace('macro_', '$').strip('`') for n in xs]
+    if split_by:
+      df = pd.DataFrame(conds, columns=split_by)
+      if len(split_by) == 1:
+        idx = pd.Index(df[split_by[0]])
+      else:
+        idx = pd.MultiIndex.from_frame((df))
+      res = pd.DataFrame(res, columns=xs, index=idx)
+      if self.fit_intercept:
+        res.columns = list(res.columns[:-1]) + ['intercept']
+        # Make intercept the 1st column.
+        xs = ['intercept'] + xs[:-1]
+        res = res[xs]
+      res.sort_index(inplace=True)
+      return res
+    res = res[0]
+    if self.fit_intercept:
+      res = np.concatenate([[res[-1]], res[:-1]])
+      xs = ['intercept'] + xs[:-1]
+    return pd.DataFrame([res], columns=xs)
+
+
+def sig_minus_b(z, b):
+  """Computes sigmoid(z) - b in a numerically stable way in SQL."""
+  # Adapted from http://fa.bianp.net/blog/2019/evaluate_logistic
+  exp_z = 'EXP(%s)' % z
+  exp_nz = 'EXP(-(%s))' % z
+  return ('IF({z} < 0, ((1 - {b}) * {exp_z} - {b}) / (1 + {exp_z}), ((1 - {b}) '
+          '- {b} * {exp_nz}) / (1 + {exp_nz}))').format(
+              z=z, b=b, exp_z=exp_z, exp_nz=exp_nz)
+
+
+def newtons_method(coef, grads, hess, tol, max_iter, conds, *args):
+  """Uses Newton's method to optimize coef on n slices at the same time."""
+  n_slice = len(coef)
+  converged = np.array([False] * n_slice)
+  for _ in range(max_iter):
+    h = hess(coef, converged, *args)
+    j = grads(coef, converged, *args)
+    for i in range(n_slice):
+      if not converged[i]:
+        delta = np.linalg.solve(h[i], j[i])
+        if abs(delta).max() < tol:
+          converged[i] = True
+        coef[i] -= delta
+    if all(converged):
+      return coef
+  if n_slice == 1:
+    print("WARNING: Optimization didn't converge!")
+  else:
+    print("WARNING: Optimization didn't converge for slice: ",
+          np.array(conds)[~converged])
+  return coef
 
 
 def count_features(m: metrics.Metric):

@@ -693,11 +693,13 @@ class Sql(SqlComponent):
                from_data,
                where=None,
                groupby=None,
-               with_data=None):
+               with_data=None,
+               orderby=None):
     super(Sql, self).__init__()
     self.columns = Columns(columns)
     self.where = Filters(where)
     self.groupby = Columns(groupby)
+    self.orderby = Columns(orderby)
     self.with_data = Datasources(with_data)
     if isinstance(from_data, Sql) and from_data.with_data:
       from_data = copy.deepcopy(from_data)
@@ -751,8 +753,10 @@ class Sql(SqlComponent):
     where_clause = 'WHERE\n%s' % self.where if self.where else None
     groupby_clause = 'GROUP BY %s' % self.groupby.as_groupby(
     ) if self.groupby else None
+    orderby_clause = 'ORDER BY %s' % self.orderby.as_groupby(
+    ) if self.orderby else None
     clauses = [
         c for c in (with_clause, select_clause, from_clause, where_clause,
-                    groupby_clause) if c is not None
+                    groupby_clause, orderby_clause) if c is not None
     ]
     return '\n'.join(clauses)

@@ -294,6 +294,11 @@ class MiscellaneousTests(absltest.TestCase):
     self.assertEqual(models.count_features(metrics.Ratio('x', 'y')), 1)
     self.assertEqual(models.count_features(metrics.MetricList([s, s]) / 2), 2)
 
+  def test_symmetrize_triangular(self):
+    actual = models.symmetrize_triangular([1, 2, 3])
+    expected = np.array([[1, 2], [2, 3]])
+    np.testing.assert_equal(actual, expected)
+
 
 if __name__ == '__main__':
   absltest.main()
