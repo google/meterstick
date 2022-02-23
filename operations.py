@@ -2874,13 +2874,13 @@ def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
     GROUP BY split_by),
     BootstrapRandomChoices AS (SELECT
       split_by,
-      _bs_idx,
+      _resample_idx,
       unit[ORDINAL(CAST(CEILING(RAND() * _bs_length) AS INT64))] AS unit
     FROM Candidates
     JOIN
     UNNEST(unit)
     JOIN
-    UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS _bs_idx),
+    UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS _resample_idx),
     BootstrapResammpledData AS (SELECT
       *
     FROM BootstrapRandomChoices
