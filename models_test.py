@@ -104,6 +104,45 @@ class ModelsTest(parameterized.TestCase):
     expected = expected.droplevel(-1)
     pd.testing.assert_frame_equal(output, expected)
 
+  def test_normalize(self, model, sklearn_model, name):
+    m = model(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1', normalize=True)
+    output = m.compute_on(DF)
+    centered = GRPED1[['X1']] - GRPED1[['X1']].mean()
+    norm = np.sqrt((centered**2).sum())
+    normalized = centered / norm
+    model = sklearn_model().fit(normalized, GRPED1[['Y']])
+    coef = (model.coef_.flatten()[0] / norm)[0]
+    intercept = GRPED1[['Y']].mean()[0] - (GRPED1[['X1']].mean() * coef)[0]
+    expected = pd.DataFrame(
+        [[intercept, coef]],
+        columns=[
+            name + '(sum(Y) ~ sum(X1)) Coefficient: intercept',
+            name + '(sum(Y) ~ sum(X1)) Coefficient: sum(X1)'
+        ])
+    pd.testing.assert_frame_equal(output, expected.astype(float))
+
+  def test_normalize_multi_var(self, model, sklearn_model, name):
+    m = model(
+        metrics.Sum('Y'),
+        [metrics.Sum('X1'), metrics.Sum('X2')],
+        'grp1',
+        normalize=True)
+    output = m.compute_on(DF)
+    centered = GRPED1[['X1', 'X2']] - GRPED1[['X1', 'X2']].mean()
+    norm = np.sqrt((centered**2).sum())
+    normalized = centered / norm
+    model = sklearn_model().fit(normalized, GRPED1[['Y']])
+    coef = model.coef_.flatten() / norm
+    intercept = GRPED1[['Y']].mean() - GRPED1[['X1', 'X2']].mean().dot(coef)
+    expected = pd.DataFrame(
+        [[intercept[0]] + list(coef)],
+        columns=[
+            name + '(sum(Y) ~ sum(X1) + sum(X2)) Coefficient: intercept',
+            name + '(sum(Y) ~ sum(X1) + sum(X2)) Coefficient: sum(X1)',
+            name + '(sum(Y) ~ sum(X1) + sum(X2)) Coefficient: sum(X2)',
+        ])
+    pd.testing.assert_frame_equal(output, expected)
+
   def test_no_intercept(self, model, sklearn_model, name):
     m = model(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1', fit_intercept=False)
     output = m.compute_on(DF)

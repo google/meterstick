@@ -90,11 +90,21 @@ class Model(operations.Operation):
     self.normalize = normalize
 
   def compute(self, df):
-    self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
+    x, y = df.iloc[:, 1:], df.iloc[:, 0]
+    if self.normalize and self.fit_intercept:
+      x_scaled = x - x.mean()
+      norms = np.sqrt((x_scaled**2).sum())
+      x = x_scaled / norms
+    self.model.fit(x, y)
     coef = self.model.coef_
+    if self.normalize and self.fit_intercept:
+      coef = coef / norms.values
     names = list(df.columns[1:])
     if self.fit_intercept:
-      intercept = self.model.intercept_
+      if self.normalize:
+        intercept = y.mean() - df.iloc[:, 1:].mean().dot(coef)
+      else:
+        intercept = self.model.intercept_
       coef = [intercept] + list(coef)
       names = ['intercept'] + names
     return pd.DataFrame([coef], columns=names)
@@ -142,8 +152,7 @@ class LinearRegression(Model):
                where: Optional[str] = None,
                name: Optional[str] = None):
     """Initialize a sklearn.LinearRegression model."""
-    model = linear_model.LinearRegression(
-        fit_intercept=fit_intercept, normalize=normalize)
+    model = linear_model.LinearRegression(fit_intercept=fit_intercept)
     super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', where,
                                            name, fit_intercept, normalize)
 
@@ -303,7 +312,6 @@ class Ridge(Model):
     model = linear_model.Ridge(
         alpha=alpha,
         fit_intercept=fit_intercept,
-        normalize=normalize,
         copy_X=copy_X,
         max_iter=max_iter,
         tol=tol,
@@ -342,7 +350,6 @@ class Lasso(Model):
     model = linear_model.Lasso(
         alpha=alpha,
         fit_intercept=fit_intercept,
-        normalize=normalize,
         copy_X=copy_X,
         max_iter=max_iter,
         tol=tol,
@@ -381,7 +388,6 @@ class ElasticNet(Model):
         alpha=alpha,
         l1_ratio=l1_ratio,
         fit_intercept=fit_intercept,
-        normalize=normalize,
         copy_X=copy_X,
         max_iter=max_iter,
         tol=tol,
