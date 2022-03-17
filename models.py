@@ -255,7 +255,7 @@ def symmetrize_triangular(tril_elements):
   if n * (n + 1) / 2 != len(tril_elements):
     raise ValueError('The elements cannot form a symmetric matrix!')
   sym = np.zeros([n, n])
-  sym[np.tril_indices(n)] = tril_elements
+  sym[np.triu_indices(n)] = tril_elements
   return sym + sym.T - np.diag(sym.diagonal())
 
 
@@ -273,9 +273,8 @@ def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
       x_t_x_elements.append(sufficient_stats['x%sx%s' % (i, j)] -
                             sufficient_stats['x%s' % i] *
                             sufficient_stats['x%s' % j])
-  x_t_x = np.zeros([n, n])
-  x_t_x[np.tril_indices(n)] = x_t_x_elements
-  x_t_x = x_t_x + x_t_x.T + (m.alpha - 1) * np.diag(x_t_x.diagonal())
+  x_t_x = symmetrize_triangular(x_t_x_elements)
+  x_t_x += m.alpha * np.diag(x_t_x.diagonal())
   cond = np.linalg.cond(x_t_x)
   if cond > 20:
     print(

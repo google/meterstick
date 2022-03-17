@@ -334,8 +334,8 @@ class MiscellaneousTests(absltest.TestCase):
     self.assertEqual(models.count_features(metrics.MetricList([s, s]) / 2), 2)
 
   def test_symmetrize_triangular(self):
-    actual = models.symmetrize_triangular([1, 2, 3])
-    expected = np.array([[1, 2], [2, 3]])
+    actual = models.symmetrize_triangular([1, 2, 3, 4, 5, 6])
+    expected = np.array([[1, 2, 3], [2, 4, 5], [3, 5, 6]])
     np.testing.assert_equal(actual, expected)
 
 
