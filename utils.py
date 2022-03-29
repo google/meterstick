@@ -289,7 +289,10 @@ def unmelt(df):
   if len(df.index.names) == 1:
     df = pd.DataFrame(df.stack(0, dropna=False)).T
   else:
-    df = pd.concat([df.loc[n] for n in names], 1, keys=names, names=['Metric'])
+    df = pd.concat([df.loc[n] for n in names],
+                   axis=1,
+                   keys=names,
+                   names=['Metric'])
   if single_value_col:
     return df.droplevel(1, axis=1)
   return df
