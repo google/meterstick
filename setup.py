@@ -21,7 +21,7 @@ README = (HERE/"README.md").read_text()
 
 setup(
     name="meterstick",
-    version="1.1.0",
+    version="1.3.1",
     description="A grammar of data analysis",
     long_description=README,
     long_description_content_type="text/markdown",
