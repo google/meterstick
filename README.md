@@ -1,7 +1,7 @@
 # Meterstick Documentation
 
 The meterstick package provides a concise syntax to describe and execute
-routine data analysis tasks. Please see meterstick_demo.ipynb for examples.
+routine data analysis tasks. Please see [meterstick_demo.ipynb](https://colab.research.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb) for examples.
 
 ## Disclaimer
 
