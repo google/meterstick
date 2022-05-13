@@ -23,7 +23,6 @@ import numpy as np
 import pandas as pd
 from sklearn import linear_model
 
-np.random.seed(42)
 n = 40
 DF = pd.DataFrame({
     'X1': np.random.random(n),

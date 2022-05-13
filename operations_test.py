@@ -780,7 +780,6 @@ class AbsoluteChangeTests(unittest.TestCase):
 
 class PrePostChangeTests(unittest.TestCase):
 
-  np.random.seed(42)
   n = 40
   df = pd.DataFrame({
       'clicks': np.random.choice(range(20), n),
@@ -917,7 +916,6 @@ class PrePostChangeTests(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
   def test_complex(self):
-    np.random.seed(42)
     n = 50
     df = pd.DataFrame({
         'clicks': np.random.choice(range(20), n),
@@ -1025,7 +1023,6 @@ class PrePostChangeTests(unittest.TestCase):
 
 class CUPEDTests(unittest.TestCase):
 
-  np.random.seed(42)
   n = 40
   df = pd.DataFrame({
       'clicks': np.random.choice(range(20), n),
@@ -1159,7 +1156,6 @@ class CUPEDTests(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
   def test_complex(self):
-    np.random.seed(42)
     n = 50
     df = pd.DataFrame({
         'clicks': np.random.choice(range(20), n),
