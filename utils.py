@@ -320,15 +320,15 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
   elif isinstance(res, pd.DataFrame):
     if melted:
       if len(res.index.names) > 1:
-        res.index.set_levels(
-            map(name_tmpl.format, res.index.levels[0]), 0, inplace=True)
+        res.index = res.index.set_levels(
+            map(name_tmpl.format, res.index.levels[0]), 0)
       else:
         res.index = pd.Index(
             map(name_tmpl.format, res.index), name=res.index.name)
     else:
       if len(res.columns.names) > 1:
-        res.columns.set_levels(
-            map(name_tmpl.format, res.columns.levels[0]), 0, inplace=True)
+        res.columns = res.columns.set_levels(
+            map(name_tmpl.format, res.columns.levels[0]), 0)
       else:
         res.columns = map(name_tmpl.format, res.columns)
   return res
