@@ -897,10 +897,10 @@ class MetricList(Metric):
         from_data = sql.Join(from_data, alias, join=join, using=indexes)
     return sql.Sql(columns, from_data), with_data
 
-  def compute_on_children(self, child, split_by):
-    if isinstance(child, list):
-      return self.to_dataframe(child)
-    return child
+  def compute_on_children(self, children, split_by):
+    if isinstance(children, list):
+      return self.to_dataframe(children)
+    return children
 
   def to_dataframe(self, res):
     res_all = pd.concat(res, axis=1, sort=False)
@@ -988,7 +988,7 @@ class CompositeMetric(Metric):
       children.append(m)
     return children
 
-  def compute_on_children(self, child, split_by):
+  def compute_on_children(self, children, split_by):
     """Computes the result based on the results from the children.
 
     Computations between two DataFrames require columns to match. It makes
@@ -1003,14 +1003,14 @@ class CompositeMetric(Metric):
         columns. Otherwise we will apply self.name_tmpl to the column names.
 
     Args:
-      child: A length-2 list. The elements could be numbers, pd.Series or
+      children: A length-2 list. The elements could be numbers, pd.Series or
         pd.DataFrames.
       split_by: Something can be passed into df.group_by().
 
     Returns:
       The result to be sent to final_compute().
     """
-    a, b = child[0], child[1]
+    a, b = children[0], children[1]
     m1, m2 = self.children[0], self.children[1]
     if isinstance(a, pd.DataFrame) and a.shape[1] == 1 and not is_operation(m1):
       a = a.iloc[:, 0]

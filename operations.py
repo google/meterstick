@@ -187,9 +187,10 @@ class Distribution(Operation):
     super(Distribution, self).__init__(child, 'Distribution of {}', over,
                                        **kwargs)
 
-  def compute_on_children(self, child, split_by):
-    total = child.groupby(level=split_by).sum() if split_by else child.sum()
-    return child / total
+  def compute_on_children(self, children, split_by):
+    total = children.groupby(
+        level=split_by).sum() if split_by else children.sum()
+    return children / total
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -480,14 +481,14 @@ class PercentChange(Comparison):
           self).__init__(condition_column, baseline_key, child, include_base,
                          name_tmpl, **kwargs)
 
-  def compute_on_children(self, child, split_by):
+  def compute_on_children(self, children, split_by):
     level = None
     if split_by:
       level = self.extra_index[0] if len(
           self.extra_index) == 1 else self.extra_index
-    res = (child / child.xs(self.baseline_key, level=level) - 1) * 100
-    if len(child.index.names) > 1:  # xs might mess up the level order.
-      res = res.reorder_levels(child.index.names)
+    res = (children / children.xs(self.baseline_key, level=level) - 1) * 100
+    if len(children.index.names) > 1:  # xs might mess up the level order.
+      res = res.reorder_levels(children.index.names)
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
@@ -521,7 +522,7 @@ class AbsoluteChange(Comparison):
     super(AbsoluteChange, self).__init__(condition_column, baseline_key, child,
                                          include_base, name_tmpl, **kwargs)
 
-  def compute_on_children(self, child, split_by):
+  def compute_on_children(self, children, split_by):
     level = None
     if split_by:
       level = self.extra_index[0] if len(
@@ -529,9 +530,9 @@ class AbsoluteChange(Comparison):
     # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
-    res = child - child.xs(self.baseline_key, level=level)
-    if len(child.index.names) > 1:  # xs might mess up the level order.
-      res = res.reorder_levels(child.index.names)
+    res = children - children.xs(self.baseline_key, level=level)
+    if len(children.index.names) > 1:  # xs might mess up the level order.
+      res = res.reorder_levels(children.index.names)
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
