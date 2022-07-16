@@ -116,15 +116,15 @@ class Model(operations.Operation):
       raise ValueError('%s is not computable in pure SQL!' % self.name)
     if mode == 'magic' and not self.all_computable_in_pure_sql(False):
       raise ValueError(
-          'The "magic" mode requires all descendants to be computable in SQL!' %
-          self.name)
+          'The "magic" mode of %s requires all descendants to be computable in SQL!'
+          % self.name)
 
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     if mode == 'mixed' or not mode:
       try:
         return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
-      except utils.MaybeBadSqlModeError as e:
+      except utils.MaybeBadSqlModeError:
         raise
       except Exception as e:  # pylint: disable=broad-except
         raise utils.MaybeBadSqlModeError('magic') from e
