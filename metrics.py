@@ -1350,6 +1350,35 @@ class Mean(SimpleMetric):
       res /= sql.Column(self.weight, 'SUM({})', 'total_weight', local_filter)
       return res.set_alias(self.name)
 
+class Round(SimpleMetric):
+  """Round estimator.
+  
+  Attributes:
+    var: Column to compute on.
+    name: Name of the Metric.
+    num_decimals: The number of decimals rounded to.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
+    kwargs: Other kwargs
+  """
+  def __init__(self,
+               var: Text,
+               num_decimals: Optional[int] = None,
+               name: Optional[Text] = None,
+               where: Optional[Union[Text, Sequence[Text]]] = None,
+               **kwargs):
+    name_tmpl = 'Round({},{})'
+    name = name or name_tmpl.format(var, num_decimals)
+    super(Round, self).__init__(var, name, name_tmpl, where, **kwargs)
+    self.num_decimals = num_decimals
+
+  def compute(self, df):
+    if not self.num_decimals:
+      raise ValueError('Number of Decimals is not defined in %s.' % self.name)
+    return np.round(df[self.var], self.num_decimals)
+
+  def get_sql_columns(self, local_filter):
+    return sql.Column(self.var, 'ROUND({},{})', self.name, self.num_decimals, local_filter)
 
 class Max(SimpleMetric):
   """Max estimator.

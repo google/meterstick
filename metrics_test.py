@@ -400,6 +400,20 @@ class SimpleMetricTest(unittest.TestCase):
     expected.set_index('grp', append=True, inplace=True)
     testing.assert_frame_equal(output, expected)
 
+  def test_round(self):
+    df = pd.DataFrame({
+        'X': [1.2, 2.1, 1.0341, 3.03124515123],
+        'Y': [3, 1, 0, 1],
+        'grp': ['A', 'A', 'B', 'B']
+    })
+    metric = metrics.Round('X', 2)
+    output = metric.compute_on(df)
+    expected =  pd.DataFrame({
+        'Round(X,2)': [1.2, 2.1, 1.03, 3.03],
+    })
+    
+    testing.assert_frame_equal(output,expected)
+  
   def test_quantile_raise(self):
     with self.assertRaises(ValueError) as cm:
       metrics.Quantile('X', 2)
