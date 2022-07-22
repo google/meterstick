@@ -28,7 +28,6 @@ from meterstick import utils
 import numpy as np
 import pandas as pd
 from scipy import stats
-from sklearn import linear_model
 
 
 class Operation(metrics.Metric):
@@ -641,6 +640,7 @@ class PrePostChange(PercentChange):
     Returns:
       The adjusted values of the child (post metrics).
     """
+    from sklearn import linear_model  # pylint: disable=g-import-not-at-top
     # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
@@ -746,6 +746,7 @@ class CUPED(AbsoluteChange):
     Returns:
       The adjusted values of the child (post metrics).
     """
+    from sklearn import linear_model  # pylint: disable=g-import-not-at-top
     # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
