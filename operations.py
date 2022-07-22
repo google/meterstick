@@ -116,6 +116,16 @@ class Operation(metrics.Metric):
       for k, idx in zip(keys, indices):
         yield df.loc[idx.unique()].droplevel(split_by), k
 
+  def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+    try:
+      children = self.compute_children(df, split_by + self.extra_split_by)
+      res = self.compute_on_children(children, split_by)
+      if isinstance(res, pd.Series):
+        return pd.DataFrame([res], columns=children.columns)
+      return res
+    except NotImplementedError:
+      return super(Operation, self).compute_slices(df, split_by)
+
   def compute_children(self,
                        df: pd.DataFrame,
                        split_by=None,

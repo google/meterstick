@@ -229,8 +229,8 @@ class Metric(object):
     """Applies compute() to all slices. Each slice needs a unique cache_key."""
     if self.children:
       try:
-        df = self.compute_children(df, split_by + self.extra_split_by)
-        return self.compute_on_children(df, split_by)
+        children = self.compute_children(df, split_by + self.extra_split_by)
+        return self.compute_on_children(children, split_by)
       except NotImplementedError:
         pass
     if split_by:
