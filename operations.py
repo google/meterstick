@@ -1332,7 +1332,7 @@ class MetricWithCI(Operation):
     del melted, return_dataframe  # unused
     base = res.meterstick_change_base
     res = super(MetricWithCI, self).manipulate(res, True, True, apply_name_tmpl)
-    return self._add_base_to_res(res, base)
+    return self.add_base_to_res(res, base)
 
   def compute_slices(self, df, split_by):
     std = super(MetricWithCI, self).compute_slices(df, split_by)
@@ -1343,10 +1343,10 @@ class MetricWithCI(Operation):
           ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
       res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
     res = utils.unmelt(res)
-    base = self._compute_change_base(df, split_by)
-    return self._add_base_to_res(res, base)
+    base = self.compute_change_base(df, split_by)
+    return self.add_base_to_res(res, base)
 
-  def _compute_change_base(self, df, split_by, execute=None, mode=None):
+  def compute_change_base(self, df, split_by, execute=None, mode=None):
     """Computes the base values for Change. It's used in res.display()."""
     if not self.confidence:
       return None
@@ -1367,7 +1367,7 @@ class MetricWithCI(Operation):
     return base
 
   @staticmethod
-  def _add_base_to_res(res, base):
+  def add_base_to_res(res, base):
     with warnings.catch_warnings():
       warnings.simplefilter(action='ignore', category=UserWarning)
       res.meterstick_change_base = base
@@ -1384,7 +1384,7 @@ class MetricWithCI(Operation):
     base = res.meterstick_change_base
     if not melted:
       res = utils.unmelt(res)
-      self._add_base_to_res(res, base)
+      self.add_base_to_res(res, base)
     if self.confidence:
       extra_idx = list(metrics.get_extra_idx(self))
       indexes = split_by + extra_idx if split_by else extra_idx
@@ -1395,8 +1395,10 @@ class MetricWithCI(Operation):
       res = self.add_display_fn(res, indexes, melted)
     return res
 
-  def add_display_fn(self, res, split_by, melted):
+  def add_display_fn(self, res, split_by, melted, base=None):
     """Bounds a display function to res so res.display() works."""
+    if base is not None or not hasattr(res, 'meterstick_change_base'):
+      self.add_base_to_res(res, base)
     value = res.columns[0] if melted else res.columns[0][1]
     ctrl_id = None
     condition_col = None
@@ -1649,7 +1651,7 @@ class MetricWithCI(Operation):
         sub_dfs.append(sub_df)
 
     res = pd.concat((sub_dfs), 1, keys=metric_names, names=['Metric'])
-    return self._add_base_to_res(res, base)
+    return self.add_base_to_res(res, base)
 
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
     batch_size = self._runtime_batch_size or self.sql_batch_size
@@ -1669,8 +1671,8 @@ class MetricWithCI(Operation):
           ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
       res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
     res = utils.unmelt(res)
-    base = self._compute_change_base(table, split_by, execute, mode)
-    return self._add_base_to_res(res, base)
+    base = self.compute_change_base(table, split_by, execute, mode)
+    return self.add_base_to_res(res, base)
 
   def compute_children_sql(self,
                            table,
