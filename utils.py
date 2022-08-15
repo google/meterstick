@@ -321,7 +321,7 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
     if melted:
       if len(res.index.names) > 1:
         res.index = res.index.set_levels(
-            map(name_tmpl.format, res.index.levels[0]), 0)
+            map(name_tmpl.format, res.index.levels[0]), level=0)
       else:
         res.index = pd.Index(
             map(name_tmpl.format, res.index), name=res.index.name)
