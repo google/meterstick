@@ -1932,9 +1932,8 @@ class Jackknife(MetricWithCI):
       Additionally, a display() function will be bound to the result so you can
       visualize the confidence interval nicely in Colab and Jupyter notebook.
     children: A tuple of a Metric whose result we jackknife on.
-    can_precompute: If all leaf Metrics are Sum, Count, Dot, and Mean, then we
-      can cut the corner to compute leave-one-out estimates.
-    disable_optimization: Disable the precomputation even if it's possible.
+    enable_optimization: If all leaf Metrics are Sum, Count, Dot, and Mean, then
+      we can cut the corner to compute leave-one-out estimates.
     And all other attributes inherited from Operation.
   """
 
@@ -1942,17 +1941,16 @@ class Jackknife(MetricWithCI):
                unit: Text,
                child: Optional[metrics.Metric] = None,
                confidence: Optional[float] = None,
-               disable_optimization=False,
+               enable_optimization=True,
                **kwargs):
     super(Jackknife, self).__init__(unit, child, confidence, '{} Jackknife',
                                     None, **kwargs)
-    self.can_precompute = not disable_optimization and self.can_be_precomputed()
+    self.enable_optimization = enable_optimization
     if confidence:
       self.computable_in_pure_sql = False
 
   def __call__(self, child: metrics.Metric):
     jk = super(Jackknife, self).__call__(child)
-    jk.can_precompute = jk.can_be_precomputed()
     return jk
 
   def precompute(self, df, split_by=None):
@@ -1972,32 +1970,48 @@ class Jackknife(MetricWithCI):
     Returns:
       The input df. All we do here is saving precomputed stuff to cache.
     """
-    if not self.can_precompute:
+    # TODO: Remove monkey-patching after we switch to global caching.
+    if not self.can_precompute():
       return df
     original_sum_compute_slices = metrics.Sum.compute_slices
     original_ct_compute_slices = metrics.Count.compute_slices
     original_mean_compute_slices = metrics.Mean.compute_slices
     original_dot_compute_slices = metrics.Dot.compute_slices
     original_save_to_cache = metrics.Metric.save_to_cache
+    # See
+    # https://stackoverflow.com/questions/28127874/monkey-patching-python-an-instance-method
+    # for how to monkey patch a method to instances. Also, pytype will complain.
+    # pytype: disable=attribute-error
     try:
-      metrics.Sum.compute_slices = get_sum_ct_monkey_patch_fn(
-          self.unit, split_by, original_sum_compute_slices)
-      metrics.Count.compute_slices = get_sum_ct_monkey_patch_fn(
-          self.unit, split_by, original_ct_compute_slices)
-      metrics.Mean.compute_slices = get_mean_monkey_patch_fn(
-          self.unit, split_by)
-      metrics.Dot.compute_slices = get_dot_monkey_patch_fn(
-          self.unit, split_by, original_dot_compute_slices)
-      metrics.Metric.save_to_cache = save_to_cache_for_jackknife
+      for m in self.traverse():
+        if isinstance(m, metrics.Sum):
+          m.compute_slices = get_sum_ct_monkey_patch_fn(
+              self.unit, split_by, original_sum_compute_slices).__get__(m)
+        elif isinstance(m, metrics.Count):
+          m.compute_slices = get_sum_ct_monkey_patch_fn(
+              self.unit, split_by, original_ct_compute_slices).__get__(m)
+        elif isinstance(m, metrics.Mean):
+          m.compute_slices = get_mean_monkey_patch_fn(self.unit,
+                                                      split_by).__get__(m)
+        elif isinstance(m, metrics.Dot):
+          m.compute_slices = get_dot_monkey_patch_fn(
+              self.unit, split_by, original_dot_compute_slices).__get__(m)
+        m.save_to_cache = save_to_cache_for_jackknife.__get__(m)
       cache_key = self.cache_key or self.RESERVED_KEY
       cache_key = ('_RESERVED', 'jk', cache_key, self.unit)
       self.compute_child(df, split_by, cache_key=cache_key)
     finally:
-      metrics.Sum.compute_slices = original_sum_compute_slices
-      metrics.Count.compute_slices = original_ct_compute_slices
-      metrics.Mean.compute_slices = original_mean_compute_slices
-      metrics.Dot.compute_slices = original_dot_compute_slices
-      metrics.Metric.save_to_cache = original_save_to_cache
+      for m in self.traverse():
+        if isinstance(m, metrics.Sum):
+          m.compute_slices = original_sum_compute_slices.__get__(m)
+        elif isinstance(m, metrics.Count):
+          m.compute_slices = original_ct_compute_slices.__get__(m)
+        elif isinstance(m, metrics.Mean):
+          m.compute_slices = original_mean_compute_slices.__get__(m)
+        elif isinstance(m, metrics.Dot):
+          m.compute_slices = original_dot_compute_slices.__get__(m)
+        m.save_to_cache = original_save_to_cache.__get__(m)
+    # pytype: enable=attribute-error
     return df
 
   def get_samples(self, df, split_by=None):
@@ -2024,7 +2038,7 @@ class Jackknife(MetricWithCI):
     if len(levels) < 2:
       raise ValueError('Too few %s to jackknife.' % self.unit)
 
-    if self.can_precompute:
+    if self.can_precompute():
       for lvl in levels:
         yield ('_RESERVED', 'Jackknife', self.unit, lvl), None
     else:
@@ -2052,7 +2066,7 @@ class Jackknife(MetricWithCI):
                        cache_key=None):
     del melted, return_dataframe, cache_key  # unused
     replicates = None
-    if self.can_precompute:
+    if self.can_precompute():
       try:
         replicates = self.compute_child(
             None, [self.unit] + split_by,
@@ -2071,8 +2085,10 @@ class Jackknife(MetricWithCI):
     stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
     return stderrs * dof / np.sqrt(dof + 1), dof
 
-  def can_be_precomputed(self):
+  def can_precompute(self):
     """If all leaf Metrics are Sum/Count/Dot/Mean, LOO can be precomputed."""
+    if not self.enable_optimization:
+      return False
     for m in self.traverse():
       if isinstance(m, Operation) and not m.precomputable_in_jk:
         return False
@@ -2230,7 +2246,7 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
       metric, table, split_by, global_filter, indexes, with_data)
 
   if isinstance(metric, Jackknife):
-    if metric.can_precompute:
+    if metric.can_precompute():
       metric = copy.deepcopy(metric)  # We'll modify the metric tree in-place.
     table, with_data = get_jackknife_data(metric, table, split_by,
                                           global_filter, indexes, local_filter,
@@ -2240,7 +2256,7 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
                                           global_filter, local_filter,
                                           with_data)
 
-  if isinstance(metric, Jackknife) and metric.can_precompute:
+  if isinstance(metric, Jackknife) and metric.can_precompute():
     split_by = adjust_indexes_for_jk_fast(split_by)
     indexes = adjust_indexes_for_jk_fast(indexes)
     # global_filter has been removed from all Metrics when precomputeing LOO.
@@ -2372,7 +2388,7 @@ def get_jackknife_data(metric, table, split_by, global_filter, indexes,
   if not table.is_table:
     table.alias = table.alias or 'RawData'
     table = with_data.add(table)
-  if metric.can_precompute:
+  if metric.can_precompute():
     return get_jackknife_data_fast(metric, table, split_by, global_filter,
                                    indexes, local_filter, with_data)
   return get_jackknife_data_general(metric, table, split_by, global_filter,

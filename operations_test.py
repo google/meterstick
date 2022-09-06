@@ -1769,7 +1769,7 @@ class JackknifeTests(unittest.TestCase):
 
   def test_disable_optimization(self):
     m = metrics.Sum('X')
-    jk = operations.Jackknife('cookie', m, disable_optimization=True)
+    jk = operations.Jackknife('cookie', m, enable_optimization=False)
     df = pd.DataFrame({
         'X': range(6),
         'cookie': [1, 2, 3, 1, 2, 3],
