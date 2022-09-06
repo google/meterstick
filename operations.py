@@ -1934,6 +1934,7 @@ class Jackknife(MetricWithCI):
     children: A tuple of a Metric whose result we jackknife on.
     can_precompute: If all leaf Metrics are Sum, Count, Dot, and Mean, then we
       can cut the corner to compute leave-one-out estimates.
+    disable_optimization: Disable the precomputation even if it's possible.
     And all other attributes inherited from Operation.
   """
 
@@ -1941,10 +1942,11 @@ class Jackknife(MetricWithCI):
                unit: Text,
                child: Optional[metrics.Metric] = None,
                confidence: Optional[float] = None,
+               disable_optimization=False,
                **kwargs):
     super(Jackknife, self).__init__(unit, child, confidence, '{} Jackknife',
                                     None, **kwargs)
-    self.can_precompute = self.can_be_precomputed()
+    self.can_precompute = not disable_optimization and self.can_be_precomputed()
     if confidence:
       self.computable_in_pure_sql = False
 

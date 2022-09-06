@@ -1767,6 +1767,20 @@ class JackknifeTests(unittest.TestCase):
     self.assertEqual(6, count_x.get_cached('foo'))
     self.assertTrue(jk.in_cache('foo'))
 
+  def test_disable_optimization(self):
+    m = metrics.Sum('X')
+    jk = operations.Jackknife('cookie', m, disable_optimization=True)
+    df = pd.DataFrame({
+        'X': range(6),
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    # Don't use autospec=True. It conflicts with wraps.
+    # https://bugs.python.org/issue31807
+    with mock.patch.object(
+        m, 'compute_through', wraps=m.compute_through) as mock_fn:
+      jk.compute_on(df)
+      self.assertEqual(4, mock_fn.call_count)
+
   def test_precompute_sum(self):
     m = metrics.Sum('X')
     jk = operations.Jackknife('cookie', m)
