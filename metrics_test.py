@@ -1152,6 +1152,16 @@ class CompositeMetric(unittest.TestCase):
     expected = pd.DataFrame([[0.75]], columns=['ctr'])
     testing.assert_frame_equal(output, expected)
 
+  def test_operation_set_name(self):
+    df = pd.DataFrame({'click': [1, 2], 'grp': [0, 1]})
+    metric = operations.AbsoluteChange('grp', 0, metrics.Sum('click'))
+    metric = (1 + metric).set_name('foo')
+    output = metric.compute_on(df)
+    expected = pd.DataFrame([[2]],
+                            columns=['foo'],
+                            index=pd.Index([1], name='grp'))
+    testing.assert_frame_equal(output, expected)
+
   def test_columns_multiindex(self):
     df = pd.DataFrame({'X': [1, 2], 'Y': [3, 1]})
     unweightd_metric = metrics.MetricList(

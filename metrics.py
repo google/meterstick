@@ -796,7 +796,10 @@ class MetricList(Metric):
       if not isinstance(m, Metric):
         raise ValueError('%s is not a Metric.' % m)
     tmpl = name_tmpl or 'MetricList({})'
-    name = tmpl.format(', '.join(m.name for m in children))
+    if len(children) == 1:
+      name = children[0].name
+    else:
+      name = tmpl.format(', '.join(m.name for m in children))
     super(MetricList, self).__init__(name, children, where, name_tmpl)
     self.children_return_dataframe = children_return_dataframe
     self.names = [m.name for m in children]
@@ -1012,9 +1015,9 @@ class CompositeMetric(Metric):
     """
     a, b = children[0], children[1]
     m1, m2 = self.children[0], self.children[1]
-    if isinstance(a, pd.DataFrame) and a.shape[1] == 1 and not is_operation(m1):
+    if isinstance(a, pd.DataFrame) and a.shape[1] == 1:
       a = a.iloc[:, 0]
-    if isinstance(b, pd.DataFrame) and b.shape[1] == 1 and not is_operation(m2):
+    if isinstance(b, pd.DataFrame) and b.shape[1] == 1:
       b = b.iloc[:, 0]
     res = None
     if isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
@@ -1023,9 +1026,8 @@ class CompositeMetric(Metric):
             self.name_tmpl.format(c1, c2)
             for c1, c2 in zip(a.columns, b.columns)
         ]
-        # pytype is not smart enough http://github.com/google/pytype/issues/391.
-        a.columns = columns  # pytype: disable=not-writable
-        b.columns = columns  # pytype: disable=not-writable
+        a.columns = columns
+        b.columns = columns
     elif isinstance(a, pd.DataFrame):
       for col in a.columns:
         a[col] = self.op(a[col], b)
@@ -1033,7 +1035,7 @@ class CompositeMetric(Metric):
       columns = [
           self.name_tmpl.format(c, getattr(m2, 'name', m2)) for c in res.columns
       ]
-      res.columns = columns  # pytype: disable=not-writable
+      res.columns = columns
     elif isinstance(b, pd.DataFrame):
       for col in b.columns:
         b[col] = self.op(a, b[col])
@@ -1041,16 +1043,16 @@ class CompositeMetric(Metric):
       columns = [
           self.name_tmpl.format(getattr(m1, 'name', m1), c) for c in res.columns
       ]
-      res.columns = columns  # pytype: disable=not-writable
+      res.columns = columns
 
     if res is None:
       res = self.op(a, b)
     if isinstance(res, pd.Series):
-      res.name = self.name  # pytype: disable=not-writable
+      res.name = self.name
       if self.columns:
         res = pd.DataFrame(res)
     if self.columns is not None and isinstance(res, pd.DataFrame):
-      res.columns = self.columns  # pytype: disable=not-writable
+      res.columns = self.columns
     return res
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
