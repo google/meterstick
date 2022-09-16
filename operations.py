@@ -2185,22 +2185,20 @@ class Bootstrap(MetricWithCI):
         yield ('_RESERVED', 'Bootstrap', None), to_sample.sample(
             frac=1, replace=True)
     else:
-      df = df.set_index(split_by + [self.unit]).sort_index()
-      if split_by:
-        to_samples = [
-            i.unique().to_series() for i in df.groupby(split_by).groups.values()
-        ]
-        for _ in range(self.n_replicates):
-          resampled = pd.concat(
-              (i.sample(frac=1, replace=True) for i in to_samples))
+      grp_by = split_by + [self.unit] if split_by else self.unit
+      grped = df.groupby(grp_by)
+      idx = grped.indices
+      units_split_by = df[grp_by].drop_duplicates()
+      for _ in range(self.n_replicates):
+        resampled = self.group(units_split_by, split_by).sample(
+            frac=1, replace=True).values
+        if not split_by:
           yield ('_RESERVED', 'Bootstrap',
-                 self.unit), df.loc[resampled].reset_index()
-      else:
-        to_sample = df.index.unique().to_series()
-        for _ in range(self.n_replicates):
-          resampled = to_sample.sample(frac=1, replace=True)
-          yield ('_RESERVED', 'Bootstrap',
-                 self.unit), df.loc[resampled].reset_index()
+                 self.unit), df.iloc[np.concatenate([idx[i] for i in resampled
+                                                    ])]
+        else:
+          yield ('_RESERVED', 'Bootstrap', self.unit), df.iloc[np.concatenate(
+              [idx[tuple(i)] for i in resampled])]
 
   def compute_children_sql(self, table, split_by, execute, mode, batch_size):
     """Compute the children on resampled data in SQL."""
