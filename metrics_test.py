@@ -1309,6 +1309,14 @@ class TestMetricList(unittest.TestCase):
         columns=['sum(X) / sum(X)', 'sum(X) / foo'])
     testing.assert_frame_equal(output, expected)
 
+  def test_static_name_single_metric(self):
+    df = pd.DataFrame({'X': [0, 1, 2, 3]})
+    sum_x = metrics.Sum('X', static_name=True)*2.0
+    output = sum_x.compute_on(df)
+    expected_df = pd.DataFrame({'sum(X)': [12.0]})
+    testing.assert_frame_equal(output,expected_df, check_names=True)
+
+
 
 class TestCaching(unittest.TestCase):
 
@@ -1553,6 +1561,8 @@ class TestCaching(unittest.TestCase):
       m.compute_on(self.df, cache_key=42)
       m.flush_cache(42, prune=False)
       self.assertEqual(3, mock_fn.call_count)
+
+
 
 
 if __name__ == '__main__':

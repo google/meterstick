@@ -180,6 +180,8 @@ class Metric(object):
     tmp_cache_keys: The set to track what temporary cache_keys are used during
       computation when default caching is enabled. When computation is done, all
       the keys in tmp_cache_keys are flushed.
+    static_name: If this is set to True then operations on this metric will not
+    change it's name.
   """
   RESERVED_KEY = '_RESERVED'
 
@@ -193,7 +195,8 @@ class Metric(object):
                compute: Optional[Callable[[pd.DataFrame], Any]] = None,
                postcompute=None,
                compute_slices=None,
-               final_compute=None):
+               final_compute=None,
+               static_name: bool = False):
     self.name = name
     self.cache = {}
     self.cache_key = None
@@ -217,6 +220,7 @@ class Metric(object):
     if final_compute:
       self.final_compute = final_compute
     self.tmp_cache_keys = set()
+    self.static_name = static_name
 
   def compute_with_split_by(self,
                             df,
@@ -729,45 +733,90 @@ class Metric(object):
     return fn(self)
 
   def __add__(self, other):
-    return CompositeMetric(lambda x, y: x + y, '{} + {}', (self, other))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} + {}'
+    return CompositeMetric(lambda x, y: x + y, new_name, [self, other])
 
   def __radd__(self, other):
-    return CompositeMetric(lambda x, y: x + y, '{} + {}', (other, self))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} + {}'
+    return CompositeMetric(lambda x, y: x + y, new_name, [other, self])
 
   def __sub__(self, other):
-    return CompositeMetric(lambda x, y: x - y, '{} - {}', (self, other))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} - {}'
+    return CompositeMetric(lambda x, y: x - y, new_name, [self, other])
 
   def __rsub__(self, other):
-    return CompositeMetric(lambda x, y: x - y, '{} - {}', (other, self))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} - {}'
+    return CompositeMetric(lambda x, y: x - y, new_name, [other, self])
 
   def __mul__(self, other):
-    return CompositeMetric(lambda x, y: x * y, '{} * {}', (self, other))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} * {}'
+    return CompositeMetric(lambda x, y: x * y, new_name, [self, other])
 
   def __rmul__(self, other):
-    return CompositeMetric(lambda x, y: x * y, '{} * {}', (other, self))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} * {}'
+    return CompositeMetric(lambda x, y: x * y, new_name, [other, self])
 
   def __neg__(self):
-    return CompositeMetric(lambda x, _: -x, '-{}', (self, -1))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '-{}'
+    return CompositeMetric(lambda x, _: -x, new_name, (self, -1))
 
   def __div__(self, other):
-    return CompositeMetric(lambda x, y: x / y, '{} / {}', (self, other))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} / {}'
+    return CompositeMetric(lambda x, y: x / y, new_name, [self, other])
 
   def __truediv__(self, other):
     return self.__div__(other)
 
   def __rdiv__(self, other):
-    return CompositeMetric(lambda x, y: x / y, '{} / {}', (other, self))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} / {}'
+    return CompositeMetric(lambda x, y: x / y, new_name, [other, self])
 
   def __rtruediv__(self, other):
     return self.__rdiv__(other)
 
   def __pow__(self, other):
-    if isinstance(other, float) and other == 0.5:
-      return CompositeMetric(lambda x, y: x**y, 'sqrt({})', (self, other))
-    return CompositeMetric(lambda x, y: x**y, '{} ^ {}', (self, other))
+    if self.static_name:
+      new_name = self.name
+    else:
+      if isinstance(other, float) and other == 0.5:
+        new_name = 'sqrt({})'
+      else:
+        new_name = '{} ^ {}'
+    return CompositeMetric(lambda x, y: x ** y, new_name, [self, other])
 
   def __rpow__(self, other):
-    return CompositeMetric(lambda x, y: x**y, '{} ^ {}', (other, self))
+    if self.static_name:
+      new_name = self.name
+    else:
+      new_name = '{} ^ {}'
+    return CompositeMetric(lambda x, y: x**y, new_name, [other, self])
 
 
 class MetricList(Metric):
@@ -791,7 +840,8 @@ class MetricList(Metric):
                children: Sequence[Metric],
                where: Optional[Union[Text, Sequence[Text]]] = None,
                children_return_dataframe: bool = True,
-               name_tmpl=None):
+               name_tmpl=None,
+               static_name=False):
     for m in children:
       if not isinstance(m, Metric):
         raise ValueError('%s is not a Metric.' % m)
@@ -800,7 +850,8 @@ class MetricList(Metric):
       name = children[0].name
     else:
       name = tmpl.format(', '.join(m.name for m in children))
-    super(MetricList, self).__init__(name, children, where, name_tmpl)
+    super(MetricList, self).__init__(name, children, where, name_tmpl,
+                                     static_name=static_name)
     self.children_return_dataframe = children_return_dataframe
     self.names = [m.name for m in children]
 
@@ -948,7 +999,8 @@ class CompositeMetric(Metric):
                name_tmpl: Text,
                children: Sequence[Union[Metric, int, float]],
                rename_columns=None,
-               where: Optional[Text] = None):
+               where: Optional[Text] = None,
+               static_name: bool = False):
     if len(children) != 2:
       raise ValueError('CompositeMetric must take two children!')
     if not isinstance(children[0], (Metric, int, float)):
@@ -960,9 +1012,10 @@ class CompositeMetric(Metric):
     if not isinstance(children[0], Metric) and not isinstance(
         children[1], Metric):
       raise ValueError('MetricList must take at least one Metric!')
-
+    
     name = name_tmpl.format(*map(utils.get_name, children))
-    super(CompositeMetric, self).__init__(name, children, where, name_tmpl)
+    super(CompositeMetric, self).__init__(name, children, where, name_tmpl,
+                                          static_name)
     self.op = op
     self.columns = rename_columns
 
@@ -1176,6 +1229,7 @@ class SimpleMetric(Metric):
                name: Optional[Text] = None,
                name_tmpl=None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
+               static_name: bool = False,
                **kwargs):
     name = name or name_tmpl.format(var)
     self.var = var
@@ -1190,7 +1244,8 @@ class SimpleMetric(Metric):
         name_tmpl,
         precompute=precompute,
         postcompute=postcompute,
-        final_compute=final_compute)
+        final_compute=final_compute,
+        static_name=static_name)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
