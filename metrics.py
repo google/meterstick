@@ -808,47 +808,6 @@ class MetricList(Metric):
     self.names = [m.name for m in children]
     self.columns = rename_columns
 
-  def manipulate(self,
-                 res: pd.Series,
-                 melted: bool = False,
-                 return_dataframe: bool = True,
-                 apply_name_tmpl: Optional[Text] = None):
-    """Common adhoc data manipulation.
-
-    It does
-    1. Converts res to a DataFrame if asked.
-    2. Melts res to long format if asked.
-    3. Removes redundant index levels in res.
-    4. Apply self.name_tmpl to the output name or columns if asked.
-    5. Changes the name of the columns if used rename_columns
-
-    Args:
-      res: Returned by compute_through(). Usually a DataFrame, but could be a
-        pd.Series or a base type.
-      melted: Whether to transform the result to long format.
-      return_dataframe: Whether to convert the result to DataFrame if it's not.
-        If False, it could still return a DataFrame if the input is already a
-        DataFrame.
-      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
-        Distribution('country', Sum('X')).compute_on(df), we first compute
-        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
-        the name_tmpl 'Distribution of {}' to all column names.
-
-    Returns:
-      Final result returned to user. If split_by, it's a pd.Series or a
-      pd.DataFrame, otherwise it could be a base type.
-    """
-    res = super().manipulate(res, melted, return_dataframe, apply_name_tmpl)
-    if not isinstance(res, pd.DataFrame):
-      return res
-    if self.columns:
-      if melted:
-        res = utils.unmelt(res)
-      res.columns = self.columns
-      if melted:
-        res = res.melt()
-    return res
-
   def compute_slices(self, df, split_by=None):
     """Computes all Metrics with caching.
 
@@ -947,9 +906,11 @@ class MetricList(Metric):
     query = sql.Sql(columns, from_data)
 
     if self.columns:
-      columns = query.columns.difference(indexes)
-      if len(self.columns) != len(columns):
-        raise ValueError('The length of the renaming columns is wrong!')
+      columns = query.columns[len(indexes):]
+      if len(columns) != len(self.columns):
+        raise ValueError(
+            'rename_columns has length %s but there are %s columns in '
+            'the result!' % (len(self.columns), len(columns)))
       for col, rename in zip(columns, self.columns):
         col.set_alias(rename)  # Modify in-place.
 
@@ -959,8 +920,34 @@ class MetricList(Metric):
     if isinstance(children, list):
       children = self.to_dataframe(children)
     if self.columns:
+      if len(children.columns) != len(self.columns):
+        raise ValueError(
+            'rename_columns has length %s but there are %s columns in '
+            'the result!' % (len(self.columns), len(children.columns)))
       children.columns = self.columns
     return children
+
+  def manipulate(self,
+                 res: pd.Series,
+                 melted: bool = False,
+                 return_dataframe: bool = True,
+                 apply_name_tmpl: Optional[Text] = None):
+    """Rename columns if asked in addition to original manipulation."""
+    res = super(MetricList, self).manipulate(res, melted, return_dataframe,
+                                             apply_name_tmpl)
+    if not isinstance(res, pd.DataFrame):
+      return res
+    if self.columns:
+      if melted:
+        res = utils.unmelt(res)
+      if len(res.columns) != len(self.columns):
+        raise ValueError(
+            'rename_columns has length %s but there are %s columns in '
+            'the result!' % (len(self.columns), len(res.columns)))
+      res.columns = self.columns
+      if melted:
+        res = utils.melt(res)
+    return res
 
   def to_dataframe(self, res):
     res_all = pd.concat(res, axis=1, sort=False)
@@ -969,10 +956,10 @@ class MetricList(Metric):
     return res_all
 
   def rename_columns(self, rename_columns: List[Text]):
-    """Rename the columns of the metricList.
+    """Rename the columns of the MetricList.
 
-    Useful for instances where you have metrics in the metricList that are
-    composite metrics with undesirable names. Alters the the name of the
+    Useful for instances where you have Metrics in the MetricList that are
+    CompositeMetrics with undesirable names. Alters the the name of the
     children inplace.
 
     Args:
@@ -982,9 +969,6 @@ class MetricList(Metric):
     Returns:
       None
     """
-    if len(self.children) != len(rename_columns):
-      message = 'rename_columns has length {} and there are {} children.'
-      raise ValueError(message.format(len(self.children), len(rename_columns)))
     self.columns = rename_columns
 
   def __iter__(self):

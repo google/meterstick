@@ -1215,29 +1215,6 @@ class TestRatio(unittest.TestCase):
 
 class TestMetricList(unittest.TestCase):
 
-  def test_rename_columns_melted(self):
-    df = pd.DataFrame({'X': [0, 1, 2, 3]})
-    ms = [metrics.Sum('X'), metrics.Mean('X')]
-    m = metrics.MetricList(ms)
-    m.rename_columns(['A', 'B'])
-    output = m.compute_on(df, melted=True)
-    expected_frame = pd.DataFrame({'A': [6], 'B': [1.5]}).melt()
-    testing.assert_frame_equal(output, expected_frame)
-
-  def test_rename_columns(self):
-    df = pd.DataFrame({'X': [0, 1, 2, 3]})
-    ms = [metrics.Sum('X'), metrics.Mean('X')]
-    m = metrics.MetricList(ms)
-    m.rename_columns(['A', 'B'])
-    output = m.compute_on(df, return_dataframe=True)
-    expected_frame = pd.DataFrame({'A': [6], 'B': [1.5]})
-    testing.assert_frame_equal(output, expected_frame)
-
-  def test_rename_columns_incorrect_length(self):
-    with self.assertRaises(ValueError):
-      ms = [metrics.Sum('X'), metrics.Mean('X')]
-      metrics.MetricList(ms).rename_columns(['A'])
-
   def test_return_list(self):
     df = pd.DataFrame({'X': [0, 1, 2, 3]})
     ms = [metrics.Sum('X'), metrics.Mean('X')]
@@ -1315,6 +1292,32 @@ class TestMetricList(unittest.TestCase):
         index=['A', 'B'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
+
+  def test_rename_columns(self):
+    df = pd.DataFrame({'X': [0, 1, 2, 3]})
+    ms = [metrics.Sum('X'), metrics.Mean('X')]
+    m = metrics.MetricList(ms)
+    m.rename_columns(['A', 'B'])
+    output = m.compute_on(df)
+    expected = pd.DataFrame({'A': [6], 'B': [1.5]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_rename_columns_melted(self):
+    df = pd.DataFrame({'X': [0, 1, 2, 3]})
+    ms = [metrics.Sum('X'), metrics.Mean('X')]
+    m = metrics.MetricList(ms)
+    m.rename_columns(['A', 'B'])
+    output = m.compute_on(df, melted=True)
+    expected = pd.DataFrame({'Value': [6, 1.5]},
+                            index=pd.Index(['A', 'B'], name='Metric'))
+    testing.assert_frame_equal(output, expected)
+
+  def test_rename_columns_incorrect_length(self):
+    df = pd.DataFrame({'X': [0, 1, 2, 3]})
+    ms = metrics.MetricList([metrics.Sum('X'), metrics.Mean('X')])
+    ms.rename_columns(['A'])
+    with self.assertRaises(ValueError):
+      ms.compute_on(df)
 
   def test_interaction_with_compositemetric(self):
     df = pd.DataFrame({'X': [0, 1, 2, 3]})
