@@ -785,13 +785,16 @@ class MetricList(Metric):
       Metrics to DataFrames if they are not.
     name_tmpl: A string template to format the columns in the result DataFrame.
     And all other attributes inherited from Metric.
+    columns: The titles of the columns. If none will be automatically
+    generated.
   """
 
   def __init__(self,
                children: Sequence[Metric],
                where: Optional[Union[Text, Sequence[Text]]] = None,
                children_return_dataframe: bool = True,
-               name_tmpl=None):
+               name_tmpl=None,
+               rename_columns=None):
     for m in children:
       if not isinstance(m, Metric):
         raise ValueError('%s is not a Metric.' % m)
@@ -803,6 +806,48 @@ class MetricList(Metric):
     super(MetricList, self).__init__(name, children, where, name_tmpl)
     self.children_return_dataframe = children_return_dataframe
     self.names = [m.name for m in children]
+    self.columns = rename_columns
+
+  def manipulate(self,
+                 res: pd.Series,
+                 melted: bool = False,
+                 return_dataframe: bool = True,
+                 apply_name_tmpl: Optional[Text] = None):
+    """Common adhoc data manipulation.
+
+    It does
+    1. Converts res to a DataFrame if asked.
+    2. Melts res to long format if asked.
+    3. Removes redundant index levels in res.
+    4. Apply self.name_tmpl to the output name or columns if asked.
+    5. Changes the name of the columns if used rename_columns
+
+    Args:
+      res: Returned by compute_through(). Usually a DataFrame, but could be a
+        pd.Series or a base type.
+      melted: Whether to transform the result to long format.
+      return_dataframe: Whether to convert the result to DataFrame if it's not.
+        If False, it could still return a DataFrame if the input is already a
+        DataFrame.
+      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
+        Distribution('country', Sum('X')).compute_on(df), we first compute
+        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
+        the name_tmpl 'Distribution of {}' to all column names.
+
+    Returns:
+      Final result returned to user. If split_by, it's a pd.Series or a
+      pd.DataFrame, otherwise it could be a base type.
+    """
+    res = super().manipulate(res, melted, return_dataframe, apply_name_tmpl)
+    if not isinstance(res, pd.DataFrame):
+      return res
+    if self.columns:
+      if melted:
+        res = utils.unmelt(res)
+      res.columns = self.columns
+      if melted:
+        res = res.melt()
+    return res
 
   def compute_slices(self, df, split_by=None):
     """Computes all Metrics with caching.
@@ -898,11 +943,23 @@ class MetricList(Metric):
       else:
         join = 'FULL' if indexes else 'CROSS'
         from_data = sql.Join(from_data, alias, join=join, using=indexes)
-    return sql.Sql(columns, from_data), with_data
+
+    query = sql.Sql(columns, from_data)
+
+    if self.columns:
+      columns = query.columns.difference(indexes)
+      if len(self.columns) != len(columns):
+        raise ValueError('The length of the renaming columns is wrong!')
+      for col, rename in zip(columns, self.columns):
+        col.set_alias(rename)  # Modify in-place.
+
+    return query, with_data
 
   def compute_on_children(self, children, split_by):
     if isinstance(children, list):
-      return self.to_dataframe(children)
+      children = self.to_dataframe(children)
+    if self.columns:
+      children.columns = self.columns
     return children
 
   def to_dataframe(self, res):
@@ -910,6 +967,25 @@ class MetricList(Metric):
     # In PY2, if index order are different, the names might get dropped.
     res_all.index.names = res[0].index.names
     return res_all
+
+  def rename_columns(self, rename_columns: List[Text]):
+    """Rename the columns of the metricList.
+
+    Useful for instances where you have metrics in the metricList that are
+    composite metrics with undesirable names. Alters the the name of the
+    children inplace.
+
+    Args:
+      rename_columns: The names to rename the columns of the output dataframe
+        to.
+
+    Returns:
+      None
+    """
+    if len(self.children) != len(rename_columns):
+      message = 'rename_columns has length {} and there are {} children.'
+      raise ValueError(message.format(len(self.children), len(rename_columns)))
+    self.columns = rename_columns
 
   def __iter__(self):
     for m in self.children:
