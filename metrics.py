@@ -784,9 +784,8 @@ class MetricList(Metric):
     children_return_dataframe: Whether to convert the result to a children
       Metrics to DataFrames if they are not.
     name_tmpl: A string template to format the columns in the result DataFrame.
+    columns: The titles of the columns. If none will be automatically generated.
     And all other attributes inherited from Metric.
-    columns: The titles of the columns. If none will be automatically
-    generated.
   """
 
   def __init__(self,
