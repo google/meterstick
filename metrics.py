@@ -785,7 +785,7 @@ class MetricList(Metric):
       Metrics to DataFrames if they are not.
     name_tmpl: A string template to format the columns in the result DataFrame.
     And all other attributes inherited from Metric.
-    columns: The titles of the columns. If none will be automatically
+    rename_columns: The titles of the columns. If none will be automatically
     generated.
   """
 
