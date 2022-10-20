@@ -1386,8 +1386,9 @@ class MetricWithCI(Operation):
       res = utils.unmelt(res)
       self.add_base_to_res(res, base)
     if self.confidence:
-      extra_idx = list(metrics.get_extra_idx(self))
-      indexes = split_by + extra_idx if split_by else extra_idx
+      indexes = list(res.index.names)
+      if melted:
+        indexes = indexes[1:]
       if len(self.children) == 1 and isinstance(
           self.children[0], (PercentChange, AbsoluteChange)):
         change = self.children[0]

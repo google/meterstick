@@ -2164,6 +2164,23 @@ class JackknifeTests(unittest.TestCase):
     # Check monkey patched methods are recovered
     testing.assert_frame_equal(metric.compute_on(df), expected)
 
+  def test_unequal_leaf_index_broacasting(self):
+    df = pd.DataFrame({
+        'X': range(6),
+        'grp': ['A'] * 3 + ['B'] * 3,
+        'cookie': [1, 2, 3, 1, 2, 3]
+    })
+    s = metrics.Sum('X')
+    pct = operations.PercentChange('grp', 'A', s)
+    m = operations.Jackknife('cookie', s * pct, 0.9)
+    output = m.compute_on(df, melted=True)
+    output_pt_est = output['Value']
+    expected = pct.compute_on(df, melted=True).iloc[:, 0] * df.X.sum()
+    expected.index = expected.index.set_levels(
+        ['sum(X) * sum(X) Percent Change'], 0)
+    testing.assert_series_equal(expected, output_pt_est)
+    output.display()
+
   def test_integration(self):
     df = pd.DataFrame({
         'X': np.arange(0, 3, 0.5),
