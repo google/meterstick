@@ -307,9 +307,8 @@ class Metric(object):
     if not split_by:
       yield df, None
     else:
-      keys, indices = zip(*df.groupby(split_by).groups.items())
-      for k, idx in zip(keys, indices):
-        yield df.loc[idx.unique()], k
+      for k, idx in df.groupby(split_by).indices.items():
+        yield df.iloc[idx], k
 
   def compute_through(self, df, split_by: Optional[List[Text]] = None):
     """Precomputes df -> split df and apply compute() -> postcompute."""

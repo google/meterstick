@@ -96,6 +96,14 @@ class SimpleMetricTest(unittest.TestCase):
     expected = self.df.query('grp == "A"')['X'].mean()
     self.assertEqual(output, expected)
 
+  def test_split_data(self):
+    df = pd.DataFrame({'X': [1, 2], 'grp': ['a', 'b']}, index=[1, 1])
+    output = sorted(metrics.Metric.split_data(df, 'grp'), key=lambda x: x[1])
+    testing.assert_frame_equal(output[0][0], df[:1])
+    self.assertEqual(output[0][1], 'a')
+    testing.assert_frame_equal(output[1][0], df[1:])
+    self.assertEqual(output[1][1], 'b')
+
   def test_single_list_where(self):
     metric = metrics.Mean('X', where=['grp == "A"', 'Y < 2'])
     output = metric.compute_on(self.df, return_dataframe=False)
