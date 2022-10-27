@@ -2850,6 +2850,7 @@ def modify_descendants_for_jackknife_fast_with_adjustment(
 
   if isinstance(metric, Operation):
     metric.extra_index = sql.Columns(metric.extra_index).aliases
+    metric.extra_split_by = sql.Columns(metric.extra_split_by).aliases
     if isinstance(metric, MH):
       metric.stratified_by = sql.Column(metric.stratified_by).alias
 
