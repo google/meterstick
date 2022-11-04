@@ -29,6 +29,236 @@ import pandas as pd
 from sklearn import linear_model
 
 
+def get_data(m, table, split_by, execute, normalize=False):
+  """Retrieves the data that the model will be fit on.
+
+  We compute a Model by first computing its children, and then fitting
+  the model on it. This function retrieves the necessary variables to compute
+  the children.
+
+  Args:
+    m: A Model instance.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    execute: A function that can executes a SQL query and returns a DataFrame.
+    normalize: If the Model normalizes x.
+
+  Returns:
+    table: A string representing the table name which we can query from. The
+      table has columns `split_by`, y, x1, x2, .... If normalize is True, x
+      columns are centered then normalized.
+    with_data: The WITH clause that holds all necessary subqueries so we can
+      query the `table`.
+    xs: A list of the column names of x1, x2, ...
+    y: The column name of the y column.
+    avgs: Nonempty only when normalize is True. A pd.DataFrame which holds the
+      average of all x and y columns.
+    norms: Nonempty only when normalize is True. A pd.DataFrame which holds the
+      l2-norm values of all centered-x columns.
+  """
+  data = m.children[0].to_sql(table, split_by + m.group_by)
+  with_data = data.with_data
+  data.with_data = None
+  table, _ = with_data.merge(sql.Datasource(data, 'DataToFit'))
+  y = data.columns[-m.k - 1].alias
+  xs = data.columns.aliases[-m.k:]
+  if not normalize:
+    return table, with_data, xs, y, pd.DataFrame(), pd.DataFrame()
+
+  split_by = sql.Columns(split_by).aliases
+  avgs = [sql.Column(f'AVG({x})', alias=x) for x in xs]
+  avgs.append(sql.Column(f'AVG({y})', alias=y))
+  avgs = execute(
+      str(
+          sql.Sql(
+              sql.Columns(split_by).add(avgs),
+              table,
+              groupby=split_by,
+              with_data=with_data)))
+  table_with_centered_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
+  for x in xs:
+    centered = sql.Column(x) - sql.Column(x, 'AVG({})', partition=split_by)
+    centered.alias = x
+    table_with_centered_x.add(centered)
+  table, rename = with_data.merge(
+      sql.Datasource(sql.Sql(table_with_centered_x, table), 'DataCentered'))
+
+  norms = [
+      sql.Column('SQRT(SUM(POWER(%s, 2)))' % rename.get(x, x), alias=x)
+      for x in xs
+  ]
+  norms = sql.Sql(
+      sql.Columns(split_by).add(norms),
+      table,
+      groupby=split_by,
+      with_data=with_data)
+  norms = execute(str(norms))
+  table_with_normalized_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
+  for x in xs:
+    normalized = sql.Column(x) / sql.Column(
+        x, 'SUM(POWER({}, 2))', partition=split_by)**0.5
+    normalized.alias = x
+    table_with_normalized_x.add(normalized)
+  table = with_data.add(
+      sql.Datasource(sql.Sql(table_with_normalized_x, table), 'DataNormalized'))
+  return table, with_data, xs, y, avgs, norms
+
+
+def apply_algorithm_to_sufficient_stats_elements(sufficient_stats_elements,
+                                                 split_by, algorithm, *args,
+                                                 **kwargs):
+  """Applies algorithm to sufficient stats to get the coefficients of Models.
+
+  Args:
+    sufficient_stats_elements: Contains the elements to construct sufficient
+      stats. It's one of the return of get_sufficient_stats_elements().
+    split_by: The columns that we use to split the data.
+    algorithm: A function that can take the sufficient_stats_elements of a slice
+      of data and computes the coefficients of the Model.
+    *args: Additional args passed to the algorithm.
+    **kwargs: Additional kwargs passed to the algorithm.
+
+  Returns:
+    The coefficients of the Model.
+  """
+  fn = lambda row: algorithm(row, *args, **kwargs)
+  if split_by:
+    # Special characters in split_by got escaped during SQL execution.
+    sufficient_stats_elements.columns = split_by + list(
+        sufficient_stats_elements.columns)[len(split_by):]
+    return sufficient_stats_elements.groupby(split_by).apply(fn)
+  return fn(sufficient_stats_elements)
+
+
+def get_sufficient_stats_elements(m,
+                                  table,
+                                  split_by,
+                                  execute,
+                                  fit_intercept=None,
+                                  normalize=None,
+                                  include_n_obs=False):
+  """Computes the elements of X'X and X'y.
+
+  Args:
+    m: A Model instance.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    execute: A function that can executes a SQL query and returns a DataFrame.
+    fit_intercept: If to include intercept in the model.
+    normalize: If to normalize the X. Note that only has effect when
+      m.fit_intercept is True, which is consistent to sklearn.
+    include_n_obs: If to include the number of observations in the return.
+
+  Returns:
+    xs: A list of the column names of x1, x2, ...
+    sufficient_stats_elements: A DataFrame holding all unique elements of
+      sufficient stats. Each row corresponds to one slice in split_by. The
+      columns are
+        split_by,
+        avg(x0), avg(x1), ...,  # if fit_intercept
+        avg(x0 * x0), avg(x0 * x1), avg(x0 * x2), avg(x1 * x2), ...,
+        avg(y),  # if fit_intercept
+        avg(x0 * y), avg(x1 * y), ...,
+        n_observation  # if include_n_obs.
+      The column are named as
+        split_by, x0, x1,..., x0x0, x0x1,..., y, x0y, x1y,..., n_obs.
+    avg_x: Nonempty only when normalize. A pd.DataFrame which holds the
+      avg(x0), avg(x1), ... of the UNNORMALIZED x.
+      Don't confuse it with the ones in the sufficient_stats_elements, which are
+      the average of normalized x, which are just 0s.
+    norms: Nonempty only when normalize. A pd.DataFrame which holds the l2-norm
+      values of all centered-x columns.
+  """
+  fit_intercept = m.fit_intercept if fit_intercept is None else fit_intercept
+  if normalize is None:
+    normalize = m.normalize and m.fit_intercept
+  table, with_data, xs, y, avg_x, norms = get_data(m, table, split_by, execute,
+                                                   normalize)
+  x_t_x = []
+  x_t_y = []
+  if m.fit_intercept:
+    if not normalize:
+      x_t_x = [sql.Column(f'AVG({x})', alias=f'x{i}') for i, x in enumerate(xs)]
+    x_t_y = [sql.Column(f'AVG({y})', alias='y')]
+  for i, x1 in enumerate(xs):
+    for j, x2 in enumerate(xs[i:]):
+      x_t_x.append(sql.Column(f'AVG({x1} * {x2})', alias=f'x{i}x{i + j}'))
+  x_t_y += [
+      sql.Column(f'AVG({x} * {y})', alias=f'x{i}y') for i, x in enumerate(xs)
+  ]
+  cols = sql.Columns(x_t_x + x_t_y)
+  if include_n_obs:
+    cols.add(sql.Column('COUNT(*)', alias='n_obs'))
+  sufficient_stats_elements = sql.Sql(
+      cols, table, groupby=sql.Columns(split_by).aliases, with_data=with_data)
+  sufficient_stats_elements = execute(str(sufficient_stats_elements))
+  if normalize:
+    col_names = list(sufficient_stats_elements.columns)
+    avg_x_names = [f'x{i}' for i in range(len(xs))]
+    sufficient_stats_elements[avg_x_names] = 0
+    sufficient_stats_elements = sufficient_stats_elements[
+        col_names[:len(split_by)] + avg_x_names + col_names[len(split_by):]]
+  return xs, sufficient_stats_elements, avg_x, norms
+
+
+def construct_matrix_from_elements(sufficient_stats_elements, xs,
+                                   fit_intercept):
+  """Constructs matries X'X and X'y from the elements.
+
+  Args:
+    sufficient_stats_elements: A DataFrame holding all unique elements of
+      sufficient stats. See the doc of get_sufficient_stats_elements() for its
+      shape and content.
+    xs: A list of the column names of x1, x2, ...
+    fit_intercept: If the model includes an intercept.
+
+  Returns:
+    x_t_x: X'X / n_observations in a numpy array.
+    x_t_y: X'y / n_observations in a numpy array.
+  """
+  if isinstance(sufficient_stats_elements, pd.DataFrame):
+    if len(sufficient_stats_elements) > 1:
+      raise ValueError('Only support 1D input!')
+    sufficient_stats_elements = sufficient_stats_elements.iloc[0]
+  elif not isinstance(sufficient_stats_elements, pd.Series):
+    raise ValueError('The input must be a panda Series!')
+  n = len(xs)
+  x_t_x_cols = []
+  x_t_y_cols = []
+  if fit_intercept:
+    x_t_x_cols = [f'x{i}' for i in range(n)]
+    x_t_y_cols = ['y']
+  for i in range(n):
+    for j in range(i, n):
+      x_t_x_cols.append(f'x{i}x{j}')
+  x_t_y_cols += [f'x{i}y' for i in range(n)]
+  x_t_x_elements = list(sufficient_stats_elements[x_t_x_cols])
+  if fit_intercept:
+    x_t_x_elements = [1] + x_t_x_elements
+  x_t_y = sufficient_stats_elements[x_t_y_cols]
+  x_t_x = symmetrize_triangular(x_t_x_elements)
+  return x_t_x, x_t_y
+
+
+def symmetrize_triangular(tril_elements):
+  """Converts a list of upper triangular matrix to a symmetric matrix.
+
+  For example, [1, 2, 3] -> [[1, 2], [2, 3]].
+
+  Args:
+    tril_elements: A list that can form a triangular matrix.
+
+  Returns:
+    A symmetric matrix whose upper triangular part is formed from tril_elements.
+  """
+  n = int(np.floor((2 * len(tril_elements))**0.5))
+  if n * (n + 1) / 2 != len(tril_elements):
+    raise ValueError('The elements cannot form a symmetric matrix!')
+  sym = np.zeros([n, n])
+  sym[np.triu_indices(n)] = tril_elements
+  return sym + sym.T - np.diag(sym.diagonal())
+
+
 class Model(operations.Operation):
   """Base class for model fitting."""
 
@@ -111,13 +341,13 @@ class Model(operations.Operation):
 
   def compute_through_sql(self, table, split_by, execute, mode):
     if mode not in (None, 'sql', 'mixed', 'magic'):
-      raise ValueError('Mode %s is not supported!' % mode)
+      raise ValueError(f'Mode {mode} is not supported!')
     if mode == 'sql':
-      raise ValueError('%s is not computable in pure SQL!' % self.name)
+      raise ValueError(f'{self.name} is not computable in pure SQL!')
     if mode == 'magic' and not self.all_computable_in_pure_sql(False):
       raise ValueError(
-          'The "magic" mode of %s requires all descendants to be computable in SQL!'
-          % self.name)
+          f'The "magic" mode of {self.name} requires all descendants to be computable in SQL!'
+      )
 
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
@@ -156,137 +386,10 @@ class LinearRegression(Model):
     super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', where,
                                            name, fit_intercept, normalize)
 
-  def compute_on_sql_magic_mode(self, table, split_by, execute=None):
-    return compute_linear_or_ridge_coefficiens(self, table, split_by, execute)
-
-
-def compute_linear_or_ridge_coefficiens(m, table, split_by, execute=None):
-  """Computes X'X, X'y then the coefficients for linear or ridge regressions."""
-  data = m.children[0].to_sql(table, split_by + m.group_by)
-  with_data = data.with_data
-  data.with_data = None
-  table, _ = with_data.merge(sql.Datasource(data, 'DataToFit'))
-  y = data.columns[-m.k - 1].alias
-  xs = data.columns.aliases[-m.k:]
-  x_t_x = []
-  x_t_y = []
-  if m.fit_intercept:
-    x_t_x = [
-        sql.Column('AVG(%s)' % x, alias='x%s' % i) for i, x in enumerate(xs)
-    ]
-    x_t_y = [sql.Column('AVG(%s)' % y, alias='y')]
-  for i, x1 in enumerate(xs):
-    for j, x2 in enumerate(xs[i:]):
-      x_t_x.append(
-          sql.Column('AVG(%s * %s)' % (x1, x2), alias='x%sx%s' % (i, i + j)))
-  x_t_y += [
-      sql.Column('AVG(%s * %s)' % (x, y), alias='x%sy' % i)
-      for i, x in enumerate(xs)
-  ]
-  cols = sql.Columns(x_t_x + x_t_y)
-  if isinstance(m, Ridge):
-    cols.add(sql.Column('COUNT(*)', alias='n_obs'))
-  sufficient_stats = sql.Sql(
-      cols, table, groupby=sql.Columns(split_by).aliases, with_data=with_data)
-  sufficient_stats = execute(str(sufficient_stats))
-  fn = lambda row: compute_coef_from_sufficient_stats(row, xs, m)
-  if split_by:
-    sufficient_stats.columns = split_by + list(
-        sufficient_stats.columns)[len(split_by):]
-    return sufficient_stats.groupby(split_by).apply(fn)
-  return fn(sufficient_stats)
-
-
-def compute_coef_from_sufficient_stats(sufficient_stats, xs, m):
-  """Computes coefficiens of linear or ridge regression from X'X and X'y."""
-  if isinstance(sufficient_stats, pd.DataFrame):
-    sufficient_stats = sufficient_stats.iloc[0]
-  fit_intercept = m.fit_intercept
-  if isinstance(m, Ridge) and fit_intercept and m.normalize:
-    return compute_coef_for_normalize_ridge(sufficient_stats, xs, m)
-  n = len(xs)
-  x_t_x_cols = []
-  x_t_y_cols = []
-  if fit_intercept:
-    x_t_x_cols = ['x%s' % i for i in range(n)]
-    x_t_y_cols = ['y']
-  for i in range(n):
-    for j in range(i, n):
-      x_t_x_cols += ['x%sx%s' % (i, j)]
-  x_t_y_cols += ['x%sy' % i for i in range(n)]
-  x_t_x_elements = list(sufficient_stats[x_t_x_cols])
-  if fit_intercept:
-    x_t_x_elements = [1] + x_t_x_elements
-  x_t_y = sufficient_stats[x_t_y_cols]
-  if fit_intercept:
-    n += 1
-  x_t_x = symmetrize_triangular(x_t_x_elements)
-  if isinstance(m, Ridge):
-    n_obs = sufficient_stats['n_obs']
-    penalty = np.identity(n)
-    if fit_intercept:
-      penalty[0, 0] = 0
-    # We use AVG() to compute x_t_x so the penalty needs to be scaled.
-    x_t_x += m.alpha / n_obs * penalty
-  cond = np.linalg.cond(x_t_x)
-  if cond > 20:
-    print(
-        "WARNING: The condition number of X'X is %i, which might be too large."
-        ' The model coefficients might be inaccurate.' % cond)
-  coef = np.linalg.solve(x_t_x, x_t_y)
-  xs = [n.replace('macro_', '$').strip('`') for n in xs]
-  if fit_intercept:
-    xs = ['intercept'] + xs
-  return pd.DataFrame([coef], columns=xs)
-
-
-def symmetrize_triangular(tril_elements):
-  """Converts a list of upper triangular matrix to a symmetric matrix.
-
-  For example, [1, 2, 3] -> [[1, 2], [2, 3]].
-
-  Args:
-    tril_elements: A list that can form a triangular matrix.
-
-  Returns:
-    A symmetric matrix whose upper triangular part is formed from tril_elements.
-  """
-  n = int(np.ceil(len(tril_elements)**0.5))
-  if n * (n + 1) / 2 != len(tril_elements):
-    raise ValueError('The elements cannot form a symmetric matrix!')
-  sym = np.zeros([n, n])
-  sym[np.triu_indices(n)] = tril_elements
-  return sym + sym.T - np.diag(sym.diagonal())
-
-
-def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
-  """Computes the coefficient of Ridge with normalization and intercept."""
-  n = len(xs)
-  # Compute the elements of X_scaled^T * X_scaled. See
-  # https://colab.research.google.com/drive/1wOWgdNzKGT_xl4A7Mrs_GbRKiVQACFfy#scrollTo=HrMCbB5SxS0A
-  x_t_x_elements = []
-  x_t_y = []
-  for i in range(n):
-    x_t_y.append(sufficient_stats['x%sy' % i] -
-                 sufficient_stats['x%s' % i] * sufficient_stats['y'])
-    for j in range(i, n):
-      x_t_x_elements.append(sufficient_stats['x%sx%s' % (i, j)] -
-                            sufficient_stats['x%s' % i] *
-                            sufficient_stats['x%s' % j])
-  x_t_x = symmetrize_triangular(x_t_x_elements)
-  x_t_x += m.alpha * np.diag(x_t_x.diagonal())
-  cond = np.linalg.cond(x_t_x)
-  if cond > 20:
-    print(
-        "WARNING: The condition number of X'X is %i, which might be too large."
-        ' The model coefficients might be inaccurate.' % cond)
-  coef = np.linalg.solve(x_t_x, x_t_y)
-  xs = [n.replace('macro_', '$').strip('`') for n in xs]
-  intercept = sufficient_stats.y - coef.dot(
-      [sufficient_stats['x%s' % i] for i in range(n)])
-  coef = [intercept] + list(coef)
-  xs = ['intercept'] + xs
-  return pd.DataFrame([coef], columns=xs)
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
+    return Ridge(self.y, self.x, self.group_by, 0, self.fit_intercept,
+                 self.normalize, self.where,
+                 self.name).compute_on_sql_magic_mode(table, split_by, execute)
 
 
 class Ridge(Model):
@@ -320,8 +423,74 @@ class Ridge(Model):
                                 fit_intercept, normalize)
     self.alpha = alpha
 
-  def compute_on_sql_magic_mode(self, table, split_by, execute=None):
-    return compute_linear_or_ridge_coefficiens(self, table, split_by, execute)
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
+    # Never normalize for the sufficient_stats. Normalization is handled in
+    # compute_ridge_coefs() instead.
+    xs, sufficient_stats, _, _ = get_sufficient_stats_elements(
+        self, table, split_by, execute, normalize=False, include_n_obs=True)
+    return apply_algorithm_to_sufficient_stats_elements(sufficient_stats,
+                                                        split_by,
+                                                        compute_ridge_coefs, xs,
+                                                        self)
+
+
+def compute_ridge_coefs(sufficient_stats, xs, m):
+  """Computes coefficients of linear/ridge regression from sufficient_stats."""
+  if isinstance(sufficient_stats, pd.DataFrame):
+    sufficient_stats = sufficient_stats.iloc[0]
+  fit_intercept = m.fit_intercept
+  if fit_intercept and m.normalize:
+    return compute_coef_for_normalize_ridge(sufficient_stats, xs, m)
+  x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats, xs,
+                                                fit_intercept)
+  if isinstance(m, Ridge):
+    n_obs = sufficient_stats['n_obs']
+    penalty = np.identity(len(x_t_y))
+    if fit_intercept:
+      penalty[0, 0] = 0
+    # We use AVG() to compute x_t_x so the penalty needs to be scaled.
+    x_t_x += m.alpha / n_obs * penalty
+  cond = np.linalg.cond(x_t_x)
+  if cond > 20:
+    print(
+        "WARNING: The condition number of X'X is %i, which might be too large."
+        ' The model coefficients might be inaccurate.' % cond)
+  coef = np.linalg.solve(x_t_x, x_t_y)
+  xs = [n.replace('macro_', '$').strip('`') for n in xs]
+  if fit_intercept:
+    xs = ['intercept'] + xs
+  return pd.DataFrame([coef], columns=xs)
+
+
+def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
+  """Computes the coefficient of OLS or Ridge with normalization."""
+  n = len(xs)
+  # Compute the elements of X_scaled^T * X_scaled. See
+  # https://colab.research.google.com/drive/1wOWgdNzKGT_xl4A7Mrs_GbRKiVQACFfy#scrollTo=HrMCbB5SxS0A
+  x_t_x_elements = []
+  x_t_y = []
+  for i in range(n):
+    x_t_y.append(sufficient_stats[f'x{i}y'] -
+                 sufficient_stats[f'x{i}'] * sufficient_stats['y'])
+    for j in range(i, n):
+      x_t_x_elements.append(sufficient_stats[f'x{i}x{j}'] -
+                            sufficient_stats[f'x{i}'] *
+                            sufficient_stats[f'x{j}'])
+  x_t_x = symmetrize_triangular(x_t_x_elements)
+  if isinstance(m, Ridge):
+    x_t_x += m.alpha * np.diag(x_t_x.diagonal())
+  cond = np.linalg.cond(x_t_x)
+  if cond > 20:
+    print(
+        "WARNING: The condition number of X'X is %i, which might be too large."
+        ' The model coefficients might be inaccurate.' % cond)
+  coef = np.linalg.solve(x_t_x, x_t_y)
+  xs = [n.replace('macro_', '$').strip('`') for n in xs]
+  intercept = sufficient_stats.y - coef.dot(
+      [sufficient_stats[f'x{i}'] for i in range(n)])
+  coef = [intercept] + list(coef)
+  xs = ['intercept'] + xs
+  return pd.DataFrame([coef], columns=xs)
 
 
 class Lasso(Model):
@@ -473,11 +642,11 @@ class LogisticRegression(Model):
         names = ['intercept'] + names
       res = pd.DataFrame(
           coef.reshape(1, -1),
-          columns=('%s for class %s' % (n, c)
+          columns=(f'{n} for class {c}'
                    for c, n in itertools.product(self.model.classes_, names)))
       return res
 
-  def compute_on_sql_magic_mode(self, table, split_by, execute=None):
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
     """Gets the coefficients by minimizing the cost function.
 
     We use iteratively reweighted least squares algorithm to solve the model.
@@ -498,8 +667,8 @@ class LogisticRegression(Model):
       raise ValueError("Magic mode doesn't support multi_class!")
     if self.penalty == 'elasticnet' and (not self.l1_ratio or
                                          not 0 <= self.l1_ratio <= 1):
-      raise ValueError('l1_ratio must be between 0 and 1; got (l1_ratio="%s")' %
-                       self.l1_ratio)
+      raise ValueError(
+          f'l1_ratio must be between 0 and 1; got (l1_ratio="{self.l1_ratio}")')
     if self.intercept_scaling != 1:
       raise ValueError('intercept_scaling is not supported in magic mode!')
     if self.penalty in ('l1', 'elasticnet'):
@@ -510,15 +679,10 @@ class LogisticRegression(Model):
     n_y = y.iloc[:, 0].nunique()
     if n_y != 2:
       raise ValueError(
-          'Magic mode only support two classes but got %s distinct y values!' %
-          n_y)
+          f'Magic mode only support two classes but got {n_y} distinct y values!'
+      )
 
-    data = self.children[0].to_sql(table, split_by + self.group_by)
-    with_data = data.with_data
-    data.with_data = None
-    table, _ = with_data.merge(sql.Datasource(data, 'DataToFit'))
-    y = data.columns[-self.k - 1].alias
-    xs = data.columns.aliases[-self.k:]
+    table, with_data, xs, y, _, _ = get_data(self, table, split_by, execute)
     if self.fit_intercept:
       xs.append('1')
     conds = []
@@ -565,17 +729,17 @@ class LogisticRegression(Model):
         for cond, slice_coef, done in zip(conds, coef, converged):
           if not done:
             condition = [
-                '%s = "%s"' % (c, v) if isinstance(v, str) else '%s = %s' %
-                (c, v) for c, v in zip(split_cols, cond)
+                f'{c} = "{v}"' if isinstance(v, str) else f'{c} = {v}'
+                for c, v in zip(split_cols, cond)
             ]
             condition = ' AND '.join(condition)
             j, h = get_grads_and_hess_query(slice_coef, condition)
             grads += j
             hessian += h
       for i, c in enumerate(grads):
-        c.set_alias('grads_%s' % i)
+        c.set_alias(f'grads_{i}')
       for i, c in enumerate(hessian):
-        c.set_alias('hess_%s' % i)
+        c.set_alias(f'hess_{i}')
       grads_and_hess = sql.Sql(sql.Columns(grads + hessian), table)
       grads_and_hess.with_data = with_data
       grads_and_hess = execute(str(grads_and_hess)).iloc[0]
@@ -619,48 +783,47 @@ class LogisticRegression(Model):
       """
       # A numerically stable implemntation, adapted from
       # http://fa.bianp.net/blog/2019/evaluate_logistic.
-      z = ' + '.join('%s * %s' % (coef[i], xs[i]) for i in range(len(xs)))
+      z = ' + '.join(f'{coef[i]} * {xs[i]}' for i in range(len(xs)))
       grads = [
           sql.Column(
-              '%s * %s' % (x, sig_minus_b(z, y)), 'AVG({})', filters=condition)
+              f'{x} * {sig_minus_b(z, y)}', 'AVG({})', filters=condition)
           for x in xs
       ]
       sig_z = """IF({z} < 0,
           EXP({z}) / (1 + EXP({z})),
           1 / (1 + EXP(-({z}))))""".format(z=z)
-      w = '-%s * %s' % (sig_z, sig_minus_b(z, 1))
+      w = f'-{sig_z} * {sig_minus_b(z, 1)}'
       hess = []
       for i, x1 in enumerate(xs):
         for x2 in xs[i:]:
           hess.append(
-              sql.Column(
-                  '%s * %s * %s' % (x1, x2, w), 'AVG({})', filters=condition))
+              sql.Column(f'{x1} * {x2} * {w}', 'AVG({})', filters=condition))
       hess = np.array(hess)
       # See here for the behavior of differnt penalties.
       # https://colab.research.google.com/drive/1Srfs4weM4LO9vt1HbOkGrD4kVbG8cso8
-      n = 'COUNTIF(%s)' % condition if condition else 'COUNT(*)'
+      n = f'COUNTIF({condition})' if condition else 'COUNT(*)'
       if self.penalty == 'l1':
         for i in range(self.k):
-          grads[i] += sql.Column('SIGN(%s) / %s' % (coef[i], n)) / self.c
+          grads[i] += sql.Column(f'SIGN({coef[i]}) / {n}') / self.c
       elif self.penalty == 'l2':
         for i in range(self.k):
-          grads[i] += sql.Column('%s / %s' % (coef[i], n)) / self.c
+          grads[i] += sql.Column(f'{coef[i]} / {n}') / self.c
         hess_diag_idx = np.arange(len(xs), len(xs) - self.k + 1, -1).cumsum()
         hess_diag_idx = np.concatenate([[0], hess_diag_idx])
-        hess[hess_diag_idx] += sql.Column('1 / (%s * %s)' % (n, self.c))
+        hess[hess_diag_idx] += sql.Column(f'1 / ({n} * {self.c})')
       elif self.penalty == 'elasticnet':
         l1 = self.l1_ratio / self.c
         l2 = (1 - self.l1_ratio) / self.c
         for i in range(self.k):
-          grads[i] += sql.Column('(%s * SIGN(%s) + %s * %s) / %s' %
-                                 (l1, coef[i], l2, coef[i], n))
+          grads[i] += sql.Column(
+              f'({l1} * SIGN({coef[i]}) + {l2} * {coef[i]}) / {n}')
         hess_diag_idx = np.arange(len(xs), len(xs) - self.k + 1, -1).cumsum()
         hess_diag_idx = np.concatenate([[0], hess_diag_idx])
-        hess[hess_diag_idx] += sql.Column('%s / %s' % (l2, n))
+        hess[hess_diag_idx] += sql.Column(f'{l2} / {n}')
       elif self.penalty != 'none':
-        raise ValueError('LogisticRegression supports only penalties in '
-                         "['l1', 'l2', 'elasticnet', 'none'], got %s." %
-                         self.penalty)
+        raise ValueError(
+            f'LogisticRegression supports only penalties in '
+            "['l1', 'l2', 'elasticnet', 'none'], got {self.penalty}.")
       return grads, list(hess)
 
     res = newtons_method(
@@ -691,8 +854,8 @@ class LogisticRegression(Model):
 def sig_minus_b(z, b):
   """Computes sigmoid(z) - b in a numerically stable way in SQL."""
   # Adapted from http://fa.bianp.net/blog/2019/evaluate_logistic
-  exp_z = 'EXP(%s)' % z
-  exp_nz = 'EXP(-(%s))' % z
+  exp_z = f'EXP({z})'
+  exp_nz = f'EXP(-({z}))'
   return ('IF({z} < 0, ((1 - {b}) * {exp_z} - {b}) / (1 + {exp_z}), ((1 - {b}) '
           '- {b} * {exp_nz}) / (1 + {exp_nz}))').format(
               z=z, b=b, exp_z=exp_z, exp_nz=exp_nz)
@@ -702,7 +865,7 @@ def newtons_method(coef, grads, hess, tol, max_iter, conds, *args):
   """Uses Newton's method to optimize coef on n slices at the same time."""
   n_slice = len(coef)
   converged = np.array([False] * n_slice)
-  for _ in range(max_iter):
+  for _ in range(int(max_iter)):
     h = hess(coef, converged, *args)
     j = grads(coef, converged, *args)
     for i in range(n_slice):
