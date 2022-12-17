@@ -237,7 +237,7 @@ def construct_matrix_from_elements(sufficient_stats_elements, xs,
     x_t_x_elements = [1] + x_t_x_elements
   x_t_y = sufficient_stats_elements[x_t_y_cols]
   x_t_x = symmetrize_triangular(x_t_x_elements)
-  return x_t_x, x_t_y
+  return x_t_x, np.array(x_t_y)
 
 
 def symmetrize_triangular(tril_elements):
@@ -527,6 +527,25 @@ class Lasso(Model):
         selection=selection)
     super(Lasso, self).__init__(y, x, group_by, model, 'Lasso', where, name,
                                 fit_intercept, normalize)
+    self.alpha = alpha
+    self.tol = tol
+    self.max_iter = max_iter
+    self.random_state = random_state
+
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
+    return ElasticNet(
+        self.y,
+        self.x,
+        self.group_by,
+        self.alpha,
+        1,
+        self.fit_intercept,
+        self.normalize,
+        self.where,
+        self.name,
+        tol=self.tol,
+        max_iter=self.max_iter).compute_on_sql_magic_mode(
+            table, split_by, execute)
 
 
 class ElasticNet(Model):
@@ -569,6 +588,172 @@ class ElasticNet(Model):
     self.tol = tol
     self.max_iter = max_iter
     self.l1_ratio = l1_ratio
+    self.random_state = random_state
+
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
+    if (not self.l1_ratio or not 0 <= self.l1_ratio <= 1):
+      raise ValueError('l1_ratio must be between 0 and 1; got (l1_ratio="%s")' %
+                       self.l1_ratio)
+    l1 = self.l1_ratio * self.alpha
+    l2 = (1 - self.l1_ratio) * self.alpha
+    xs, sufficient_stats_elements, avgs, norms = get_sufficient_stats_elements(
+        self, table, split_by, execute)
+    np.random.seed(
+        self.random_state if isinstance(self.random_state, int) else 42)
+    coef = apply_algorithm_to_sufficient_stats_elements(
+        sufficient_stats_elements, split_by, compute_coef_for_elastic_net, xs,
+        l1, l2, self.fit_intercept, self.tol, self.max_iter)
+    if self.fit_intercept and self.normalize:
+      return compute_normalized_coef(coef, norms, avgs, split_by)
+    return coef
+
+
+def compute_coef_for_elastic_net(sufficient_stats_elements, xs, l1, l2,
+                                 fit_intercept, tol, max_iter):
+  """Computes the coefficients for ElasticNet. Lasso is just a special case."""
+  if fit_intercept:
+    sufficient_stats_elements, avg_xs, avg_y = center_x(
+        sufficient_stats_elements, len(xs))
+  x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats_elements, xs,
+                                                fit_intercept)
+  init_guess = np.random.random(*x_t_y.shape)
+  coef = fista_for_elastic_net(init_guess, l1, l2, x_t_x, x_t_y, tol, max_iter,
+                               fit_intercept)
+  xs = [n.replace('macro_', '$').strip('`') for n in xs]
+  if fit_intercept:
+    # Directly compute the intercept from data and coefficients. It makes the
+    # intercept more consistent to other coefficients.
+    coef[0] = (avg_y - avg_xs @ coef[1:]).values[0]
+    xs = ['intercept'] + xs
+  return pd.DataFrame([list(coef)], columns=xs)
+
+
+def center_x(sufficient_stats_elements, n):
+  """Compute the sufficient_stats_elements of centered x for better convergence.
+
+  sufficient_stats_elements has four types of elements. The ones under 'x{i}'
+  are the average values of the i-th feature. The 'y' column is the average
+  of the dependent variable. The 'x{i}x{j}' are the normalized elements of
+  matrix X'X, namely, 'x{i}x{j}' has value of AVG(xi * xj). Similarly, 'x{i}y'
+  contains the normalized elements of X'y.
+  We want to center X and y for better numerical stability and convergence. As
+  a result, we need to update 'x{i}x{j}'. The new value would be
+  AVG((xi - xi_bar) * (xj - xj_bar)) = AVG(xi * xj) - xi_bar * xj_bar. 'x{i}y'
+  can be updated similarly.
+
+  Args:
+    sufficient_stats_elements: The sufficient_stats_elements computed from
+      original x.
+    n: The number of x.
+
+  Returns:
+    The sufficient_stats_elements computed from centered x and y.
+    Average of original x.
+    Average of original y.
+  """
+  sufficient_stats_elements = sufficient_stats_elements.copy()
+  avg_xs = sufficient_stats_elements[[f'x{i}' for i in range(n)]]
+  avg_y = sufficient_stats_elements['y']
+  for i in range(n):
+    sufficient_stats_elements[f'x{i}y'] -= avg_xs[f'x{i}'] * avg_y
+    for j in range(i, n):
+      sufficient_stats_elements[
+          f'x{i}x{j}'] -= avg_xs[f'x{i}'] * avg_xs[f'x{j}']
+  sufficient_stats_elements[[f'x{i}' for i in range(n)]] = 0
+  return sufficient_stats_elements, avg_xs, avg_y
+
+
+def fista_for_elastic_net(coef, l1, l2, x_t_x, x_t_y, tol, max_iter,
+                          fit_intercept):
+  """Applies FISTA algorithm to elastic net.
+
+  Lasso is just a special case.
+
+  The algorithm is also called accelerated proximal gradient descent. The
+  parameters are the same as those in proximal gradient descent. A derivation
+  can be found in
+  https://web.archive.org/save/https://yuxinchen2020.github.io/ele520_math_data/lectures/lasso_algorithm_extension.pdf.
+  There are variants for the acceleration. Here we implemented the one in
+  https://web.archive.org/web/20220616072055/http://www.cs.cmu.edu/~pradeepr/convexopt/Lecture_Slides/prox-grad_2.pdf.
+  The function is used for Lasso/ElasticNet, the differentiable g(x) in the loss
+  function used by sklearn is (1 / (2 * n_samples)) * ||y - Xw||^2_2. Its
+  Lipschitz constant, L, is the largest eigenvalue of X'X / n_samples, so the
+  max step size is 1/L. For proof, see Example 2.2 in
+  Beck, A., & Teboulle, M. (2009). A fast iterative shrinkage-thresholding
+  algorithm for linear inverse problems.
+  SIAM journal on imaging sciences, 2(1), 183-202.
+
+  Args:
+    coef: The initial guess of the coefficients.
+    l1: L1 penalty strength. In terms of the args of ElasticNet in sklearn, it
+      equals alpha * l1_ratio.
+    l2: L2 penalty strength. In terms of the args of ElasticNet in sklearn, it
+      equals alpha * (1 - l1_ratio).
+    x_t_x: X'X / n_observations.
+    x_t_y: X'y / n_observations.
+    tol: The tolerance for the optimization.
+    max_iter: The maximum number of iterations.
+    fit_intercept: If the coefficients include an intercept.
+
+  Returns:
+    The converged coef, namely, the coefficients of the model.
+  """
+  delta = np.zeros_like(coef)
+  # If we just use 1, depending on how a float is stored, maybe the step_size
+  # will be slightly larger than the max allowed? I don't know if it will ever
+  # happen but to be safe I use 1 - 1e-6.
+  step_size = (1 - 1e-6) / np.linalg.eigvals(x_t_x).max()
+  k = l2 * step_size + 1
+  threshold = l1 * step_size / k
+
+  for i in range(int(max_iter)):
+    v = coef + (i - 1) / (i + 2) * delta
+    coef_old = coef
+    coef = v - step_size * (x_t_x @ v - x_t_y)
+    if fit_intercept:
+      coef[1:] = soft_thresholding(coef[1:] / k, threshold)
+    else:
+      coef = soft_thresholding(coef / k, threshold)
+    delta = coef - coef_old
+    if abs(delta).sum() < tol:
+      return coef
+  print("WARNING: Lasso/ElasticNet didn't converge! Try increasing `max_iter`.")
+  return coef
+
+
+def soft_thresholding(x, thresh):
+  return np.maximum(x - thresh, 0) + np.minimum(x + thresh, 0)
+
+
+def compute_normalized_coef(coef, norms, avgs, split_by):
+  """Scale the coef by the norms of x to get the coef for normalized models.
+
+  Compute the coeffients of model(normalized=True).fit(x, y) from the coeffients
+  of model.fit(x_normalized, y). The former is the latter divided by the norms
+  of centered x, except for the intercept. Once the coefficients are calculated,
+  the intercept can be computed from coefficients and the average of original x
+  and y.
+
+  Args:
+    coef: The coeffients of model.fit(x_normalized, y), including intercept as
+      the first column.
+    norms: The norms of centered x.
+    avgs: The average of normalized x and y.
+    split_by: The columns that we use to split the data.
+
+  Returns:
+    The coeffients of model(normalized=True).fit(x, y).
+  """
+  coef = utils.remove_empty_level(coef)
+  cols = coef.columns
+  coef.drop(columns='intercept', inplace=True)
+  if split_by:
+    norms = norms.set_index(coef.index.names).reindex(coef.index)
+    avgs = avgs.set_index(coef.index.names).reindex(coef.index)
+  coef /= norms
+  avg_x, avg_y = avgs.iloc[:, :-1], avgs.iloc[:, -1]
+  coef['intercept'] = (avg_y - (avg_x.values * coef.values).sum(1))
+  return coef[cols]
 
 
 class LogisticRegression(Model):
@@ -822,8 +1007,8 @@ class LogisticRegression(Model):
         hess[hess_diag_idx] += sql.Column(f'{l2} / {n}')
       elif self.penalty != 'none':
         raise ValueError(
-            f'LogisticRegression supports only penalties in '
-            "['l1', 'l2', 'elasticnet', 'none'], got {self.penalty}.")
+            'LogisticRegression supports only penalties in '
+            f"['l1', 'l2', 'elasticnet', 'none'], got {self.penalty}.")
       return grads, list(hess)
 
     res = newtons_method(
