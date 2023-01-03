@@ -697,7 +697,9 @@ def get_formatted_df(df,
     columns = ['Dimensions'] if aggregate_dimensions else dims[:]
     columns += ['Experiment_Id', 'Is_Control', 'Description']
     columns += list(metric_order)
-    column_order = [c for c in columns if c in formatted_df]
+    # Column names are not always the same type.
+    column_order = pd.array([c for c in columns if c in formatted_df],
+                            dtype=object)
     formatted_df = formatted_df[column_order]
 
   if not aggregate_dimensions and not display_expr_info:
