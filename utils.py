@@ -219,9 +219,8 @@ def adjust_slices_for_loo(bucket_res: pd.Series,
   if slices_in_other_units.names != bucket_res.index.names:
     slices_in_other_units = slices_in_other_units.reorder_levels(
         bucket_res.index.names)
-  to_keep = slices_in_other_units.droplevel(
-      operation_lvl).isin(
-          bucket_res.index.droplevel(operation_lvl))
+  to_keep = slices_in_other_units.droplevel(operation_lvl).isin(
+      bucket_res.index.droplevel(operation_lvl))
   return bucket_res.reindex(slices_in_other_units[to_keep], fill_value=0)
 
 
@@ -341,12 +340,17 @@ class MaybeBadSqlModeError(Exception):
     self.better_mode = better_mode
     self.use_batch_size = use_batch_size
     self.batch_size = batch_size
-    if batch_size:
-      msg = 'reducing the batch_size. Current batch_size is %s.' % batch_size
-    elif use_batch_size:
-      msg = "compute_on_sql(..., mode='mixed', batch_size=an integer)."
+    super(MaybeBadSqlModeError, self).__init__()
+
+  def get_msg(self):
+    if self.batch_size:
+      return 'reducing the batch_size. Current batch_size is %s.' % self.batch_size
+    elif self.use_batch_size:
+      return "compute_on_sql(..., mode='mixed', batch_size=an integer)."
     else:
-      msg = "compute_on_sql(..., mode='%s')." % (better_mode or 'mixed')
-    super(MaybeBadSqlModeError, self).__init__(
-        "Please see the root cause of the failure above. If it's caused "
-        'by the query being too large/complex, you can try %s' % msg)
+      return "compute_on_sql(..., mode='%s')." % (self.better_mode or 'mixed')
+
+  def __str__(self):
+    return (
+        "Please see the root cause of the failure above. If it's caused by "
+        'the query being too large/complex, you can try %s') % self.get_msg()

@@ -201,15 +201,13 @@ def get_sufficient_stats_elements(m,
   return xs, sufficient_stats_elements, avg_x, norms
 
 
-def construct_matrix_from_elements(sufficient_stats_elements, xs,
-                                   fit_intercept):
+def construct_matrix_from_elements(sufficient_stats_elements, fit_intercept):
   """Constructs matries X'X and X'y from the elements.
 
   Args:
     sufficient_stats_elements: A DataFrame holding all unique elements of
       sufficient stats. See the doc of get_sufficient_stats_elements() for its
       shape and content.
-    xs: A list of the column names of x1, x2, ...
     fit_intercept: If the model includes an intercept.
 
   Returns:
@@ -222,7 +220,9 @@ def construct_matrix_from_elements(sufficient_stats_elements, xs,
     sufficient_stats_elements = sufficient_stats_elements.iloc[0]
   elif not isinstance(sufficient_stats_elements, pd.Series):
     raise ValueError('The input must be a panda Series!')
-  n = len(xs)
+  xny = sufficient_stats_elements.index[-2] if sufficient_stats_elements.index[
+      -1] == 'n_obs' else sufficient_stats_elements.index[-1]
+  n = int(xny[1:-1]) + 1
   x_t_x_cols = []
   x_t_y_cols = []
   if fit_intercept:
@@ -354,8 +354,9 @@ class Model(operations.Operation):
     if mode == 'mixed' or not mode:
       try:
         return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
-      except utils.MaybeBadSqlModeError:
-        raise
+      except utils.MaybeBadSqlModeError as e:
+        e.better_mode = 'magic'
+        raise e
       except Exception as e:  # pylint: disable=broad-except
         raise utils.MaybeBadSqlModeError('magic') from e
     if self.all_computable_in_pure_sql(False):
@@ -441,8 +442,7 @@ def compute_ridge_coefs(sufficient_stats, xs, m):
   fit_intercept = m.fit_intercept
   if fit_intercept and m.normalize:
     return compute_coef_for_normalize_ridge(sufficient_stats, xs, m)
-  x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats, xs,
-                                                fit_intercept)
+  x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats, fit_intercept)
   if isinstance(m, Ridge):
     n_obs = sufficient_stats['n_obs']
     penalty = np.identity(len(x_t_y))
@@ -592,8 +592,8 @@ class ElasticNet(Model):
 
   def compute_on_sql_magic_mode(self, table, split_by, execute):
     if (not self.l1_ratio or not 0 <= self.l1_ratio <= 1):
-      raise ValueError('l1_ratio must be between 0 and 1; got (l1_ratio="%s")' %
-                       self.l1_ratio)
+      raise ValueError(
+          f'l1_ratio must be between 0 and 1; got (l1_ratio={self.l1_ratio})')
     l1 = self.l1_ratio * self.alpha
     l2 = (1 - self.l1_ratio) * self.alpha
     xs, sufficient_stats_elements, avgs, norms = get_sufficient_stats_elements(
@@ -614,15 +614,14 @@ def compute_coef_for_elastic_net(sufficient_stats_elements, xs, l1, l2,
   if fit_intercept:
     sufficient_stats_elements, avg_xs, avg_y = center_x(
         sufficient_stats_elements, len(xs))
-  x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats_elements, xs,
+  x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats_elements,
                                                 fit_intercept)
   init_guess = np.random.random(*x_t_y.shape)
   coef = fista_for_elastic_net(init_guess, l1, l2, x_t_x, x_t_y, tol, max_iter,
                                fit_intercept)
   xs = [n.replace('macro_', '$').strip('`') for n in xs]
   if fit_intercept:
-    # Directly compute the intercept from data and coefficients. It makes the
-    # intercept more consistent to other coefficients.
+    # We centered x and y above so the intercept from optimization is not right.
     coef[0] = (avg_y - avg_xs @ coef[1:]).values[0]
     xs = ['intercept'] + xs
   return pd.DataFrame([list(coef)], columns=xs)
@@ -782,6 +781,17 @@ class LogisticRegression(Model):
                n_jobs=None,
                l1_ratio=None):
     """Initialize a sklearn.LogisticRegression model."""
+    if penalty not in ('none', 'l1', 'l2', 'elasticnet'):
+      raise ValueError(
+          f"Penalty must be one of ('none', 'l1', 'l2', 'elasticnet') but is {penalty}!"
+      )
+    if penalty == 'elasticnet' and (not l1_ratio or not 0 <= l1_ratio <= 1):
+      raise ValueError(
+          f'l1_ratio must be between 0 and 1; got (l1_ratio={l1_ratio})')
+    if l1_ratio is not None and penalty != 'elasticnet':
+      raise ValueError(
+          f"l1_ratio parameter is only used when penalty is 'elasticnet'. Got (penalty={penalty})"
+      )
     model = linear_model.LogisticRegression(
         fit_intercept=fit_intercept,
         penalty=penalty,
@@ -807,6 +817,7 @@ class LogisticRegression(Model):
     self.intercept_scaling = intercept_scaling or 1
     self.max_iter = max_iter
     self.l1_ratio = l1_ratio
+    self.random_state = random_state
 
   def compute(self, df):
     self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
@@ -850,22 +861,20 @@ class LogisticRegression(Model):
       raise ValueError("Magic mode doesn't support class_weight!")
     if self.model.multi_class == 'multinomial':
       raise ValueError("Magic mode doesn't support multi_class!")
-    if self.penalty == 'elasticnet' and (not self.l1_ratio or
-                                         not 0 <= self.l1_ratio <= 1):
-      raise ValueError(
-          f'l1_ratio must be between 0 and 1; got (l1_ratio="{self.l1_ratio}")')
     if self.intercept_scaling != 1:
       raise ValueError('intercept_scaling is not supported in magic mode!')
-    if self.penalty in ('l1', 'elasticnet'):
-      print("WARNING: Our solution for L1 and elasticnet penalty doesn't quite "
-            'achieve sparsity. Please interprete the results with care.')
 
-    y = self.y.compute_on_sql(table, self.group_by, execute)
-    n_y = y.iloc[:, 0].nunique()
-    if n_y != 2:
+    y = self.y.to_sql(table, self.group_by + split_by)
+    n_y = metrics.Count(y.columns[-1].alias, distinct=True)
+    n_y = n_y.compute_on_sql(y, y.groupby.aliases[len(self.group_by):], execute)
+    if (n_y.values != 2).any():
       raise ValueError(
           f'Magic mode only support two classes but got {n_y} distinct y values!'
       )
+
+    if self.penalty in ('l1', 'elasticnet'):
+      _, sufficient_stats, _, _ = get_sufficient_stats_elements(
+          self, table, split_by, execute, include_n_obs=True)
 
     table, with_data, xs, y, _, _ = get_data(self, table, split_by, execute)
     if self.fit_intercept:
@@ -874,24 +883,24 @@ class LogisticRegression(Model):
     if split_by:
       slices = execute(
           str(sql.Sql(sql.Columns(split_by, True), table, with_data=with_data)))
+      slices.sort_values(list(slices.columns), inplace=True)
       conds = slices.values
-    self._gradients = None
+    self._hess = None
 
-    def grads(*unused_args):
-      return self._gradients
+    def grads(coef, converged, ignore_hess=True):
+      return compute_grads_and_hess(coef, converged, ignore_hess)
 
-    def hess(coef, converged):
-      return compute_grads_and_hess(coef, converged)
+    def hess(*unused_args):
+      return self._hess
 
-    def compute_grads_and_hess(coef, converged):
+    def compute_grads_and_hess(coef, converged, ignore_hess=True):
       """Computes the gradients and Hessian matrices for coef.
 
       The grads we computes here is a n*k list of gradients, where n is the
       number of slices and k is the number of features. It has the same shape
-      with coef, and represents the gradients of the coefficients. The
-      gradients are saved to self._gradients as a side effect.
+      with coef, and represents the gradients of the coefficients.
       Similarly, the Hessian matrices we return is a n*k*k array. Each k*k
-      element is a Hessian matrix.
+      element is a Hessian matrix. It's saved to self._hess as a side effect.
 
       Args:
         coef: A n*k array of coefficients being optimized. n is the number of
@@ -899,14 +908,17 @@ class LogisticRegression(Model):
         converged: A list of the length of the number of slices. Its values
           indicate whether the coefficients of the slice have converged. If
           converged, we skip the computation for that slice.
+        ignore_hess: If True, we only compute gradients.
 
       Returns:
-        A n*k*k Hessian matrices. We also save the gradients to self._gradients
-        as a side effect.
+        A n*k numpy array of gradients / n_observations. We also save
+        hessian / n_observations to self._hess as a side effect, if not
+        ignore_hess.
       """
       k = len(coef[0])
       if not split_by:
-        grads, hessian = get_grads_and_hess_query(coef[0])
+        grads, hessian = get_grads_and_hess_query(
+            coef[0], ignore_hess=ignore_hess)
       else:
         grads = []
         hessian = []
@@ -918,7 +930,7 @@ class LogisticRegression(Model):
                 for c, v in zip(split_cols, cond)
             ]
             condition = ' AND '.join(condition)
-            j, h = get_grads_and_hess_query(slice_coef, condition)
+            j, h = get_grads_and_hess_query(slice_coef, condition, ignore_hess)
             grads += j
             hessian += h
       for i, c in enumerate(grads):
@@ -928,23 +940,27 @@ class LogisticRegression(Model):
       grads_and_hess = sql.Sql(sql.Columns(grads + hessian), table)
       grads_and_hess.with_data = with_data
       grads_and_hess = execute(str(grads_and_hess)).iloc[0]
-      self._gradients = []
+      grads = []
       for done in converged:
         if done:
-          self._gradients.append(None)
+          grads.append([0] * k)
         else:
-          self._gradients.append(grads_and_hess.values[:k])
+          grads.append(grads_and_hess.values[:k])
           grads_and_hess = grads_and_hess[k:]
+      if ignore_hess:
+        return np.array(grads)
       hess_elements = list(grads_and_hess.values.reshape(-1, k * (k + 1) // 2))
       hess_arr = []
+      zero_hess = np.zeros((k, k))
       for done in converged:
         if done:
-          hess_arr.append(None)
+          hess_arr.append(zero_hess)
         else:
           hess_arr.append(symmetrize_triangular(hess_elements.pop(0)))
-      return hess_arr
+      self._hess = np.array(hess_arr)
+      return np.array(grads)
 
-    def get_grads_and_hess_query(coef, condition=None):
+    def get_grads_and_hess_query(coef, condition=None, ignore_hess=True):
       """Get the SQL columns to compute the gradients and Hessian matrixes.
 
       The formula of gradients and Hessian matrixes can be found in
@@ -958,13 +974,14 @@ class LogisticRegression(Model):
         condition: A condition that can be applied in the WHERE clause. The
           gradients and Hessian matrixes will be computed on the rows that
           satisfies the condition.
+        ignore_hess: If True, we only return gradients.
 
       Returns:
         grads: A list of SQL columns which has the same shape with coef. It
-          represents the gradients of the corresponding coefficients.
+          represents the gradients / n_observations.
         hess: A list of SQL columns that can be used to construct the Hessian
-          matrix. Its elements are the upper triangular part of the Hessian,
-          from left to right, top to down.
+          matrix / n_observations. Its elements are the upper triangular part of
+          the Hessian, from left to right, top to down.
       """
       # A numerically stable implemntation, adapted from
       # http://fa.bianp.net/blog/2019/evaluate_logistic.
@@ -979,41 +996,49 @@ class LogisticRegression(Model):
           1 / (1 + EXP(-({z}))))""".format(z=z)
       w = f'-{sig_z} * {sig_minus_b(z, 1)}'
       hess = []
-      for i, x1 in enumerate(xs):
-        for x2 in xs[i:]:
-          hess.append(
-              sql.Column(f'{x1} * {x2} * {w}', 'AVG({})', filters=condition))
+      if not ignore_hess:
+        for i, x1 in enumerate(xs):
+          for x2 in xs[i:]:
+            hess.append(
+                sql.Column(f'{x1} * {x2} * {w}', 'AVG({})', filters=condition))
       hess = np.array(hess)
       # See here for the behavior of differnt penalties.
       # https://colab.research.google.com/drive/1Srfs4weM4LO9vt1HbOkGrD4kVbG8cso8
+      # For 'l1' and 'elasticnet', we use FISTA, which uses unregularized
+      # gradient.
       n = f'COUNTIF({condition})' if condition else 'COUNT(*)'
-      if self.penalty == 'l1':
-        for i in range(self.k):
-          grads[i] += sql.Column(f'SIGN({coef[i]}) / {n}') / self.c
-      elif self.penalty == 'l2':
+      if self.penalty == 'l2':
         for i in range(self.k):
           grads[i] += sql.Column(f'{coef[i]} / {n}') / self.c
-        hess_diag_idx = np.arange(len(xs), len(xs) - self.k + 1, -1).cumsum()
-        hess_diag_idx = np.concatenate([[0], hess_diag_idx])
-        hess[hess_diag_idx] += sql.Column(f'1 / ({n} * {self.c})')
-      elif self.penalty == 'elasticnet':
-        l1 = self.l1_ratio / self.c
-        l2 = (1 - self.l1_ratio) / self.c
-        for i in range(self.k):
-          grads[i] += sql.Column(
-              f'({l1} * SIGN({coef[i]}) + {l2} * {coef[i]}) / {n}')
-        hess_diag_idx = np.arange(len(xs), len(xs) - self.k + 1, -1).cumsum()
-        hess_diag_idx = np.concatenate([[0], hess_diag_idx])
-        hess[hess_diag_idx] += sql.Column(f'{l2} / {n}')
-      elif self.penalty != 'none':
-        raise ValueError(
-            'LogisticRegression supports only penalties in '
-            f"['l1', 'l2', 'elasticnet', 'none'], got {self.penalty}.")
+        if not ignore_hess:
+          hess_diag_idx = np.arange(len(xs), len(xs) - self.k + 1, -1).cumsum()
+          hess_diag_idx = np.concatenate([[0], hess_diag_idx])
+          hess[hess_diag_idx] += sql.Column(f'1 / ({n} * {self.c})')
       return grads, list(hess)
 
-    res = newtons_method(
-        np.zeros((len(conds) or 1, len(xs))), grads, hess, self.tol,
-        self.max_iter, conds)
+    np.random.seed(
+        self.random_state if isinstance(self.random_state, int) else 42)
+    init_guess = np.random.random((len(conds) or 1, len(xs)))
+    if self.penalty in ('l1', 'elasticnet'):
+      l1_ratio = self.l1_ratio if self.l1_ratio is not None else 1
+      l1 = l1_ratio / self.c
+      l2 = (1 - l1_ratio) / self.c
+      res = fista_for_logistic_regression(
+          init_guess,
+          split_by,
+          grads,
+          self.tol,
+          self.max_iter,
+          conds,
+          l1,
+          l2,
+          sufficient_stats,
+          self.fit_intercept,
+      )
+    else:
+      res = newtons_method(init_guess, grads, hess, self.tol, self.max_iter,
+                           conds)
+
     xs = [n.replace('macro_', '$').strip('`') for n in xs]
     if split_by:
       df = pd.DataFrame(conds, columns=split_by)
@@ -1036,6 +1061,111 @@ class LogisticRegression(Model):
     return pd.DataFrame([res], columns=xs)
 
 
+def fista_for_logistic_regression(
+    coef,
+    split_by,
+    grads,
+    tol,
+    max_iter,
+    conds,
+    l1,
+    l2,
+    sufficient_stats,
+    fit_intercept,
+):
+  """Applies FISTA algorithm to logistic regression.
+
+  The algorithm is also called accelerated proximal gradient descent. The
+  parameters are the same as those in the proximal gradient descent for elastic
+  net. A derivation can be found in
+  https://web.archive.org/save/https://yuxinchen2020.github.io/ele520_math_data/lectures/lasso_algorithm_extension.pdf.
+  There are variants for the acceleration. Here we implemented the one in
+  https://web.archive.org/web/20220616072055/http://www.cs.cmu.edu/~pradeepr/convexopt/Lecture_Slides/prox-grad_2.pdf.
+  The conventional loss function is the sum of logit loss on all data points.
+  For numerical stability we use the average of logit loss instead. As a result,
+  step size, l1 and l2 are scaled accordingly.
+
+  Args:
+    coef: The initial guess of the coefficients.
+    split_by: The columns that we use to split the data.
+    grads: A function that returns the gradients for certain coef.
+    tol: The tolerance for the optimization.
+    max_iter: The maximum number of iterations.
+    conds: None if no split_by. Otherwise it's the sorted unique values in the
+      split_by columns.
+    l1: L1 penalty strength. In terms of the args of LogisticRegression in
+      sklearn, it equals l1_ratio / C.
+    l2: L2 penalty strength. In terms of the args of LogisticRegression in
+      sklearn, it equals (1 - l1_ratio) / C.
+    sufficient_stats: A DataFrame holding all unique elements of sufficient
+      stats.
+    fit_intercept: If the coefficients include an intercept.
+
+  Returns:
+    The converged coef, namely, the coefficients of the model.
+  """
+
+  def get_step_size(stats):
+    # For the value of step size, see p29 in
+    # https://web.archive.org/web/20211223053411/https://www.cs.ubc.ca/~schmidtm/Courses/540-W18/L4.pdf.
+    x_t_x, _ = construct_matrix_from_elements(stats, fit_intercept)
+    # If we just use 4, depending on how a float is stored, maybe the step_size
+    # will be slightly larger than the max allowed? I don't know if it will ever
+    # happen but to be safe I use 3.999999.
+    return 3.999999 / np.linalg.eigvals(x_t_x).max()
+
+  if not split_by:
+    step_size = np.array([get_step_size(sufficient_stats)])
+  else:
+    sufficient_stats.columns = split_by + list(
+        sufficient_stats.columns)[len(split_by):]
+    step_size = sufficient_stats.groupby(split_by).apply(get_step_size)
+    # cond is sorted. We need to make sure step_size and sufficient_stats are in
+    # the same order.
+    step_size.sort_index(inplace=True)
+    sufficient_stats.sort_values(split_by, inplace=True)
+    if len(step_size) != len(conds):
+      raise ValueError('Incomatiple step size!')
+    step_size = step_size.values.reshape((-1, 1))
+
+  n_obs = sufficient_stats.n_obs.values.reshape((-1, 1))
+  # Adjust because the sufficient_stats are the real sufficient stats / n_obs.
+  l1 /= n_obs
+  l2 /= n_obs
+  n_slice = len(coef)
+  converged = np.array([False] * n_slice)
+  k = l2 * step_size + 1
+  threshold = l1 * step_size / k
+  v = coef.copy()
+  delta = np.zeros_like(coef)
+
+  for i in range(int(max_iter)):
+    pending = ~converged
+    v[pending] = coef[pending] + (i - 1) / (i + 2) * delta[pending]
+    coef_old = coef.copy()
+    gradients = grads(v, converged, ignore_hess=True)
+    coef[pending] = v[pending] - step_size[pending] * gradients[pending]
+    if fit_intercept:
+      coef[pending, :-1] = soft_thresholding(coef[pending, :-1] / k[pending],
+                                             threshold[pending])
+    else:
+      coef[pending] = soft_thresholding(coef[pending] / k[pending],
+                                        threshold[pending])
+    delta[pending] = coef[pending] - coef_old[pending]
+    converged[pending] = abs(delta[pending]).max(1) < tol
+    if all(converged):
+      return coef
+  if n_slice == 1:
+    print(
+        "WARNING: Optimization of LogisticRegression didn't converge! Try increasing `max_iter`."
+    )
+  else:
+    print(
+        "WARNING: Optimization of LogisticRegression didn't converge for slice:%s. Try increasing `max_iter`."
+        % np.array(conds)[~converged])
+  return coef
+
+
 def sig_minus_b(z, b):
   """Computes sigmoid(z) - b in a numerically stable way in SQL."""
   # Adapted from http://fa.bianp.net/blog/2019/evaluate_logistic
@@ -1046,13 +1176,13 @@ def sig_minus_b(z, b):
               z=z, b=b, exp_z=exp_z, exp_nz=exp_nz)
 
 
-def newtons_method(coef, grads, hess, tol, max_iter, conds, *args):
+def newtons_method(coef, grads, hess, tol, max_iter, conds):
   """Uses Newton's method to optimize coef on n slices at the same time."""
   n_slice = len(coef)
   converged = np.array([False] * n_slice)
   for _ in range(int(max_iter)):
-    h = hess(coef, converged, *args)
-    j = grads(coef, converged, *args)
+    j = grads(coef, converged, ignore_hess=False)
+    h = hess(coef, converged)
     for i in range(n_slice):
       if not converged[i]:
         delta = np.linalg.solve(h[i], j[i])
@@ -1062,10 +1192,11 @@ def newtons_method(coef, grads, hess, tol, max_iter, conds, *args):
     if all(converged):
       return coef
   if n_slice == 1:
-    print("WARNING: Optimization didn't converge!")
+    print("WARNING: Optimization of LogisticRegression didn't converge!")
   else:
-    print("WARNING: Optimization didn't converge for slice: ",
-          np.array(conds)[~converged])
+    print(
+        "WARNING: Optimization of LogisticRegression didn't converge for slice: ",
+        np.array(conds)[~converged])
   return coef
 
 

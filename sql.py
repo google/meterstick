@@ -107,12 +107,13 @@ def get_alias(c):
 
 
 def escape_alias(alias):
+  if alias is None:
+    return None
   # Macro still gets parsed inside backquotes.
   if alias and '$' in alias:
     alias = alias.replace('$', 'macro_')
-  # Don't escape if alias is already escaped.
-  if alias and set(r""" `~!@#$%^&*()-=+[]{}\|;:'",.<>/?""").intersection(
-      alias) and not (alias.startswith('`') and alias.endswith('`')):
+  alias = alias.replace('`', '')
+  if alias and set(r""" `~!@#$%^&*()-=+[]{}\|;:'",.<>/?""").intersection(alias):
     return '`%s`' % alias.replace('\\', '\\\\')
   return alias
 
