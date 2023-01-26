@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,8 +18,9 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import datetime
 import itertools
-from typing import Any, Callable, List, Optional, Sequence, Text, Union
+from typing import Any, Iterable, List, Optional, Sequence, Text, Union
 
 from meterstick import sql
 from meterstick import utils
@@ -31,13 +32,16 @@ def compute_on(df,
                split_by=None,
                melted=False,
                return_dataframe=True,
-               cache_key=None):
+               cache_key=None,
+               cache=None,
+               **kwargs):
   # pylint: disable=g-long-lambda
   return lambda x: x.compute_on(df, split_by, melted, return_dataframe,
-                                cache_key)
+                                cache_key, cache, **kwargs)
   # pylint: enable=g-long-lambda
 
 
+# pylint: disable=g-long-lambda
 def compute_on_sql(
     table,
     split_by=None,
@@ -45,10 +49,9 @@ def compute_on_sql(
     melted=False,
     mode=None,
     cache_key=None,
-    **kwargs
-):
+    cache=None,
+    **kwargs):
   """A wrapper that metric | compute_on_sql() === metric.compute_on_sql()."""
-  # pylint: disable=g-long-lambda
   return lambda m: m.compute_on_sql(
       table,
       split_by,
@@ -56,49 +59,34 @@ def compute_on_sql(
       melted,
       mode,
       cache_key,
-      **kwargs
-  )
-  # pylint: enable=g-long-lambda
+      cache=cache,
+      **kwargs)
+
+
+def compute_on_pcollection(
+    table,
+    split_by=None,
+    execute=None,
+    melted=False,
+    mode=None,
+    cache_key=None,
+    cache=None,
+    **kwargs):
+  """A wrapper for metric.ompute_on_pcollection()."""
+  return lambda m: m.compute_on_pcollection(
+      table,
+      split_by,
+      execute,
+      melted,
+      mode,
+      cache_key,
+      cache=cache,
+      **kwargs)
+# pylint: enable=g-long-lambda
 
 
 def to_sql(table, split_by=None):
   return lambda metric: metric.to_sql(table, split_by)
-
-
-def get_extra_idx(metric):
-  """Collects the extra indexes added by Operations for the metric tree.
-
-  Args:
-    metric: A Metric instance.
-
-  Returns:
-    A tuple of column names which are just the index of metric.compute_on(df).
-  """
-  extra_idx = metric.extra_index[:]
-  children_idx = [
-      get_extra_idx(c) for c in metric.children if isinstance(c, Metric)
-  ]
-  if len(set(children_idx)) > 1:
-    raise ValueError('Incompatible indexes!')
-  if children_idx:
-    extra_idx += list(children_idx[0])
-  return tuple(extra_idx)
-
-
-def get_global_filter(metric):
-  """Collects the filters that can be applied globally to the Metric tree."""
-  global_filter = sql.Filters()
-  if metric.where:
-    global_filter.add(metric.where)
-  children_filters = [
-      set(get_global_filter(c))
-      for c in metric.children
-      if isinstance(c, Metric)
-  ]
-  if children_filters:
-    shared_filter = set.intersection(*children_filters)
-    global_filter.add(shared_filter)
-  return global_filter
 
 
 def is_operation(m):
@@ -119,7 +107,7 @@ class Metric(object):
         <------------------------------compute_through---------------------------->                                              |
         |                              <-------compute_slices------->             |                                              |
         |                              |-> slice1 -> compute |      |             |                                              |
-  df -> df.query(where) -> precompute -|-> slice2 -> compute | -> concat  -> postcompute -> manipulate -> final_compute -> flush_tmp_cache  # pylint: disable=line-too-long
+  df -> df.query(where) -> precompute -|-> slice2 -> compute | -> concat  -> postcompute -> manipulate -> final_compute -> clean_up_cache  # pylint: disable=line-too-long
                                        |-> ...
   In summary, compute() operates on a slice of data. precompute(),
   postcompute(), compute_slices(), compute_through() and final_compute() operate
@@ -163,25 +151,20 @@ class Metric(object):
     name: Name of the Metric.
     children: An iterable of Metric(s) this Metric based upon.
     cache: A dict to store cached results.
-    where: A string or list of strings to be concatenated that will be passed to
-      df.query() as a prefilter.
-    precompute: A function. See the workflow chart above for its behavior.
-    compute: A function. See the workflow chart above for its behavior.
-    postcompute: A function. See the workflow chart above for its behavior.
-    compute_slices: A function. See the workflow chart above for its behavior.
-    final_compute: A function. See the workflow chart above for its behavior.
+    where_raw: A string or list/tuple of strings to be concatenated that will be
+      passed to df.query() as a prefilter.
+    where: A string that will be passed to df.query() as a prefilter. It's
+      ' and '.join(where_raw).
+    additional_fingerprint_attrs: Additioinal attributes to be encoded into the
+      fingerprint. The attribute value must be hashable, or a list/dict of
+      hashables. See get_fingerprint() for how it's used.
     extra_split_by: Used by Operation. See the doc there.
     extra_index: Used by Operation. See the doc there.
-    computable_in_pure_sql: If the Metric can be completely computed in SQL. For
-      example, all Models can't.
     name_tmpl: Used by Metrics that have children. It's applied to children's
       names in the output.
+    cache: A dict to store the result. It's shared across the Metric tree.
     cache_key: The key currently being used in computation.
-    tmp_cache_keys: The set to track what temporary cache_keys are used during
-      computation when default caching is enabled. When computation is done, all
-      the keys in tmp_cache_keys are flushed.
   """
-  RESERVED_KEY = '_RESERVED'
 
   def __init__(self,
                name: Text,
@@ -189,34 +172,52 @@ class Metric(object):
                                                                  float]]]] = (),
                where: Optional[Union[Text, Sequence[Text]]] = None,
                name_tmpl=None,
-               precompute=None,
-               compute: Optional[Callable[[pd.DataFrame], Any]] = None,
-               postcompute=None,
-               compute_slices=None,
-               final_compute=None):
+               extra_split_by: Optional[Union[Text, Iterable[Text]]] = None,
+               extra_index: Optional[Union[Text, Iterable[Text]]] = None,
+               additional_fingerprint_attrs: Optional[List[str]] = None):
     self.name = name
     self.cache = {}
     self.cache_key = None
     self.children = [children] if isinstance(children,
                                              Metric) else children or []
-    if isinstance(where, List):
-      where = ' and '.join(where)
+    self.where_raw = None
     self.where = where
-    self.extra_split_by = []
-    self.extra_index = []
-    self.computable_in_pure_sql = True
+    self.extra_split_by = [extra_split_by] if isinstance(
+        extra_split_by, str) else extra_split_by or []
+    if extra_index is None:
+      self.extra_index = self.extra_split_by
+    else:
+      self.extra_index = [extra_index] if isinstance(extra_index,
+                                                     str) else extra_index
+    self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
     self.name_tmpl = name_tmpl
-    if precompute:
-      self.precompute = precompute
-    if compute:
-      self.compute = compute
-    if postcompute:
-      self.postcompute = postcompute
-    if compute_slices:
-      self.compute_slices = compute_slices
-    if final_compute:
-      self.final_compute = final_compute
-    self.tmp_cache_keys = set()
+    self.cache_key = None
+
+  @property
+  def where(self):
+    if isinstance(self.where_raw, (list, tuple)):
+      where_raw = self.where_raw
+      if len(where_raw) > 1:
+        where_raw = (f'({i})' for i in sorted(where_raw))
+      return ' and '.join(where_raw)
+    return self.where_raw
+
+  @where.setter
+  def where(self, where):
+    if where is None:
+      self.where_raw = None
+    elif isinstance(where, str):
+      self.where_raw = (where,)
+    else:
+      self.where_raw = tuple(where)
+
+  def add_where(self, where):
+    where = [where] if isinstance(where, str) else list(where) or []
+    if not self.where:
+      self.where = where
+    else:
+      self.where = tuple(set(list(self.where_raw) + where))
+    return self
 
   def compute_with_split_by(self,
                             df,
@@ -246,8 +247,7 @@ class Metric(object):
         cache_key = self.cache_key
         slice_i_iter = slice_i if isinstance(slice_i, tuple) else [slice_i]
         self.cache_key = self.wrap_cache_key(
-            cache_key or self.RESERVED_KEY,
-            slice_val=dict(zip(split_by, slice_i_iter)))
+            cache_key, slice_val=dict(zip(split_by, slice_i_iter)))
         try:
           result.append(self.compute_with_split_by(df_slice, split_by, slice_i))
           slices.append(slice_i)
@@ -281,12 +281,15 @@ class Metric(object):
   def compute_children(self, df, split_by):
     raise NotImplementedError
 
+  def compute(self, df):
+    raise NotImplementedError
+
   def compute_on_children(self, children, split_by):
     """Computes the return using the result returned by children Metrics.
 
     Args:
       children: The return of compute_children() or compute_children_sql().
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
 
     Returns:
       Almost the final result. Only some manipulations are still needed.
@@ -308,6 +311,7 @@ class Metric(object):
       yield df, None
     else:
       for k, idx in df.groupby(split_by).indices.items():
+        # Use iloc rather than loc because indexes can have duplicates.
         yield df.iloc[idx], k
 
   def compute_through(self, df, split_by: Optional[List[Text]] = None):
@@ -322,55 +326,46 @@ class Metric(object):
                  split_by: Optional[Union[Text, List[Text]]] = None,
                  melted: bool = False,
                  return_dataframe: bool = True,
-                 cache_key: Any = None):
+                 cache_key: Any = None,
+                 cache=None):
     """Key API of Metric.
 
-    Wraps computing logic with caching.
-
-    This is what you should call to use Metric. It's compute_through +
-    final_compute + caching. As caching is the shared part of Metric, we suggest
-    you NOT to overwrite this method. Overwriting compute_slices and/or
-    final_compute should be enough. If not, contact us with your use cases.
+    Wraps computing logic with caching. This is what you should call to use
+    Metric. It's compute_through + final_compute + caching. As caching is the
+    shared part of Metric, we suggest you NOT to overwrite this method.
+    Overwriting compute_slices and/or final_compute should be enough. If not,
+    contact us with your use cases.
 
     Args:
       df: The DataFrame to compute on.
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
       melted: Whether to transform the result to long format.
       return_dataframe: Whether to convert the result to DataFrame if it's not.
         If False, it could still return a DataFrame.
       cache_key: What key to use to cache the df. You can use anything that can
         be a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
 
     Returns:
       Final result returned to user. If split_by, it's a pd.Series or a
       pd.DataFrame, otherwise it could be a base type.
     """
-    need_clean_up = True
+    self.cache = {} if cache is None else cache
+    split_by = [split_by] if isinstance(split_by, str) else split_by or []
     try:
-      split_by = [split_by] if isinstance(split_by, str) else split_by or []
-      if cache_key is not None:
-        cache_key = self.wrap_cache_key(cache_key, split_by)
-        if self.in_cache(cache_key):
-          need_clean_up = False
-          raw_res = self.get_cached(cache_key)
-          res = self.manipulate(raw_res, melted, return_dataframe)
-          res = self.final_compute(res, melted, return_dataframe, split_by, df)
-          return res
-        else:
-          self.cache_key = cache_key
-          raw_res = self.compute_through(df, split_by)
-          self.save_to_cache(cache_key, raw_res)
-          if utils.is_tmp_key(cache_key):
-            self.tmp_cache_keys.add(cache_key)
+      cache_key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
+      if self.in_cache(cache_key):
+        raw_res = self.get_cached(cache_key)
       else:
+        self.cache_key = cache_key
         raw_res = self.compute_through(df, split_by)
+        self.save_to_cache(cache_key, raw_res)
 
       res = self.manipulate(raw_res, melted, return_dataframe)
       return self.final_compute(res, melted, return_dataframe, split_by, df)
-
     finally:
-      if need_clean_up:
-        self.flush_tmp_cache()
+      self.clean_up_cache()
 
   def precompute(self, df, split_by):
     del split_by  # Useful in derived classes.
@@ -405,15 +400,14 @@ class Metric(object):
         If False, it could still return a DataFrame if the input is already a
         DataFrame.
       apply_name_tmpl: If to apply name_tmpl to the result. For example, in
-        Distribution('country', Sum('X')).compute_on(df),
-        we first compute Sum('X').compute_on(df, 'country'), then normalize, and
-        finally apply the name_tmpl 'Distribution of {}' to all column names.
+        Distribution('country', Sum('X')).compute_on(df), we first compute
+        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
+        the name_tmpl 'Distribution of {}' to all column names.
 
     Returns:
       Final result returned to user. If split_by, it's a pd.Series or a
       pd.DataFrame, otherwise it could be a base type.
     """
-    res = copy.copy(res)  # Avoid changing the result in cache.
     if isinstance(res, pd.Series):
       res.name = self.name
     if not isinstance(res, pd.DataFrame) and return_dataframe:
@@ -425,6 +419,31 @@ class Metric(object):
     if apply_name_tmpl:
       res = utils.apply_name_tmpl(self.name_tmpl, res, melted)
     return utils.remove_empty_level(res)
+
+  def compute_util_metric_on(self,
+                             metric,
+                             df,
+                             split_by,
+                             melted=False,
+                             return_dataframe=True,
+                             cache_key=None):
+    """Computes a util metric with caching and filtering handled correctly."""
+    cache_key = self.wrap_cache_key(cache_key, split_by)
+    return metric.compute_on(df, split_by, melted, return_dataframe, cache_key,
+                             self.cache)
+
+  def compute_util_metric_on_sql(self,
+                                 metric,
+                                 table,
+                                 split_by=None,
+                                 execute=None,
+                                 melted=False,
+                                 mode=None,
+                                 cache_key=None):
+    """Computes a util metric with caching and filtering handled correctly."""
+    cache_key = self.wrap_cache_key(cache_key, split_by)
+    return metric.compute_on_sql(table, split_by, execute, melted, mode,
+                                 cache_key, self.cache)
 
   @staticmethod
   def group(df, split_by=None):
@@ -438,94 +457,137 @@ class Metric(object):
     return pd.DataFrame({self.name: [res]})
 
   def wrap_cache_key(self, key, split_by=None, where=None, slice_val=None):
-    if key is None:
-      return None
-    if where is None and self.cache_key:
-      where = self.cache_key.where
-    return utils.CacheKey(key, where or self.where, split_by, slice_val)
+    if key and not isinstance(key, utils.CacheKey) and self.cache_key:
+      key = self.cache_key.replace_key(key)
+    key = key or self.cache_key
+    return utils.CacheKey(self, key, where or self.where_raw, split_by,
+                          slice_val)
 
   def save_to_cache(self, key, val, split_by=None):
-    key = self.wrap_cache_key(key, split_by)
+    if not isinstance(key, utils.CacheKey):
+      key = self.wrap_cache_key(key, split_by)
     val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
     self.cache[key] = val
 
-  def in_cache(self, key, split_by=None, where=None, exact=True):
-    key = self.wrap_cache_key(key, split_by, where)
-    if exact:
-      return key in self.cache
-    else:
-      return any(k.includes(key) for k in self.cache)
+  def in_cache(self, key):
+    key = key if isinstance(key, utils.CacheKey) else self.wrap_cache_key(key)
+    return key in self.cache
 
   def get_cached(self,
                  key=None,
                  split_by=None,
+                 metric=None,
                  where=None,
-                 exact=True,
-                 return_key=False):
-    """Retrieves result from cache if there is an unique one."""
-    key = self.wrap_cache_key(key, split_by, where)
-    if key in self.cache:
-      return (key, self.cache[key]) if return_key else self.cache[key]
-    elif not exact:
-      matches = {k: v for k, v in self.cache.items() if k.includes(key)}
-      if len(matches) > 1:
-        raise ValueError('Muliple fuzzy matches found!')
-      elif matches:
-        return tuple(matches.items())[0] if return_key else tuple(
-            matches.values())[0]
+                 slice_val=None):
+    """Retrieves results from cache that fulfill the conditions."""
+    if isinstance(key, utils.CacheKey):
+      return copy.deepcopy(self.cache.get(key, None))
+    if split_by is not None:
+      split_by = (split_by,) if isinstance(split_by, str) else tuple(split_by)
+    conds = {
+        'key': key,
+        'split_by': split_by,
+        'where': where,
+        'slice_val': slice_val
+    }
+    conds = {k: v for k, v in conds.items() if v is not None}
+    res = {
+        k: copy.copy(v) for k, v in self.cache.items() if all(
+            getattr(k, c) == cv for c, cv in conds.items())
+    }
+    if metric:
+      if isinstance(metric, Metric):
+        res = {k: v for k, v in res.items() if k.metric == metric}
+      else:
+        res = {k: v for k, v in res.items() if k.metric.__class__ == metric}
+    return res
 
-  def flush_cache(self,
-                  key=None,
-                  split_by=None,
-                  where=None,
-                  recursive=True,
-                  prune=True):
-    """If prune, stops when the cache seems to be flushed already."""
-    key = self.wrap_cache_key(key, split_by, where)
-    if prune:
-      if (key is not None and not self.in_cache(key)) or not self.cache:
-        return
-    if key is None:
-      self.cache = {}
-    elif self.in_cache(key):
-      del self.cache[key]
-    if recursive:
-      self.flush_children(key, split_by, where, recursive, prune)
+  def get_fingerprint(self):
+    """Returns attributes that uniquely identify the Metric.
 
-  def flush_children(self,
-                     key=None,
-                     split_by=None,
-                     where=None,
-                     recursive=True,
-                     prune=True):
-    for m in self.children:
-      if isinstance(m, Metric):
-        m.flush_cache(key, split_by, where, recursive, prune)
+    Metrics with the same fingerprint will compute to the same numbers on the
+    same data. Note that name is not part of the fingerprint.
 
-  def flush_tmp_cache(self):
-    """Flushes all the temporary caches when a Metric tree has been computed.
-
-    A Metric and all the descendants form a tree. When a computation is started
-    from a MetricList or CompositeMetric, we know the input DataFrame is not
-    going to change in the computation. So even if user doesn't ask for caching,
-    we still enable it, but we need to clean things up when done. As the results
-    need to be cached until all Metrics in the tree have been computed, we
-    should only clean up at the end of the computation of the entry/top Metric.
-    We recognize the top Metric by looking at the cache_key. All descendants
-    will have it assigned as RESERVED_KEY but the entry Metric's will be None.
+    Returns:
+      A sorted tuple of (attribute, value) pairs that uniquely identify the
+      Metric.
     """
-    if self.cache_key is None:  # Entry point of computation
-      for m in self.traverse():
-        while m.tmp_cache_keys:
-          m.flush_cache(m.tmp_cache_keys.pop(), recursive=False)
+    fingerprint = {'class': self.__class__}
+    if self.where:
+      fingerprint['where'] = sorted(self.where_raw)
+    if self.children:
+      fingerprint['children'] = (
+          c.get_fingerprint() if isinstance(c, Metric) else c
+          for c in self.children)
+    if self.extra_split_by:
+      fingerprint['extra_split_by'] = self.extra_split_by
+    if self.extra_index != self.extra_split_by:
+      fingerprint['extra_index'] = self.extra_index
+    for k in self.additional_fingerprint_attrs:
+      val = getattr(self, k, None)
+      if isinstance(val, dict):
+        for kw, arg in val.items():
+          fingerprint['%s:%s' % (k, kw)] = arg
+      elif isinstance(val, Metric):
+        fingerprint[k] = val.get_fingerprint()
+      elif val is not None:
+        fingerprint[k] = val
+    for k, v in fingerprint.items():
+      if not isinstance(v, str) and isinstance(v, Iterable):
+        fingerprint[k] = tuple(list(v))
+    return tuple(sorted(fingerprint.items()))
+
+  def clean_up_cache(self):
+    # We don't reset self.cache so people can use it in future computation.
+    # If not reused, self.cache is reset at the beginning of every computation.
     self.cache_key = None
 
-  def traverse(self, include_self=True):
+  def to_dot(self, strict=True):
+    """Represents the Metric in DOT language.
+
+    Args:
+      strict: If to make the DOT language graph strict. The strict mode will
+        dedupe duplicated edges.
+
+    Returns:
+      A string representing the Metric tree in DOT language.
+    """
+    import pydot  # pylint: disable=g-import-not-at-top
+    dot = pydot.Dot(self.name, graph_type='graph', strict=strict)
+    for m in self.traverse(include_constants=True):
+      label = str(getattr(m, 'name', m))
+      if getattr(m, 'where', ''):
+        label += ' where %s' % m.where
+      dot.add_node(pydot.Node(id(m), label=label))
+
+    def add_edges(metric):
+      if isinstance(metric, Metric):
+        for c in metric.children:
+          dot.add_edge(pydot.Edge(id(metric), id(c)))
+          add_edges(c)
+
+    add_edges(self)
+    return dot.to_string()
+
+  def visualize_metric_tree(self, rendering_fn, strict=True):
+    """Renders the Metric tree.
+
+    Args:
+      rendering_fn: A function that takes a string of DOT representation of the
+        Metric and renders it as side effect.
+      strict: If to make the DOT language graph strict. The strict mode will
+        dedupe duplicated edges.
+    """
+    rendering_fn(self.to_dot(strict))
+
+  def traverse(self, include_self=True, include_constants=False):
     ms = [self] if include_self else list(self.children)
     while ms:
       m = ms.pop(0)
       if isinstance(m, Metric):
         ms += list(m.children)
+        yield m
+      elif include_constants:
         yield m
 
   def compute_on_sql(
@@ -536,6 +598,7 @@ class Metric(object):
       melted=False,
       mode=None,
       cache_key=None,
+      cache=None,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
 
@@ -544,113 +607,83 @@ class Metric(object):
       split_by: The columns that we use to split the data.
       execute: A function that can executes a SQL query and returns a DataFrame.
       melted: Whether to transform the result to long format.
-      mode: For Operations, there are two ways to compute the result in SQL, one
-        is computing everything in SQL, the other is computing the children
-        in SQL then the rest in Python. We call them 'sql' and 'mixed' modes. If
-        self has grandchildren, then we can compute the chilren in two modes
-        too. We can call them light `mixed` mode and recursive `mixed` mode.
-        If `mode` is 'sql', it computes everything in SQL.
-        If `mode` is 'mixed', it computes everything recursively in the `mixed`
-        mode.
-        We recommend `mode` to be None. This mode tries the `sql` mode first, if
-        not implemented, switch to light `mixed` mode. The logic is applied
-        recursively from the root to leaf Metrics, so a Metric tree could have
-        top 3 layeres computed in Python and the bottom in SQL. In summary,
-        everything can be computed in SQL is computed in SQL.
+      mode: For Metrics with children, there are different ways to split the
+        computation into SQL and Python. For example, we can compute everything
+        in SQL, or the children in SQL and the parent in Python, or
+        grandchildren in SQL and the rest in Python. Here we support two modes.
+        The default mode where `mode` is None is recommend. This mode computes
+        maximizes the SQL usage, namely, everything can be computed in SQL is
+        computed in SQL. The opposite mode is called `mixed` where the SQL usage
+        is minimized, namely, only leaf Metrics are computed in SQL. There is
+        another `magic` mode which only applies to Models. The mode computes
+        sufficient statistics in SQL then use them to solve the coefficients in
+        Python. It's faster then the regular mode when fitting Models on large
+        data.
       cache_key: What key to use to cache the result. You can use anything that
         can be a key of a dict except '_RESERVED' and tuples like
         ('_RESERVED', ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
+    self.cache = {} if cache is None else cache
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
-    need_clean_up = True
     try:
-      if cache_key is not None:
-        cache_key = self.wrap_cache_key(cache_key, split_by)
-        if self.in_cache(cache_key):
-          need_clean_up = False
-          res = self.get_cached(cache_key)
-          res = self.manipulate(res, melted, apply_name_tmpl=False)
-          return self.final_compute(res, melted, True, split_by, table)
-        else:
-          self.cache_key = cache_key
-          raw_res = self.compute_through_sql(table, split_by, execute, mode)
-          res = raw_res
-          # For simple metrics we save a pd.Series to be consistent with
-          # compute_on().
-          if isinstance(raw_res, pd.DataFrame
-                       ) and raw_res.shape[1] == 1 and not is_operation(self):
-            raw_res = raw_res.iloc[:, 0]
-          self.save_to_cache(cache_key, raw_res)
-          if utils.is_tmp_key(cache_key):
-            self.tmp_cache_keys.add(cache_key)
+      cache_key = self.wrap_cache_key(cache_key, split_by)
+      if self.in_cache(cache_key):
+        res = self.get_cached(cache_key)
       else:
-        res = self.compute_through_sql(table, split_by, execute, mode)
+        self.cache_key = cache_key
+        raw_res = self.compute_through_sql(table, split_by, execute, mode)
+        res = raw_res
+        # For simple metrics we save a pd.Series to be consistent with
+        # compute_on().
+        if isinstance(
+            raw_res,
+            pd.DataFrame) and raw_res.shape[1] == 1 and not is_operation(self):
+          raw_res = raw_res.iloc[:, 0]
+        self.save_to_cache(cache_key, raw_res)
       res = self.manipulate(res, melted, apply_name_tmpl=False)
       return self.final_compute(res, melted, True, split_by, table)
     finally:
-      if need_clean_up:
-        self.flush_tmp_cache()
+      self.clean_up_cache()
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
-    if mode not in (None, 'sql', 'mixed', 'magic'):
+    if mode not in (None, 'mixed', 'magic'):
       raise ValueError('Mode %s is not supported!' % mode)
-    if not self.children and not self.computable_in_pure_sql:
-      raise ValueError('%s is not computable in SQL.' % self.name)
-    if mode in (None, 'sql') or not self.children:
-      if self.all_computable_in_pure_sql():
-        try:
-          return self.compute_on_sql_sql_mode(table, split_by, execute)
-        except Exception as e:  # pylint: disable=broad-except
-          if not self.children:
-            raise
-          raise utils.MaybeBadSqlModeError('mixed') from e
-      elif mode == 'sql':
-        raise ValueError('%s is not computable in pure SQL.' % self.name)
+    if not self.children:
+      return self.compute_on_sql_sql_mode(table, split_by, execute)
+    if not mode:
+      try:
+        return self.compute_on_sql_sql_mode(table, split_by, execute)
+      except NotImplementedError:
+        pass
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
 
-  def all_computable_in_pure_sql(self, include_self=True):
-    """If the whole Metric tree is computable in SQL."""
-    for m in self.traverse(include_self):
-      if not m.computable_in_pure_sql:
-        return False
-    return True
-
-  def compute_on_sql_sql_mode(self,
-                              table,
-                              split_by=None,
-                              execute=None):
+  def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
     """Executes the query from to_sql() and process the result."""
     query = self.to_sql(table, split_by)
     res = execute(str(query))
-    extra_idx = list(get_extra_idx(self))
+    extra_idx = list(utils.get_extra_idx(self))
     indexes = split_by + extra_idx if split_by else extra_idx
     columns = [a.alias_raw for a in query.groupby.add(query.columns)]
     columns[:len(indexes)] = indexes
     res.columns = columns
-    # We replace '$' with 'macro_' in the generated SQL. To recover the names,
-    # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
-    # orignal names. We can get the index names so we can recover them but
-    # unfortunately it's not as easy to recover metric/column names, so for the
-    # metrics we just replace 'macro_' with '$'.
     if indexes:
       res.set_index(indexes, inplace=True)
-    res.columns = [c.replace('macro_', '$') for c in res.columns]
     if split_by:  # Use a stable sort.
       res.sort_values(split_by, kind='mergesort', inplace=True)
     return res
 
-  def to_sql(self,
-             table,
-             split_by: Optional[Union[Text, List[Text]]] = None):
+  def to_sql(self, table, split_by: Optional[Union[Text, List[Text]]] = None):
     """Generates SQL query for the metric."""
-    global_filter = get_global_filter(self)
-    indexes = sql.Columns(split_by).add(get_extra_idx(self))
+    global_filter = utils.get_global_filter(self)
+    indexes = sql.Columns(split_by).add(utils.get_extra_idx(self))
     with_data = sql.Datasources()
     if isinstance(table, sql.Sql) and table.with_data:
       table = copy.deepcopy(table)
@@ -702,11 +735,7 @@ class Metric(object):
     raise NotImplementedError('SQL generator is not implemented for %s.' %
                               type(self))
 
-  def compute_on_sql_mixed_mode(self,
-                                table,
-                                split_by,
-                                execute,
-                                mode=None):
+  def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
     """Computes the child in SQL and the rest in Python."""
     children = self.compute_children_sql(table, split_by, execute, mode)
     return self.compute_on_children(children, split_by)
@@ -720,8 +749,109 @@ class Metric(object):
       else:
         children.append(
             c.compute_on_sql(table, split_by + self.extra_split_by, execute,
-                             False, mode, self.cache_key or self.RESERVED_KEY))
+                             False, mode, self.cache_key, self.cache))
     return children[0] if len(self.children) == 1 else children
+
+  def compute_on_pcollection(self,
+                             pcol,
+                             split_by=None,
+                             execute=None,
+                             melted=False,
+                             mode=None,
+                             cache_key=None,
+                             cache=None,
+                             **kwargs):
+    """Computes on an Apache Beam input.
+
+    Args:
+      pcol: An apache_beam.pvalue.PCollection instance we want to compute on. It
+        needs to have a schema so it's queryable.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes PCollection with a SqlTransform and
+        returns a DataFrame.
+      melted: Whether to transform the result to long format.
+      mode: Similar to the one in compute_on_sql(). `None` maximizes Beam usage
+        while 'mixed' minimizes the usage.
+      cache_key: What key to use to cache the result. You can use anything that
+        can be a key of a dict except '_RESERVED' and tuples like
+        ('_RESERVED', ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
+      **kwargs: Other kwargs passed to compute_on_sql.
+
+    Returns:
+      A pandas DataFrame. It's the computeation of self in Beam.
+    """
+    # pylint: disable=g-import-not-at-top
+    from apache_beam import pvalue
+    from apache_beam.transforms import sql as beam_sql
+
+    if not isinstance(pcol, pvalue.PCollection):
+      raise ValueError('The input must be a PCollection but got %s!' %
+                       type(pcol))
+
+    def e(q):
+      label = f'Meterstick at {datetime.datetime.now()} runs {q}'
+      res = execute(pcol | label >> beam_sql.SqlTransform(str(q)))
+      return res
+    # pylint: disable=g-import-not-at-top
+
+    try:
+      return self.compute_on_sql('PCOLLECTION', split_by, e, melted, mode,
+                                 cache_key, cache, **kwargs)
+    except Exception as e:  # pylint: disable=broad-except
+      if not mode:
+        raise ValueError(
+            "Please see the root cause of the failure above. If it's caused by "
+            'the SQL query not being supported, try '
+            "compute_on_pcollection(..., mode='mixed').") from e
+      raise
+
+  def compute_equivalent(self, df, split_by=None):
+    equiv, df = utils.get_stable_equivalent_metric_tree(self, df)
+    return self.compute_util_metric_on(
+        equiv, df, split_by, return_dataframe=False)
+
+  def get_equivalent(self, *auxiliary_cols):
+    """Gets a Metric that is equivalent to self."""
+    res = self.get_equivalent_without_filter(*auxiliary_cols)  # pylint: disable=assignment-from-none
+    if res:
+      res.name = self.name
+      res.where = self.where_raw
+    return res
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    """Gets a Metric that is equivalent to self but ignoring the filter."""
+    del auxiliary_cols  # might be used in derived classes
+    return
+
+  def get_auxiliary_cols(self):
+    """Returns the auxiliary columns required by the equivalent Metric.
+
+    See utils.add_auxiliary_cols() for the format of the return.
+    """
+    return ()
+
+  def __str__(self):
+    return self.name
+
+  def __repr__(self):
+    return self.__str__()
+
+  def __deepcopy__(self, memo):
+    # We don't copy self.cache, for two reasons.
+    # 1. The copied Metric can share the same cache to maximize caching.
+    # 2. When deepcopy a Metric, its cache refers to CacheKey and CacheKey
+    # refers back. The loop leads to missing attributes error.
+    cls = self.__class__
+    obj = cls.__new__(cls)
+    memo[id(self)] = obj
+    for k, v in self.__dict__.items():
+      if k == 'cache':
+        obj.cache = v
+      else:
+        setattr(obj, k, copy.deepcopy(v, memo))
+    return obj
 
   def __or__(self, fn):
     """Overwrites the '|' operator to enable pipeline chaining."""
@@ -767,6 +897,25 @@ class Metric(object):
 
   def __rpow__(self, other):
     return CompositeMetric(lambda x, y: x**y, '{} ^ {}', (other, self))
+
+  def __eq__(self, other):
+    if not isinstance(other, type(self)) or not isinstance(self, type(other)):
+      return False
+    if self.name != other.name:
+      return False
+    if self.get_fingerprint() != other.get_fingerprint():
+      return False
+    # Some Metrics share fingerprints. For example, Mean has the same
+    # fingerprint as Sum(x) / Count(x) so we need to further check.
+    if len(self.children) != len(other.children):
+      return False
+    for m1, m2 in zip(self.children, other.children):
+      if m1 != m2:
+        return False
+    return True
+
+  def __hash__(self):
+    return hash((self.name, self.get_fingerprint()))
 
 
 class MetricList(Metric):
@@ -814,20 +963,16 @@ class MetricList(Metric):
 
     Args:
       df: The DataFrame to compute on.
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
 
     Returns:
       A list of results.
     """
     res = []
-    key = self.cache_key or self.RESERVED_KEY
     for m in self:
       try:
-        child = m.compute_on(
-            df,
-            split_by,
-            return_dataframe=self.children_return_dataframe,
-            cache_key=key)
+        child = self.compute_util_metric_on(
+            m, df, split_by, return_dataframe=self.children_return_dataframe)
         if isinstance(child, pd.DataFrame):
           if self.name_tmpl:
             child.columns = [self.name_tmpl.format(c) for c in child.columns]
@@ -847,9 +992,7 @@ class MetricList(Metric):
     1. Get the query for every children metric.
     2. If all children queries are compatible, we just collect all the columns
       from the children and use the WHERE and GROUP BY clauses from any
-      children. The FROM clause is more complex. We use the largest FROM clause
-      in children.
-      See the doc of is_compatible() for its meaning.
+      children.
       If any pair of children queries are incompatible, we merge the compatible
       children as much as possible then add the merged SQLs to with_data, join
       them on indexes, and SELECT *.
@@ -902,7 +1045,6 @@ class MetricList(Metric):
         from_data = sql.Join(from_data, alias, join=join, using=indexes)
 
     query = sql.Sql(columns, from_data)
-
     if self.columns:
       columns = query.columns[len(indexes):]
       if len(columns) != len(self.columns):
@@ -917,6 +1059,8 @@ class MetricList(Metric):
   def compute_on_children(self, children, split_by):
     if isinstance(children, list):
       children = self.to_dataframe(children)
+    if self.name_tmpl:
+      children.columns = [self.name_tmpl.format(c) for c in children.columns]
     if self.columns:
       if len(children.columns) != len(self.columns):
         raise ValueError(
@@ -948,6 +1092,8 @@ class MetricList(Metric):
     return res
 
   def to_dataframe(self, res):
+    if not isinstance(res, (list, tuple)):
+      return super(MetricList, self).to_dataframe(res)
     res_all = pd.concat(res, axis=1, sort=False)
     # In PY2, if index order are different, the names might get dropped.
     res_all.index.names = res[0].index.names
@@ -957,8 +1103,8 @@ class MetricList(Metric):
     """Rename the columns of the MetricList.
 
     Useful for instances where you have Metrics in the MetricList that are
-    CompositeMetrics with undesirable names. Alters the the name of the
-    children inplace.
+    CompositeMetrics with undesirable names. Alters the name of the children
+    inplace.
 
     Args:
       rename_columns: The names to rename the columns of the output dataframe
@@ -1020,7 +1166,12 @@ class CompositeMetric(Metric):
       raise ValueError('MetricList must take at least one Metric!')
 
     name = name_tmpl.format(*map(utils.get_name, children))
-    super(CompositeMetric, self).__init__(name, children, where, name_tmpl)
+    super(CompositeMetric, self).__init__(
+        name,
+        children,
+        where,
+        name_tmpl,
+        additional_fingerprint_attrs=['name_tmpl'])
     self.op = op
     self.columns = rename_columns
 
@@ -1032,6 +1183,15 @@ class CompositeMetric(Metric):
     self.name = name
     return self
 
+  def get_fingerprint(self):
+    # Make Sum(x) / Count(x) indistinguishable to Mean(x) in cache.
+    s = self.children[0]
+    c = self.children[1]
+    if isinstance(s, Sum) and isinstance(
+        c, Count) and s.var == c.var and s.where == c.where and not c.distinct:
+      return Mean(s.var, where=s.where_raw).get_fingerprint()
+    return super(CompositeMetric, self).get_fingerprint()
+
   def compute_children(self, df, split_by):
     if len(self.children) != 2:
       raise ValueError('CompositeMetric can only have two children.')
@@ -1040,12 +1200,12 @@ class CompositeMetric(Metric):
     children = []
     for m in self.children:
       if isinstance(m, Metric):
-        m = m.compute_on(
+        m = self.compute_util_metric_on(
+            m,
             df,
             split_by,
             # MetricList returns an undesired list when not return_dataframe.
-            return_dataframe=isinstance(m, MetricList),
-            cache_key=self.cache_key or self.RESERVED_KEY)
+            return_dataframe=isinstance(m, MetricList))
       children.append(m)
     return children
 
@@ -1066,7 +1226,7 @@ class CompositeMetric(Metric):
     Args:
       children: A length-2 list. The elements could be numbers, pd.Series or
         pd.DataFrames.
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
 
     Returns:
       The result to be sent to final_compute().
@@ -1165,7 +1325,7 @@ class CompositeMetric(Metric):
           query0.columns) != len(query1.columns):
         raise ValueError('Children Metrics have different shapes!')
 
-      compatible, larger_from = sql.is_compatible(query0, query1)
+      compatible = sql.is_compatible(query0, query1)
       if compatible:
         col0_col1 = zip(itertools.cycle(query0.columns), query1.columns)
         if len(query1.columns) == 1:
@@ -1179,7 +1339,6 @@ class CompositeMetric(Metric):
             columns.add(op(c0, c1).set_alias(alias))
         query = query0
         query.columns = columns
-        query.from_data = larger_from
       else:
         tbl0 = with_data.add(sql.Datasource(query0, 'CompositeMetricTable0'))
         tbl1 = with_data.add(sql.Datasource(query1, 'CompositeMetricTable1'))
@@ -1197,9 +1356,8 @@ class CompositeMetric(Metric):
             columns.add(col)
         query = sql.Sql(sql.Columns(indexes.aliases).add(columns), from_data)
 
-    if not is_operation(self.children[0]) and not is_operation(
-        self.children[1]) and len(query.columns) == 1:
-      query.columns[0].set_alias(self.name)
+    if len(query.columns.difference(indexes)) == 1:
+      query.columns[-1].set_alias(self.name)
 
     if self.columns:
       columns = query.columns.difference(indexes)
@@ -1223,7 +1381,15 @@ class Ratio(CompositeMetric):
         lambda x, y: x / y,
         '{} / {}', (Sum(numerator), Sum(denominator)),
         where=where)
+    self.numerator = numerator
+    self.denominator = denominator
     self.name = name or self.name
+
+  def get_fingerprint(self):
+    # Make the fingerprint same as the equivalent CompositeMetric for caching.
+    util = Sum(self.numerator) / Sum(self.denominator)
+    util.where = self.where_raw
+    return util.get_fingerprint()
 
 
 class SimpleMetric(Metric):
@@ -1234,29 +1400,27 @@ class SimpleMetric(Metric):
                name: Optional[Text] = None,
                name_tmpl=None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               additional_fingerprint_attrs: Optional[List[str]] = None):
     name = name or name_tmpl.format(var)
     self.var = var
-    precompute = kwargs.pop('precompute', None)
-    postcompute = kwargs.pop('postcompute', None)
-    final_compute = kwargs.pop('final_compute', None)
-    self.kwargs = kwargs
+    additional_fingerprint_attrs = ['var', 'var2'] + (
+        additional_fingerprint_attrs or [])
     super(SimpleMetric, self).__init__(
         name,
         None,
         where,
         name_tmpl,
-        precompute=precompute,
-        postcompute=postcompute,
-        final_compute=final_compute)
+        additional_fingerprint_attrs=additional_fingerprint_attrs)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
-    del indexes  # unused
     local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
-    return sql.Sql(
-        self.get_sql_columns(local_filter), table, global_filter,
-        split_by), with_data
+    cols = self.get_sql_columns(local_filter)
+    if cols:
+      return sql.Sql(cols, table, global_filter, split_by), with_data
+    equiv, _ = utils.get_stable_equivalent_metric_tree(self)
+    return equiv.get_sql_and_with_clause(table, split_by, global_filter,
+                                         indexes, local_filter, with_data)
 
   def get_sql_columns(self, local_filter):
     raise ValueError('get_sql_columns is not implemented for %s.' % type(self))
@@ -1271,7 +1435,6 @@ class Count(SimpleMetric):
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
     distinct: Whether to count distinct values.
-    kwargs: Other kwargs passed to pd.DataFrame.count() or nunique().
     And all other attributes inherited from Metric.
   """
 
@@ -1279,17 +1442,15 @@ class Count(SimpleMetric):
                var: Text,
                name: Optional[Text] = None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
-               distinct: bool = False,
-               **kwargs):
+               distinct: bool = False):
     self.distinct = distinct
     if distinct:
-      name = name or 'count(distinct %s)' % var
-    super(Count, self).__init__(var, name, 'count({})', where, **kwargs)
+      name = name or 'count(distinct %s)' % str(var)
+    super(Count, self).__init__(var, name, 'count({})', where, ['distinct'])
 
   def compute_slices(self, df, split_by=None):
     grped = self.group(df, split_by)[self.var]
-    return grped.nunique(**self.kwargs) if self.distinct else grped.count(
-        **self.kwargs)
+    return grped.nunique() if self.distinct else grped.count()
 
   def get_sql_columns(self, local_filter):
     if self.distinct:
@@ -1306,19 +1467,17 @@ class Sum(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.sum().
     And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
-    super(Sum, self).__init__(var, name, 'sum({})', where, **kwargs)
+               where: Optional[Union[Text, Sequence[Text]]] = None):
+    super(Sum, self).__init__(var, name, 'sum({})', where)
 
   def compute_slices(self, df, split_by=None):
-    return self.group(df, split_by)[self.var].sum(**self.kwargs)
+    return self.group(df, split_by)[self.var].sum()
 
   def get_sql_columns(self, local_filter):
     return sql.Column(self.var, 'SUM({})', self.name, local_filter)
@@ -1334,8 +1493,7 @@ class Dot(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.sum() or .mean(). And all other
-      attributes inherited from SimpleMetric.
+    And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
@@ -1343,27 +1501,41 @@ class Dot(SimpleMetric):
                var2: Text,
                normalize=False,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     self.var2 = var2
     self.normalize = normalize
-    name_tmpl = ('mean({} * %s)' if normalize else 'sum({} * %s)') % var2
-    super(Dot, self).__init__(var1, name, name_tmpl, where, **kwargs)
+    name_tmpl = ('mean({} * %s)' if normalize else 'sum({} * %s)') % str(var2)
+    super(Dot, self).__init__(var1, name, name_tmpl, where, ['normalize'])
 
   def compute_slices(self, df, split_by=None):
     if not split_by:
       prod = (df[self.var] * df[self.var2])
-      return prod.mean(**self.kwargs) if self.normalize else prod.sum(
-          **self.kwargs)
-    df['_meterstick_dot_helper'] = df[self.var] * df[self.var2]
-    grped = df.groupby(split_by)['_meterstick_dot_helper']
-    res = grped.mean() if self.normalize else grped.sum()
-    df.drop('_meterstick_dot_helper', axis=1, inplace=True)
-    return res
+      return prod.mean() if self.normalize else prod.sum()
+    if self.normalize:
+      fn = lambda df: (df[self.var] * df[self.var2]).mean()
+    else:
+      fn = lambda df: (df[self.var] * df[self.var2]).sum()
+    return df.groupby(split_by).apply(fn)
 
   def get_sql_columns(self, local_filter):
     tmpl = 'AVG({} * {})' if self.normalize else 'SUM({} * {})'
     return sql.Column((self.var, self.var2), tmpl, self.name, local_filter)
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    if self.normalize:
+      return Sum(auxiliary_cols[0]) / Count(auxiliary_cols[0])
+    return Sum(auxiliary_cols[0])
+
+  def get_auxiliary_cols(self):
+    return ((self.var, '*', self.var2),)
+
+  def get_fingerprint(self):
+    if str(self.var) > str(self.var2):
+      util = copy.deepcopy(self)
+      util.var = self.var2
+      util.var2 = self.var
+      return util.get_fingerprint()
+    return super(Dot, self).get_fingerprint()
 
 
 class Mean(SimpleMetric):
@@ -1375,8 +1547,6 @@ class Mean(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.mean(). Only has effect if no
-      weight is specified.
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1384,22 +1554,15 @@ class Mean(SimpleMetric):
                var: Text,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
-    name_tmpl = '%s-weighted mean({})' % weight if weight else 'mean({})'
-    super(Mean, self).__init__(var, name, name_tmpl, where, **kwargs)
+               where: Optional[Union[Text, Sequence[Text]]] = None):
+    name_tmpl = '%s-weighted mean({})' % str(weight) if weight else 'mean({})'
+    super(Mean, self).__init__(var, name, name_tmpl, where, ['weight'])
     self.weight = weight
-
-  def compute(self, df):
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-    return np.average(df[self.var], weights=df[self.weight])
 
   def compute_slices(self, df, split_by=None):
     if self.weight:
-      # When there is weight, just loop through slices.
-      return super(Mean, self).compute_slices(df, split_by)
-    return self.group(df, split_by)[self.var].mean(**self.kwargs)
+      return self.compute_equivalent(df, split_by)
+    return self.group(df, split_by)[self.var].mean()
 
   def get_sql_columns(self, local_filter):
     if not self.weight:
@@ -1410,6 +1573,12 @@ class Mean(SimpleMetric):
       res /= sql.Column(self.weight, 'SUM({})', 'total_weight', local_filter)
       return res.set_alias(self.name)
 
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    if not self.weight:
+      return Sum(self.var) / Count(self.var)
+    return Dot(self.var, self.weight) / Sum(self.weight)
+
 
 class Max(SimpleMetric):
   """Max estimator.
@@ -1419,19 +1588,17 @@ class Max(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.max().
     And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
-    super(Max, self).__init__(var, name, 'max({})', where, **kwargs)
+               where: Optional[Union[Text, Sequence[Text]]] = None):
+    super(Max, self).__init__(var, name, 'max({})', where)
 
   def compute_slices(self, df, split_by=None):
-    return self.group(df, split_by)[self.var].max(**self.kwargs)
+    return self.group(df, split_by)[self.var].max()
 
   def get_sql_columns(self, local_filter):
     return sql.Column(self.var, 'MAX({})', self.name, local_filter)
@@ -1445,19 +1612,17 @@ class Min(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.min().
     And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
-    super(Min, self).__init__(var, name, 'min({})', where, **kwargs)
+               where: Optional[Union[Text, Sequence[Text]]] = None):
+    super(Min, self).__init__(var, name, 'min({})', where)
 
   def compute_slices(self, df, split_by=None):
-    return self.group(df, split_by)[self.var].min(**self.kwargs)
+    return self.group(df, split_by)[self.var].min()
 
   def get_sql_columns(self, local_filter):
     return sql.Column(self.var, 'MIN({})', self.name, local_filter)
@@ -1476,21 +1641,24 @@ class Quantile(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.quantile().
     And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
                var: Text,
-               quantile: Union[float, int] = 0.5,
+               quantile: Union[float, int, Sequence[Union[float, int]]] = 0.5,
                weight: Optional[Text] = None,
                interpolation='linear',
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
-    self.one_quantile = isinstance(quantile, (int, float))
-    if not self.one_quantile:
+               where: Optional[Union[Text, Sequence[Text]]] = None):
+    if isinstance(quantile, (int, float)):
+      self.one_quantile = True
+    else:
+      self.one_quantile = False
       quantile = np.array(quantile)
+      if len(quantile) == 1:
+        quantile = quantile[0]
+        self.one_quantile = True
     if self.one_quantile and not 0 <= quantile <= 1:
       raise ValueError('quantiles must be in [0, 1].')
     if not self.one_quantile and not (np.all(quantile >= 0) and
@@ -1498,12 +1666,13 @@ class Quantile(SimpleMetric):
       raise ValueError('quantiles must be in [0, 1].')
     name_tmpl = 'quantile({}, {})'
     if weight:
-      name_tmpl = '%s-weighted quantile({}, {})' % weight
+      name_tmpl = '%s-weighted quantile({}, {})' % str(weight)
     name = name or name_tmpl.format(var, str(quantile))
     self.quantile = quantile
     self.interpolation = interpolation
     self.weight = weight
-    super(Quantile, self).__init__(var, name, name_tmpl, where, **kwargs)
+    super(Quantile, self).__init__(var, name, name_tmpl, where,
+                                   ['quantile', 'weight', 'interpolation'])
 
   def compute(self, df):
     """Adapted from https://stackoverflow.com/a/29677616/12728137."""
@@ -1529,7 +1698,7 @@ class Quantile(SimpleMetric):
       # When there is weight, just loop through slices.
       return super(Quantile, self).compute_slices(df, split_by)
     res = self.group(df, split_by)[self.var].quantile(
-        self.quantile, interpolation=self.interpolation, **self.kwargs)
+        self.quantile, interpolation=self.interpolation)
     if self.one_quantile:
       return res
 
@@ -1568,13 +1737,12 @@ class Variance(SimpleMetric):
 
   Attributes:
     var: Column to compute on.
-    ddof: Degree of freedom to use in pd.DataFrame.var().
+    ddof: Degree of freedom to use in pd.DataFrame.var(). If ddof is larger than
+      the degree of freedom in the data, we return NA.
     weight: The column of weights.
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.var(). Only has effect if no
-      weight is specified.
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1583,43 +1751,39 @@ class Variance(SimpleMetric):
                unbiased: bool = True,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
-    name_tmpl = '%s-weighted var({})' % weight if weight else 'var({})'
-    super(Variance, self).__init__(var, name, name_tmpl, where, **kwargs)
-
-  def compute(self, df):
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-    avg = np.average(df[self.var], weights=df[self.weight])
-    total = (df[self.weight] * (df[self.var] - avg)**2).sum()
-    total_weights = df[self.weight].sum()
-    return total / (total_weights - self.ddof)
+    name_tmpl = '%s-weighted var({})' % str(weight) if weight else 'var({})'
+    super(Variance, self).__init__(var, name, name_tmpl, where,
+                                   ['ddof', 'weight'])
 
   def compute_slices(self, df, split_by=None):
     if self.weight:
-      # When there is weight, just loop through slices.
-      return super(Variance, self).compute_slices(df, split_by)
-    return self.group(df, split_by)[self.var].var(ddof=self.ddof, **self.kwargs)
-
-  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
-                              local_filter, with_data):
-    if self.weight:
-      return _get_sql_for_weighted_var_or_se(self, table, split_by,
-                                             global_filter, local_filter,
-                                             with_data)
-    return super(Variance,
-                 self).get_sql_and_with_clause(table, split_by, global_filter,
-                                               indexes, local_filter, with_data)
+      return self.compute_equivalent(df, split_by)
+    return self.group(df, split_by)[self.var].var(ddof=self.ddof)
 
   def get_sql_columns(self, local_filter):
+    if self.weight:
+      return
+    if self.ddof == 1:
+      return sql.Column(self.var, 'VAR_SAMP({})', self.name, local_filter)
+    else:
+      return sql.Column(self.var, 'VAR_POP({})', self.name, local_filter)
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
     if not self.weight:
-      if self.ddof == 1:
-        return sql.Column(self.var, 'VAR_SAMP({})', self.name, local_filter)
-      else:
-        return sql.Column(self.var, 'VAR_POP({})', self.name, local_filter)
+      return Cov(self.var, self.var, ddof=self.ddof)
+    numer = Dot(auxiliary_cols[0],
+                self.weight) - Dot(self.var, self.weight)**2 / Sum(self.weight)
+    denom = Sum(self.weight) - self.ddof if self.ddof else Sum(self.weight)
+    # ddof is invalid if it makes the denom negative so we use ((denom)^0.5)^2.
+    return numer / (denom**0.5)**2
+
+  def get_auxiliary_cols(self):
+    if self.weight:
+      return ((self.var, '**', 2),)
+    return ()
 
 
 class StandardDeviation(SimpleMetric):
@@ -1627,13 +1791,12 @@ class StandardDeviation(SimpleMetric):
 
   Attributes:
     var: Column to compute on.
-    ddof: Degree of freedom to use in pd.DataFrame.std().
+    ddof: Degree of freedom to use in pd.DataFrame.std(). If ddof is larger
+      than the degree of freedom in the data, we return NA.
     weight: The column of weights.
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.std(). Only has effect if no
-      weight is specified.
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1642,109 +1805,29 @@ class StandardDeviation(SimpleMetric):
                unbiased: bool = True,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
-    name_tmpl = '%s-weighted sd({})' % weight if weight else 'sd({})'
+    name_tmpl = '%s-weighted sd({})' % str(weight) if weight else 'sd({})'
     super(StandardDeviation, self).__init__(var, name, name_tmpl, where,
-                                            **kwargs)
-
-  def compute(self, df):
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-    avg = np.average(df[self.var], weights=df[self.weight])
-    total = (df[self.weight] * (df[self.var] - avg)**2).sum()
-    total_weights = df[self.weight].sum()
-    return np.sqrt(total / (total_weights - self.ddof))
+                                            ['ddof', 'weight'])
 
   def compute_slices(self, df, split_by=None):
     if self.weight:
-      # When there is weight, just loop through slices.
-      return super(StandardDeviation, self).compute_slices(df, split_by)
-    return self.group(df, split_by)[self.var].std(ddof=self.ddof, **self.kwargs)
-
-  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
-                              local_filter, with_data):
-    if self.weight:
-      query, with_data = _get_sql_for_weighted_var_or_se(
-          self, table, split_by, global_filter, local_filter, with_data)
-      return query, with_data
-    return super(StandardDeviation,
-                 self).get_sql_and_with_clause(table, split_by, global_filter,
-                                               indexes, local_filter, with_data)
+      return self.compute_equivalent(df, split_by)
+    return self.group(df, split_by)[self.var].std(ddof=self.ddof)
 
   def get_sql_columns(self, local_filter):
-    if not self.weight:
-      if self.ddof == 1:
-        return sql.Column(self.var, 'STDDEV_SAMP({})', self.name, local_filter)
-      else:
-        return sql.Column(self.var, 'STDDEV_POP({})', self.name, local_filter)
+    if self.weight:
+      return
+    if self.ddof == 1:
+      return sql.Column(self.var, 'STDDEV_SAMP({})', self.name, local_filter)
+    else:
+      return sql.Column(self.var, 'STDDEV_POP({})', self.name, local_filter)
 
-
-def _get_sql_for_weighted_var_or_se(metric, table, split_by, global_filter,
-                                    local_filter, with_data):
-  """Gets the SQL for weighted Variance or StandardDeviation.
-
-  For Variance the query is like
-  WITH
-  WeightedBase AS (SELECT
-    split_by,
-    weight,
-    weight * POWER(var - SAFE_DIVIDE(
-      SUM(weight * var) OVER (PARTITION BY split_by),
-      SUM(weight) OVER (PARTITION BY split_by)), 2) AS weighted_squared_diff
-  FROM table)
-  SELECT
-    split_by,
-    SAFE_DIVIDE(SUM(weighted_squared_diff), SUM(weight) - 1)
-      AS weighted_metric
-  FROM WeightedBase
-  GROUP BY split_by.
-
-  For StandardDeviation we take the square root of weighted_metric.
-
-  Args:
-    metric: An instance of Variance or StandardDeviation, with weight.
-    table: The table we want to query from.
-    split_by: The columns that we use to split the data.
-    global_filter: The filters that can be applied to the whole Metric tree.
-    local_filter: The filters that have been accumulated so far.
-    with_data: A global variable that contains all the WITH clauses we need.
-
-  Returns:
-    The SQL instance for metric, without the WITH clause component.
-    The global with_data which holds all datasources we need in the WITH clause.
-  """
-  where = sql.Filters([metric.where, local_filter]).remove(global_filter)
-  weight = metric.weight
-  var = metric.var
-  columns = sql.Columns(split_by).add(
-      sql.Column(weight, alias=weight, filters=where))
-  total_sum = sql.Column(
-      '%s * %s' % (weight, var), 'SUM({})', filters=where, partition=split_by)
-  total_weight = sql.Column(
-      weight, 'SUM({})', filters=where, partition=split_by)
-  weighted_mean = total_sum / total_weight
-  weighted_squared_diff = sql.Column(
-      '%s * POWER(%s - %s, 2)' % (weight, var, weighted_mean.expression),
-      alias='weighted_squared_diff',
-      filters=where)
-  weighted_base_table = sql.Sql(
-      columns.add(weighted_squared_diff), table, global_filter)
-  weighted_base_table_alias, rename = with_data.merge(
-      sql.Datasource(weighted_base_table, 'WeightedBase'))
-
-  weight = sql.Column(weight).alias
-  weighted_var = sql.Column(
-      rename.get('weighted_squared_diff', 'weighted_squared_diff'),
-      'SUM({})') / sql.Column(rename.get(weight, weight), 'SUM({}) - 1')
-  if isinstance(metric, StandardDeviation):
-    weighted_var = weighted_var**0.5
-  weighted_var.set_alias(metric.name)
-  return sql.Sql(
-      weighted_var, weighted_base_table_alias,
-      groupby=split_by.aliases), with_data
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    return Variance(self.var, bool(self.ddof), self.weight)**0.5
 
 
 class CV(SimpleMetric):
@@ -1752,12 +1835,11 @@ class CV(SimpleMetric):
 
   Attributes:
     var: Column to compute on.
-    ddof: Degree of freedom to use.
+    ddof: Degree of freedom to use. If ddof is larger than the degree of freedom
+      in the data, we return NA.
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to both pd.DataFrame.std() and
-      pd.DataFrame.mean().
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1765,15 +1847,13 @@ class CV(SimpleMetric):
                var: Text,
                unbiased: bool = True,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     self.ddof = 1 if unbiased else 0
-    super(CV, self).__init__(var, name, 'cv({})', where, **kwargs)
+    super(CV, self).__init__(var, name, 'cv({})', where, ['ddof'])
 
   def compute_slices(self, df, split_by=None):
     var_grouped = self.group(df, split_by)[self.var]
-    return var_grouped.std(
-        ddof=self.ddof, **self.kwargs) / var_grouped.mean(**self.kwargs)
+    return var_grouped.std(ddof=self.ddof) / var_grouped.mean()
 
   def get_sql_columns(self, local_filter):
     if self.ddof == 1:
@@ -1785,6 +1865,10 @@ class CV(SimpleMetric):
                        self.name, local_filter) / sql.Column(
                            self.var, 'AVG({})', self.name, local_filter)
     return res.set_alias(self.name)
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    return StandardDeviation(self.var, bool(self.ddof)) / Mean(self.var)
 
 
 class Correlation(SimpleMetric):
@@ -1799,8 +1883,6 @@ class Correlation(SimpleMetric):
       effect if no weight is specified.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.corr(). Only has effect if no
-      weight is specified.
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1810,29 +1892,24 @@ class Correlation(SimpleMetric):
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
                method='pearson',
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     name_tmpl = 'corr({}, {})'
     if weight:
-      name_tmpl = '%s-weighted corr({}, {})' % weight
+      name_tmpl = '%s-weighted corr({}, {})' % str(weight)
     if name is None:
       name = name_tmpl.format(var1, var2)
     self.var2 = var2
     self.method = method
     self.weight = weight
-    super(Correlation, self).__init__(var1, name, name_tmpl, where, **kwargs)
-
-  def compute(self, df):
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-    cov = np.cov(
-        df[[self.var, self.var2]],
-        rowvar=False,
-        bias=True,
-        aweights=df[self.weight])
-    return cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1])
+    super(Correlation, self).__init__(var1, name, name_tmpl, where,
+                                      ['method', 'weight'])
 
   def compute_slices(self, df, split_by=None):
+    if self.weight and self.method != 'pearson':
+      raise NotImplementedError(
+          'Only Pearson correlation is supported in weighted Correlation!')
+    if self.weight:
+      return self.compute_equivalent(df, split_by)
     # If there are duplicated index values and split_by is not None, the result
     # will be wrong. For example,
     # df = pd.DataFrame(
@@ -1842,20 +1919,34 @@ class Correlation(SimpleMetric):
     # It seems that pandas join the two series so if there are duplicated
     # indexes the series from the grouped by part gets duplicated.
     if isinstance(df, pd.DataFrame):
+      df = df.copy()
       df = df.reset_index(drop=True)
-    if self.weight:
-      # When there is weight, just loop through slices.
-      return super(Correlation, self).compute_slices(df, split_by)
     return self.group(df, split_by)[self.var].corr(
-        df[self.var2], method=self.method, **self.kwargs)
+        df[self.var2], method=self.method)
 
   def get_sql_columns(self, local_filter):
     if self.weight:
-      raise ValueError('SQL for weighted correlation is not supported!')
+      return
     if self.method != 'pearson':
       raise ValueError('Only Pearson correlation is supported!')
     return sql.Column((self.var, self.var2), 'CORR({}, {})', self.name,
                       local_filter)
+
+  def get_fingerprint(self):
+    if str(self.var) > str(self.var2):
+      util = copy.deepcopy(self)
+      util.var = self.var2
+      util.var2 = self.var
+      return util.get_fingerprint()
+    return super(Correlation, self).get_fingerprint()
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    if self.method == 'pearson':
+      return Cov(
+          self.var, self.var2, True, weight=self.weight) / StandardDeviation(
+              self.var, False, self.weight) / StandardDeviation(
+                  self.var2, False, self.weight)
 
 
 class Cov(SimpleMetric):
@@ -1865,13 +1956,15 @@ class Cov(SimpleMetric):
     var: Column of first variable.
     var2: Column of second variable.
     bias: The same arg passed to np.cov().
-    ddof: The same arg passed to np.cov().
-    weight: Column name of aweights passed to np.cov(). If you need fweights,
-      pass it in kwargs.
+    ddof: The same arg passed to np.cov().  If ddof is larger than the degree of
+      freedom in the data, we return NA.
+    weight: Column name of aweights.
+    fweight: Column name of fweights. We will convert the values to integer
+      because that's required by definition. For the definitions of aweights and
+      fweight, see the cod of numpy.cov().
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to np.cov().
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1881,12 +1974,14 @@ class Cov(SimpleMetric):
                bias: bool = False,
                ddof: Optional[int] = None,
                weight: Optional[Text] = None,
+               fweight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     name_tmpl = 'cov({}, {})'
     if weight:
-      name_tmpl = '%s-weighted %s' % (weight, name_tmpl)
+      name_tmpl = '%s-weighted %s' % (str(weight), name_tmpl)
+    if fweight:
+      name_tmpl = '%s-fweighted %s' % (str(fweight), name_tmpl)
 
     if name is None:
       name = name_tmpl.format(var1, var2)
@@ -1894,21 +1989,17 @@ class Cov(SimpleMetric):
     self.bias = bias
     self.ddof = ddof
     self.weight = weight
-    super(Cov, self).__init__(var1, name, name_tmpl, where, **kwargs)
+    self.fweight = fweight
+    super(Cov, self).__init__(var1, name, name_tmpl, where,
+                              ['bias', 'ddof', 'weight', 'fweight'])
 
-  def compute(self, df):
-    return np.cov(
-        df[[self.var, self.var2]],
-        rowvar=False,
-        bias=self.bias,
-        ddof=self.ddof,
-        aweights=df[self.weight] if self.weight else None,
-        **self.kwargs)[0, 1]
+  def compute_slices(self, df, split_by=None):
+    return self.compute_equivalent(df, split_by)
 
   def get_sql_columns(self, local_filter):
     """Get SQL columns."""
-    if self.weight:
-      raise ValueError('SQL for weighted covariance is not supported!')
+    if self.weight or self.fweight:
+      return
     ddof = self.ddof
     if ddof is None:
       ddof = 0 if self.bias else 1
@@ -1918,5 +2009,55 @@ class Cov(SimpleMetric):
     elif ddof == 0:
       return sql.Column((self.var, self.var2), 'COVAR_POP({}, {})', self.name,
                         local_filter)
+    return
+
+  def get_fingerprint(self):
+    if str(self.var) > str(self.var2):
+      util = copy.deepcopy(self)
+      util.var = self.var2
+      util.var2 = self.var
+      return util.get_fingerprint()
+    return super(Cov, self).get_fingerprint()
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    """Gets the equivalent Metric for Cov."""
+    # See https://numpy.org/doc/stable/reference/generated/numpy.cov.html.
+    ddof = self.ddof if self.ddof is not None else int(not self.bias)
+    if not self.weight:
+      if not self.fweight:
+        v1 = Count(self.var)
+        v2 = v1
+        res = Dot(self.var, self.var2, True) - Mean(self.var) * Mean(self.var2)
+      else:
+        v1 = Sum(self.fweight)
+        v2 = v1
+        res = Mean(auxiliary_cols[0], self.fweight) - Mean(
+            self.var, self.fweight) * Mean(self.var2, self.fweight)
+    elif not self.fweight:
+      v1 = Sum(self.weight)
+      v2 = Dot(self.weight, self.weight)
+      res = Mean(auxiliary_cols[0], self.weight) - Mean(
+          self.var, self.weight) * Mean(self.var2, self.weight)
     else:
-      raise ValueError('Only ddof being 0 or 1 is supported!')
+      v1 = Dot(self.weight, self.fweight)
+      v2 = Dot(auxiliary_cols[1], self.weight)
+      res = Mean(auxiliary_cols[0], auxiliary_cols[1]) - Mean(
+          self.var, auxiliary_cols[1]) * Mean(self.var2, auxiliary_cols[1])
+
+    # ddof is invalid if it makes the denom negative so we use ((denom)^0.5)^2.
+    if ddof:
+      if v1 != v2:
+        res /= ((1 - ddof * v2 / v1**2) ** 0.5) ** 2
+      else:
+        res /= ((1 - ddof / v1) ** 0.5) ** 2
+    return res
+
+  def get_auxiliary_cols(self):
+    if not self.weight and not self.fweight:
+      return ()
+    if not self.weight or not self.fweight:
+      return ((self.var, '*', self.var2),)
+    return (
+        (self.var, '*', self.var2),
+        (self.fweight, '*', self.weight),
+    )

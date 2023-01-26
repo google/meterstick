@@ -1,4 +1,6 @@
+absltest
 six
 numpy
 scipy
 pandas
+pydot

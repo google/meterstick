@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,69 +25,28 @@ import re
 from typing import Iterable, Optional, Text, Union
 
 
-def is_compatible(sql0, sql1, exact_from=False):
+def is_compatible(sql0, sql1):
   """Checks if two datasources are compatible so their columns can be merged.
 
-  Being compatible means datasources have same GROUP BY clauses and compatible
-  FROM clause. Compatible means a FROM clause, though may be not exactly same as
-  the other, doesn't change the results. For example, a table selecting from t1
-  could have the same result if it was selecting from t1 LEFT JOIN t2 as long as
-  all values added to t1 are NULLs and our computation ignores NULLs.
-
-  We have several kinds of JOINs in the codes.
-  1. CROSS JOIN with a single value, which is just adding a constant column, so
-    should be considered compatible.
-  2. FULL JOIN. This only happens once in MetricList and it's on all indexing
-    columns. Both tables got expanded but the added values are NULLs and
-    are effectively dropped in the computation so the result doesn't change. So
-    this JOIN should be considered compatible.
-  3. LEFT JOIN. If the left side is the main table (both sql queries select FROM
-    it) and the join is done on all indexing columns, then the join expand the
-    left table with NULLs and don't change the result. There is only one LEFT
-    JOIN which isn't such kind. It's in Bootstrap where we have
-    BootstrapRandomChoices LEFT JOIN original_table.
-  4. (INNER) JOIN. This happens in Comparison. The right table is a subset of
-    the left so it's equivalent to a LEFT JOIN and we don't use the right table
-    alone. So if one query uses t1 JOIN t2 while the other uses t1 it's OK to
-    merge them. Again Bootstrap is an exception, it has JOINs with UNNEST(ARRAY)
-    which replicates the table and will affect the results.
-  As the result, even two queries select from different sources, as long as one
-  contains the other and it's not about Bootstrap, we can still merge them.
-  IMPORTANT: We need to check the logic of every new Metics added in the future.
+  Being compatible means datasources
+  1. have same GROUP BY clauses
+  3. have compatible PARTITION BY. For simplicity as long as one SQL instance
+  has any PARTITION BY, we consider they incompatible.
 
   Args:
     sql0: A Sql instance.
     sql1: A Sql instance.
-    exact_from: If the FROM clauses need to be exactly the same to be considered
-      comaptible.
 
   Returns:
     If sql0 and sql1 are compatible.
-    The larger FROM clause if compatible.
   """
   if not isinstance(sql0, Sql) or not isinstance(sql1, Sql):
     raise ValueError('Both inputs must be a Sql instance!')
-  if (sql0.where != sql1.where or sql0.groupby != sql1.groupby or
-      sql0.with_data != sql1.with_data or sql0.columns.distinct or
-      sql1.columns.distinct):
-    return False, None
-  if sql0.from_data == sql1.from_data:
-    return True, sql1.from_data
-  if exact_from:
-    return False, None
-  mergeable = False
-  # Exclude cases where two differ on suffix.
-  if (str(sql0.from_data) + '\n' in str(sql1.from_data) or
-      str(sql0.from_data) + ' ' in str(sql1.from_data)):
-    mergeable, larger = True, sql1.from_data
-  if (str(sql1.from_data) + '\n' in str(sql0.from_data) or
-      str(sql1.from_data) + ' ' in str(sql0.from_data)):
-    mergeable, larger = True, sql0.from_data
-  if mergeable:
-    if 'UNNEST' in str(larger) or 'BootstrapRandomChoices' in str(larger):
-      return False, None
-    return mergeable, larger
-  return False, None
+  return (sql0.from_data == sql1.from_data and sql0.where == sql1.where and
+          sql0.groupby == sql1.groupby and
+          sql0.with_data == sql1.with_data and not sql0.columns.distinct and
+          not sql1.columns.distinct and ' OVER ' not in str(sql0) and
+          ' OVER ' not in str(sql1))
 
 
 def add_suffix(alias):
@@ -107,15 +66,29 @@ def get_alias(c):
 
 
 def escape_alias(alias):
-  if alias is None:
-    return None
-  # Macro still gets parsed inside backquotes.
-  if alias and '$' in alias:
-    alias = alias.replace('$', 'macro_')
-  alias = alias.replace('`', '')
-  if alias and set(r""" `~!@#$%^&*()-=+[]{}\|;:'",.<>/?""").intersection(alias):
-    return '`%s`' % alias.replace('\\', '\\\\')
-  return alias
+  """Replaces special characters in SQL column name alias."""
+  special = set(r""" `~!@#$%^&*()-=+[]{}\|;:'",.<>/?""")
+  if not alias or not special.intersection(alias):
+    return alias
+  escape = {c: '_' for c in special}
+  escape.update({
+      '!': '_not_',
+      '$': '_macro_',
+      '@': '_at_',
+      '%': '_pct_',
+      '^': '_to_the_power_',
+      '*': '_times_',
+      ')': '',
+      '-': '_minus_',
+      '=': '_equals_',
+      '+': '_plus_',
+      '.': '_point_',
+      '/': '_divides_',
+      '>': '_greater_than_',
+      '<': '_smaller_than_',
+  })
+  return ''.join(escape.get(c, c) for c in alias).strip('_').strip(' ').replace(
+      '__', '_')
 
 
 @functools.total_ordering
@@ -301,8 +274,11 @@ class Column(SqlComponent):
     over = None
     if not (self.partition is None and self.order is None and
             self.window_frame is None):
+      partition_cols_str = [
+          'CAST(%s AS STRING)' % c for c in Columns(self.partition).expressions
+      ]
       partition = 'PARTITION BY %s' % ', '.join(
-          Columns(self.partition).expressions) if self.partition else ''
+          partition_cols_str) if self.partition else ''
       order = 'ORDER BY %s' % ', '.join(Columns(
           self.order).expressions) if self.order else ''
       frame = self.window_frame
@@ -716,7 +692,7 @@ class Sql(SqlComponent):
     getattr(self, attr).add(values)
     return self
 
-  def merge(self, other: 'Sql', expand_from=False):
+  def merge(self, other: 'Sql'):
     """Merges columns from other to self if possible.
 
     If self and other are compatible, we can merge their columns. The columns
@@ -724,8 +700,6 @@ class Sql(SqlComponent):
 
     Args:
       other: Another Sql instance.
-      expand_from: Determines if to merge when self and other are compatible but
-        other has a larger FROM clause.
 
     Returns:
       If two Sql instances are mergeable and a dict to look up new column names.
@@ -734,12 +708,9 @@ class Sql(SqlComponent):
       raise ValueError('Expected a Sql instance but got %s!' % type(other))
     if self == other:
       return True, {}
-    compatible, larger = is_compatible(self, other, expand_from)
+    compatible = is_compatible(self, other)
     if not compatible:
       return False, {}
-    if self.from_data != larger and not expand_from:
-      return False, {}
-    self.from_data = copy.deepcopy(larger)
     curr_aliases = other.columns.aliases
     self.columns.add(other.columns)
     return True, dict(
@@ -747,13 +718,17 @@ class Sql(SqlComponent):
 
   def __str__(self):
     with_clause = 'WITH\n%s' % self.with_data if self.with_data else None
-    tmpl = 'SELECT DISTINCT\n%s' if self.columns.distinct else 'SELECT\n%s'
-    select_clause = tmpl % Columns(self.groupby).add(self.columns)
+    select_clause = 'SELECT\n%s' % Columns(self.groupby).add(self.columns)
     from_clause = ('FROM %s'
                    if self.from_data.is_table else 'FROM\n%s') % self.from_data
     where_clause = 'WHERE\n%s' % self.where if self.where else None
-    groupby_clause = 'GROUP BY %s' % self.groupby.as_groupby(
-    ) if self.groupby else None
+    if self.columns.distinct:
+      if self.groupby:
+        raise ValueError('GROUP BY cannot exist with DISTINCT')
+      groupby_clause = 'GROUP BY %s' % self.columns.as_groupby()
+    else:
+      groupby_clause = 'GROUP BY %s' % self.groupby.as_groupby(
+      ) if self.groupby else None
     orderby_clause = 'ORDER BY %s' % self.orderby.as_groupby(
     ) if self.orderby else None
     clauses = [

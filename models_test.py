@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ from meterstick import metrics
 from meterstick import models
 from meterstick import operations
 from meterstick import utils
+import mock
 import numpy as np
 import pandas as pd
 from sklearn import linear_model
@@ -163,6 +164,20 @@ class ModelsTest(parameterized.TestCase):
     ]
     pd.testing.assert_frame_equal(output, expected)
 
+  def test_caching(self, model, sklearn_model, name):
+    del sklearn_model, name  # unused
+    m1 = model(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1')
+    m2 = model(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1', name='Foo')
+    m = m1 - m2
+    with mock.patch.object(
+        m2, 'compute_through', wraps=m2.compute_through) as mock_fn:
+      output = m.compute_on(DF)
+    expected = m.compute_on(DF)
+
+    mock_fn.assert_not_called()
+    self.assertEqual(output.shape, expected.shape)
+    self.assertTrue((output.values == 0).all())
+
 
 class LogisticRegressionTest(absltest.TestCase):
 
@@ -195,13 +210,23 @@ class LogisticRegressionTest(absltest.TestCase):
         [[
             model.intercept_[0],
             model.coef_.flatten()[0],
-            model.coef_.flatten()[1]
+            model.coef_.flatten()[1],
         ]],
         columns=[
-            'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient: intercept',
-            'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient: sum(X1)',
-            'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient: sum(X2)'
-        ])
+            (
+                'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient:'
+                ' intercept'
+            ),
+            (
+                'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient:'
+                ' sum(X1)'
+            ),
+            (
+                'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient:'
+                ' sum(X2)'
+            ),
+        ],
+    )
     pd.testing.assert_frame_equal(output, expected)
 
   def test_split_by(self):
