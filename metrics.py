@@ -569,12 +569,52 @@ class Metric(object):
     # If not reused, self.cache is reset at the beginning of every computation.
     self.cache_key = None
 
-  def traverse(self, include_self=True):
+  def to_dot(self, strict=True):
+    """Represents the Metric in DOT language.
+
+    Args:
+      strict: If to make the DOT language graph strict. The strict mode will
+        dedupe duplicated edges.
+
+    Returns:
+      A string representing the Metric tree in DOT language.
+    """
+    import pydot  # pylint: disable=g-import-not-at-top
+    dot = pydot.Dot(self.name, graph_type='graph', strict=strict)
+    for m in self.traverse(include_constants=True):
+      label = str(getattr(m, 'name', m))
+      if getattr(m, 'where', ''):
+        label += ' where %s' % m.where
+      dot.add_node(pydot.Node(id(m), label=label))
+
+    def add_edges(metric):
+      if isinstance(metric, Metric):
+        for c in metric.children:
+          dot.add_edge(pydot.Edge(id(metric), id(c)))
+          add_edges(c)
+
+    add_edges(self)
+    return dot.to_string()
+
+  def visualize_metric_tree(self, rendering_fn, strict=True):
+    """Renders the Metric tree.
+
+    Args:
+      rendering_fn: A function that takes a string of DOT representation of the
+        Metric and renders it as side effect.
+      strict: If to make the DOT language graph strict. The strict mode will
+        dedupe duplicated edges.
+    """
+    rendering_fn(self.to_dot(strict))
+
+  def traverse(self, include_self=True, include_constants=False):
     ms = [self] if include_self else list(self.children)
     while ms:
       m = ms.pop(0)
       if isinstance(m, Metric):
         ms += list(m.children)
+        yield m
+      elif include_constants:
         yield m
 
   def compute_on_sql(
@@ -1002,7 +1042,7 @@ class MetricList(Metric):
     """Rename the columns of the MetricList.
 
     Useful for instances where you have Metrics in the MetricList that are
-    CompositeMetrics with undesirable names. Alters the the name of the children
+    CompositeMetrics with undesirable names. Alters the name of the children
     inplace.
 
     Args:

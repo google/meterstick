@@ -245,7 +245,7 @@ Example Usage:
 
 `compute_on_sql("SELECT * FROM table WHERE date = '20200101'", "Country")`
 
-#### Customizing the Output Format
+### Customizing the Output Format
 
 When calculating multiple metrics, Meterstick will store each metric as a
 separate column by default. However, it is sometimes more convenient to store
@@ -255,7 +255,7 @@ in packages like `ggplot2` and `altair`. This is known as the "melted"
 representation of the data. To return the output in melted form, simply add the
 argument `melted=True` in compute_on() or compute_on_sql().
 
-#### Visualization
+## Visualization
 
 If the last operation applied to the metric is [Jackknife](https://colab.research.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb#scrollTo=53NI01DoqyDe) or [Bootstrap](https://colab.research.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb#scrollTo=uKBRJlBBqskw) with
 confidence, the output can be displayed in a way that highlights significant changes by calling
@@ -266,6 +266,12 @@ confidence, the output can be displayed in a way that highlights significant cha
 You can customize the `display`. It takes the same arguments as the underlying
 visualization
 [library](https://colab.research.google.com/github/google/meterstick/blob/master/confidence_interval_display_demo.ipynb).
+
+You can visualize the Metric tree by calling
+`visualize_metric_tree(rendering_fn)`, where `rendering_fn` is a function that
+can render a string of
+[DOT representation](https://en.wikipedia.org/wiki/DOT_\(graph_description_language\)).
+It can help you to sanity check complex Metrics.
 
 ## SQL
 

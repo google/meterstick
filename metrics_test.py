@@ -1345,6 +1345,41 @@ class TestMetricList(unittest.TestCase):
         columns=['sum(X) / sum(X)', 'sum(X) / foo'])
     testing.assert_frame_equal(output, expected)
 
+  def test_to_dot(self):
+    m0 = 1
+    m1 = metrics.Sum('x', where='foo')
+    m2 = m0 + m1
+    m3 = metrics.Sum('y')
+    m4 = metrics.Count('z', where='bar')
+    m5 = m3 / m4
+    m6 = metrics.MetricList((m2, m5))
+    m6.name = 'baz'
+    output = m6.to_dot()
+    s = """
+{id6} [label=baz];
+{id2} [label="1 + sum(x)"];
+{id5} [label="sum(y) / count(z)"];
+{id0} [label=1];
+{id1} [label="sum(x) where foo"];
+{id3} [label="sum(y)"];
+{id4} [label="count(z) where bar"];
+{id6} -- {id2};
+{id2} -- {id0};
+{id2} -- {id1};
+{id6} -- {id5};
+{id5} -- {id3};
+{id5} -- {id4};
+""".format(
+        id0=id(m0),
+        id1=id(m1),
+        id2=id(m2),
+        id3=id(m3),
+        id4=id(m4),
+        id5=id(m5),
+        id6=id(m6))
+    expected = 'strict graph baz {%s}\n' % s
+    self.assertEqual(output, expected)
+
 
 class TestCaching(parameterized.TestCase):
 

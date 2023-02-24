@@ -2,3 +2,4 @@ six
 numpy
 scipy
 pandas
+pydot
