@@ -19,7 +19,7 @@ from __future__ import print_function
 
 import copy
 import itertools
-from typing import Any, Callable, List, Optional, Sequence, Text, Union
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Text, Union
 
 from meterstick import sql
 from meterstick import utils
@@ -31,10 +31,12 @@ def compute_on(df,
                split_by=None,
                melted=False,
                return_dataframe=True,
-               cache_key=None):
+               cache_key=None,
+               cache=None,
+               **kwargs):
   # pylint: disable=g-long-lambda
   return lambda x: x.compute_on(df, split_by, melted, return_dataframe,
-                                cache_key)
+                                cache_key, cache, **kwargs)
   # pylint: enable=g-long-lambda
 
 
@@ -45,8 +47,8 @@ def compute_on_sql(
     melted=False,
     mode=None,
     cache_key=None,
-    **kwargs
-):
+    cache=None,
+    **kwargs):
   """A wrapper that metric | compute_on_sql() === metric.compute_on_sql()."""
   # pylint: disable=g-long-lambda
   return lambda m: m.compute_on_sql(
@@ -56,8 +58,8 @@ def compute_on_sql(
       melted,
       mode,
       cache_key,
-      **kwargs
-  )
+      cache=cache,
+      **kwargs)
   # pylint: enable=g-long-lambda
 
 
@@ -119,7 +121,7 @@ class Metric(object):
         <------------------------------compute_through---------------------------->                                              |
         |                              <-------compute_slices------->             |                                              |
         |                              |-> slice1 -> compute |      |             |                                              |
-  df -> df.query(where) -> precompute -|-> slice2 -> compute | -> concat  -> postcompute -> manipulate -> final_compute -> flush_tmp_cache  # pylint: disable=line-too-long
+  df -> df.query(where) -> precompute -|-> slice2 -> compute | -> concat  -> postcompute -> manipulate -> final_compute -> clean_up_cache  # pylint: disable=line-too-long
                                        |-> ...
   In summary, compute() operates on a slice of data. precompute(),
   postcompute(), compute_slices(), compute_through() and final_compute() operate
@@ -163,8 +165,13 @@ class Metric(object):
     name: Name of the Metric.
     children: An iterable of Metric(s) this Metric based upon.
     cache: A dict to store cached results.
-    where: A string or list of strings to be concatenated that will be passed to
-      df.query() as a prefilter.
+    where_raw: A string or list/tuple of strings to be concatenated that will be
+      passed to df.query() as a prefilter.
+    where: A string that will be passed to df.query() as a prefilter. It's
+      ' and '.join(where_raw).
+    additional_fingerprint_attrs: Additional attributes to be encoded into the
+      fingerprint. The attribute value must be hashable, or a list/dict of
+      hashables. See get_fingerprint() for how it's used.
     precompute: A function. See the workflow chart above for its behavior.
     compute: A function. See the workflow chart above for its behavior.
     postcompute: A function. See the workflow chart above for its behavior.
@@ -176,12 +183,10 @@ class Metric(object):
       example, all Models can't.
     name_tmpl: Used by Metrics that have children. It's applied to children's
       names in the output.
+    custom_fns: Custom functions assigned in the initialization.
+    cache: A dict to store the result. It's shared across the Metric tree.
     cache_key: The key currently being used in computation.
-    tmp_cache_keys: The set to track what temporary cache_keys are used during
-      computation when default caching is enabled. When computation is done, all
-      the keys in tmp_cache_keys are flushed.
   """
-  RESERVED_KEY = '_RESERVED'
 
   def __init__(self,
                name: Text,
@@ -189,6 +194,10 @@ class Metric(object):
                                                                  float]]]] = (),
                where: Optional[Union[Text, Sequence[Text]]] = None,
                name_tmpl=None,
+               extra_split_by: Optional[Union[Text, Iterable[Text]]] = None,
+               extra_index: Optional[Union[Text, Iterable[Text]]] = None,
+               additional_fingerprint_attrs: Optional[List[str]] = None,
+               *,
                precompute=None,
                compute: Optional[Callable[[pd.DataFrame], Any]] = None,
                postcompute=None,
@@ -199,24 +208,53 @@ class Metric(object):
     self.cache_key = None
     self.children = [children] if isinstance(children,
                                              Metric) else children or []
-    if isinstance(where, List):
-      where = ' and '.join(where)
+    self.where_raw = None
     self.where = where
-    self.extra_split_by = []
-    self.extra_index = []
+    self.extra_split_by = [extra_split_by] if isinstance(
+        extra_split_by, str) else extra_split_by or []
+    if extra_index is None:
+      self.extra_index = self.extra_split_by
+    else:
+      self.extra_index = [extra_index] if isinstance(extra_index,
+                                                     str) else extra_index
     self.computable_in_pure_sql = True
+    self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
     self.name_tmpl = name_tmpl
+    self.cache_key = None
+    self.custom_fns = {}
     if precompute:
       self.precompute = precompute
+      self.custom_fns['precompute'] = precompute
     if compute:
       self.compute = compute
+      self.custom_fns['compute'] = compute
     if postcompute:
       self.postcompute = postcompute
+      self.custom_fns['postcompute'] = postcompute
     if compute_slices:
       self.compute_slices = compute_slices
+      self.custom_fns['compute_slices'] = compute_slices
     if final_compute:
       self.final_compute = final_compute
-    self.tmp_cache_keys = set()
+      self.custom_fns['final_compute'] = final_compute
+
+  @property
+  def where(self):
+    if isinstance(self.where_raw, (list, tuple)):
+      where_raw = self.where_raw
+      if len(where_raw) > 1:
+        where_raw = (f'({i})' for i in sorted(where_raw))
+      return ' and '.join(where_raw)
+    return self.where_raw
+
+  @where.setter
+  def where(self, where):
+    if where is None:
+      self.where_raw = None
+    elif isinstance(where, str):
+      self.where_raw = (where,)
+    else:
+      self.where_raw = tuple(where)
 
   def compute_with_split_by(self,
                             df,
@@ -246,8 +284,7 @@ class Metric(object):
         cache_key = self.cache_key
         slice_i_iter = slice_i if isinstance(slice_i, tuple) else [slice_i]
         self.cache_key = self.wrap_cache_key(
-            cache_key or self.RESERVED_KEY,
-            slice_val=dict(zip(split_by, slice_i_iter)))
+            cache_key, slice_val=dict(zip(split_by, slice_i_iter)))
         try:
           result.append(self.compute_with_split_by(df_slice, split_by, slice_i))
           slices.append(slice_i)
@@ -322,15 +359,15 @@ class Metric(object):
                  split_by: Optional[Union[Text, List[Text]]] = None,
                  melted: bool = False,
                  return_dataframe: bool = True,
-                 cache_key: Any = None):
+                 cache_key: Any = None,
+                 cache=None):
     """Key API of Metric.
 
-    Wraps computing logic with caching.
-
-    This is what you should call to use Metric. It's compute_through +
-    final_compute + caching. As caching is the shared part of Metric, we suggest
-    you NOT to overwrite this method. Overwriting compute_slices and/or
-    final_compute should be enough. If not, contact us with your use cases.
+    Wraps computing logic with caching. This is what you should call to use
+    Metric. It's compute_through + final_compute + caching. As caching is the
+    shared part of Metric, we suggest you NOT to overwrite this method.
+    Overwriting compute_slices and/or final_compute should be enough. If not,
+    contact us with your use cases.
 
     Args:
       df: The DataFrame to compute on.
@@ -340,37 +377,28 @@ class Metric(object):
         If False, it could still return a DataFrame.
       cache_key: What key to use to cache the df. You can use anything that can
         be a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
 
     Returns:
       Final result returned to user. If split_by, it's a pd.Series or a
       pd.DataFrame, otherwise it could be a base type.
     """
-    need_clean_up = True
+    self.cache = {} if cache is None else cache
+    split_by = [split_by] if isinstance(split_by, str) else split_by or []
     try:
-      split_by = [split_by] if isinstance(split_by, str) else split_by or []
-      if cache_key is not None:
-        cache_key = self.wrap_cache_key(cache_key, split_by)
-        if self.in_cache(cache_key):
-          need_clean_up = False
-          raw_res = self.get_cached(cache_key)
-          res = self.manipulate(raw_res, melted, return_dataframe)
-          res = self.final_compute(res, melted, return_dataframe, split_by, df)
-          return res
-        else:
-          self.cache_key = cache_key
-          raw_res = self.compute_through(df, split_by)
-          self.save_to_cache(cache_key, raw_res)
-          if utils.is_tmp_key(cache_key):
-            self.tmp_cache_keys.add(cache_key)
+      cache_key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
+      if self.in_cache(cache_key):
+        raw_res = self.find_all_in_cache(cache_key)
       else:
+        self.cache_key = cache_key
         raw_res = self.compute_through(df, split_by)
+        self.save_to_cache(cache_key, raw_res)
 
       res = self.manipulate(raw_res, melted, return_dataframe)
       return self.final_compute(res, melted, return_dataframe, split_by, df)
-
     finally:
-      if need_clean_up:
-        self.flush_tmp_cache()
+      self.clean_up_cache()
 
   def precompute(self, df, split_by):
     del split_by  # Useful in derived classes.
@@ -405,15 +433,14 @@ class Metric(object):
         If False, it could still return a DataFrame if the input is already a
         DataFrame.
       apply_name_tmpl: If to apply name_tmpl to the result. For example, in
-        Distribution('country', Sum('X')).compute_on(df),
-        we first compute Sum('X').compute_on(df, 'country'), then normalize, and
-        finally apply the name_tmpl 'Distribution of {}' to all column names.
+        Distribution('country', Sum('X')).compute_on(df), we first compute
+        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
+        the name_tmpl 'Distribution of {}' to all column names.
 
     Returns:
       Final result returned to user. If split_by, it's a pd.Series or a
       pd.DataFrame, otherwise it could be a base type.
     """
-    res = copy.copy(res)  # Avoid changing the result in cache.
     if isinstance(res, pd.Series):
       res.name = self.name
     if not isinstance(res, pd.DataFrame) and return_dataframe:
@@ -425,6 +452,31 @@ class Metric(object):
     if apply_name_tmpl:
       res = utils.apply_name_tmpl(self.name_tmpl, res, melted)
     return utils.remove_empty_level(res)
+
+  def compute_util_metric_on(self,
+                             metric,
+                             df,
+                             split_by,
+                             melted=False,
+                             return_dataframe=True,
+                             cache_key=None):
+    """Computes a util metric with caching and filtering handled correctly."""
+    cache_key = self.wrap_cache_key(cache_key, split_by)
+    return metric.compute_on(df, split_by, melted, return_dataframe, cache_key,
+                             self.cache)
+
+  def compute_util_metric_on_sql(self,
+                                 metric,
+                                 table,
+                                 split_by=None,
+                                 execute=None,
+                                 melted=False,
+                                 mode=None,
+                                 cache_key=None):
+    """Computes a util metric with caching and filtering handled correctly."""
+    cache_key = self.wrap_cache_key(cache_key, split_by)
+    return metric.compute_on_sql(table, split_by, execute, melted, mode,
+                                 cache_key, self.cache)
 
   @staticmethod
   def group(df, split_by=None):
@@ -438,86 +490,83 @@ class Metric(object):
     return pd.DataFrame({self.name: [res]})
 
   def wrap_cache_key(self, key, split_by=None, where=None, slice_val=None):
-    if key is None:
-      return None
-    if where is None and self.cache_key:
-      where = self.cache_key.where
-    return utils.CacheKey(key, where or self.where, split_by, slice_val)
+    key = key or self.cache_key
+    return utils.CacheKey(self, key, where or self.where_raw, split_by,
+                          slice_val)
 
   def save_to_cache(self, key, val, split_by=None):
-    key = self.wrap_cache_key(key, split_by)
+    if not isinstance(key, utils.CacheKey):
+      key = self.wrap_cache_key(key, split_by)
     val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
     self.cache[key] = val
 
-  def in_cache(self, key, split_by=None, where=None, exact=True):
-    key = self.wrap_cache_key(key, split_by, where)
-    if exact:
-      return key in self.cache
-    else:
-      return any(k.includes(key) for k in self.cache)
+  def in_cache(self, key):
+    key = key if isinstance(key, utils.CacheKey) else self.wrap_cache_key(key)
+    return key in self.cache
 
-  def get_cached(self,
-                 key=None,
-                 split_by=None,
-                 where=None,
-                 exact=True,
-                 return_key=False):
-    """Retrieves result from cache if there is an unique one."""
-    key = self.wrap_cache_key(key, split_by, where)
-    if key in self.cache:
-      return (key, self.cache[key]) if return_key else self.cache[key]
-    elif not exact:
-      matches = {k: v for k, v in self.cache.items() if k.includes(key)}
-      if len(matches) > 1:
-        raise ValueError('Muliple fuzzy matches found!')
-      elif matches:
-        return tuple(matches.items())[0] if return_key else tuple(
-            matches.values())[0]
+  def find_all_in_cache(
+      self, key=None, split_by=None, metric=None, where=None, slice_val=None
+  ):
+    """Retrieves results from cache that fulfill the conditions."""
+    if isinstance(key, utils.CacheKey):
+      return copy.deepcopy(self.cache.get(key, None))
+    if split_by is not None:
+      split_by = (split_by,) if isinstance(split_by, str) else tuple(split_by)
+    conds = {
+        'key': key,
+        'split_by': split_by,
+        'where': where,
+        'slice_val': slice_val
+    }
+    conds = {k: v for k, v in conds.items() if v is not None}
+    res = {
+        k: copy.copy(v) for k, v in self.cache.items() if all(
+            getattr(k, c) == cv for c, cv in conds.items())
+    }
+    if metric:
+      res = {k: v for k, v in res.items() if k.metric.__class__ == metric}
+    return res
 
-  def flush_cache(self,
-                  key=None,
-                  split_by=None,
-                  where=None,
-                  recursive=True,
-                  prune=True):
-    """If prune, stops when the cache seems to be flushed already."""
-    key = self.wrap_cache_key(key, split_by, where)
-    if prune:
-      if (key is not None and not self.in_cache(key)) or not self.cache:
-        return
-    if key is None:
-      self.cache = {}
-    elif self.in_cache(key):
-      del self.cache[key]
-    if recursive:
-      self.flush_children(key, split_by, where, recursive, prune)
+  def get_fingerprint(self):
+    """Returns attributes that uniquely identify the Metric.
 
-  def flush_children(self,
-                     key=None,
-                     split_by=None,
-                     where=None,
-                     recursive=True,
-                     prune=True):
-    for m in self.children:
-      if isinstance(m, Metric):
-        m.flush_cache(key, split_by, where, recursive, prune)
+    Metrics with the same fingerprint will compute to the same numbers on the
+    same data. Note that name is not part of the fingerprint.
 
-  def flush_tmp_cache(self):
-    """Flushes all the temporary caches when a Metric tree has been computed.
-
-    A Metric and all the descendants form a tree. When a computation is started
-    from a MetricList or CompositeMetric, we know the input DataFrame is not
-    going to change in the computation. So even if user doesn't ask for caching,
-    we still enable it, but we need to clean things up when done. As the results
-    need to be cached until all Metrics in the tree have been computed, we
-    should only clean up at the end of the computation of the entry/top Metric.
-    We recognize the top Metric by looking at the cache_key. All descendants
-    will have it assigned as RESERVED_KEY but the entry Metric's will be None.
+    Returns:
+      A sorted tuple of (attribute, value) pairs that uniquely identify the
+      Metric.
     """
-    if self.cache_key is None:  # Entry point of computation
-      for m in self.traverse():
-        while m.tmp_cache_keys:
-          m.flush_cache(m.tmp_cache_keys.pop(), recursive=False)
+    fingerprint = {'class': self.__class__}
+    if self.where:
+      fingerprint['where'] = sorted(self.where_raw)
+    if self.children:
+      fingerprint['children'] = (
+          c.get_fingerprint() if isinstance(c, Metric) else c
+          for c in self.children)
+    if self.extra_split_by:
+      fingerprint['extra_split_by'] = self.extra_split_by
+    if self.extra_index != self.extra_split_by:
+      fingerprint['extra_index'] = self.extra_index
+    for k in self.additional_fingerprint_attrs:
+      val = getattr(self, k, None)
+      if isinstance(val, dict):
+        for kw, arg in val.items():
+          fingerprint['%s:%s' % (k, kw)] = arg
+      elif isinstance(val, Metric):
+        fingerprint[k] = val.get_fingerprint()
+      elif val is not None:
+        fingerprint[k] = val
+    for k, v in self.custom_fns.items():
+      fingerprint[k] = v
+    for k, v in fingerprint.items():
+      if not isinstance(v, str) and isinstance(v, Iterable):
+        fingerprint[k] = tuple(list(v))
+    return tuple(sorted(fingerprint.items()))
+
+  def clean_up_cache(self):
+    # We don't reset self.cache so people can use it in future computation.
+    # If not reused, self.cache is reset at the beginning of every computation.
     self.cache_key = None
 
   def traverse(self, include_self=True):
@@ -536,6 +585,7 @@ class Metric(object):
       melted=False,
       mode=None,
       cache_key=None,
+      cache=None,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
 
@@ -560,39 +610,33 @@ class Metric(object):
       cache_key: What key to use to cache the result. You can use anything that
         can be a key of a dict except '_RESERVED' and tuples like
         ('_RESERVED', ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
+    self.cache = {} if cache is None else cache
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
-    need_clean_up = True
     try:
-      if cache_key is not None:
-        cache_key = self.wrap_cache_key(cache_key, split_by)
-        if self.in_cache(cache_key):
-          need_clean_up = False
-          res = self.get_cached(cache_key)
-          res = self.manipulate(res, melted, apply_name_tmpl=False)
-          return self.final_compute(res, melted, True, split_by, table)
-        else:
-          self.cache_key = cache_key
-          raw_res = self.compute_through_sql(table, split_by, execute, mode)
-          res = raw_res
-          # For simple metrics we save a pd.Series to be consistent with
-          # compute_on().
-          if isinstance(raw_res, pd.DataFrame
-                       ) and raw_res.shape[1] == 1 and not is_operation(self):
-            raw_res = raw_res.iloc[:, 0]
-          self.save_to_cache(cache_key, raw_res)
-          if utils.is_tmp_key(cache_key):
-            self.tmp_cache_keys.add(cache_key)
+      cache_key = self.wrap_cache_key(cache_key, split_by)
+      if self.in_cache(cache_key):
+        res = self.find_all_in_cache(cache_key)
       else:
-        res = self.compute_through_sql(table, split_by, execute, mode)
+        self.cache_key = cache_key
+        raw_res = self.compute_through_sql(table, split_by, execute, mode)
+        res = raw_res
+        # For simple metrics we save a pd.Series to be consistent with
+        # compute_on().
+        if isinstance(
+            raw_res,
+            pd.DataFrame) and raw_res.shape[1] == 1 and not is_operation(self):
+          raw_res = raw_res.iloc[:, 0]
+        self.save_to_cache(cache_key, raw_res)
       res = self.manipulate(res, melted, apply_name_tmpl=False)
       return self.final_compute(res, melted, True, split_by, table)
     finally:
-      if need_clean_up:
-        self.flush_tmp_cache()
+      self.clean_up_cache()
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
@@ -621,10 +665,7 @@ class Metric(object):
         return False
     return True
 
-  def compute_on_sql_sql_mode(self,
-                              table,
-                              split_by=None,
-                              execute=None):
+  def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
     """Executes the query from to_sql() and process the result."""
     query = self.to_sql(table, split_by)
     res = execute(str(query))
@@ -645,9 +686,7 @@ class Metric(object):
       res.sort_values(split_by, kind='mergesort', inplace=True)
     return res
 
-  def to_sql(self,
-             table,
-             split_by: Optional[Union[Text, List[Text]]] = None):
+  def to_sql(self, table, split_by: Optional[Union[Text, List[Text]]] = None):
     """Generates SQL query for the metric."""
     global_filter = get_global_filter(self)
     indexes = sql.Columns(split_by).add(get_extra_idx(self))
@@ -702,11 +741,7 @@ class Metric(object):
     raise NotImplementedError('SQL generator is not implemented for %s.' %
                               type(self))
 
-  def compute_on_sql_mixed_mode(self,
-                                table,
-                                split_by,
-                                execute,
-                                mode=None):
+  def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
     """Computes the child in SQL and the rest in Python."""
     children = self.compute_children_sql(table, split_by, execute, mode)
     return self.compute_on_children(children, split_by)
@@ -720,8 +755,23 @@ class Metric(object):
       else:
         children.append(
             c.compute_on_sql(table, split_by + self.extra_split_by, execute,
-                             False, mode, self.cache_key or self.RESERVED_KEY))
+                             False, mode, self.cache_key, self.cache))
     return children[0] if len(self.children) == 1 else children
+
+  def __deepcopy__(self, memo):
+    # We don't copy self.cache, for two reasons.
+    # 1. The copied Metric can share the same cache to maximize caching.
+    # 2. When deepcopy a Metric, its cache refers to CacheKey and CacheKey
+    # refers back. The loop leads to missing attributes error.
+    cls = self.__class__
+    obj = cls.__new__(cls)
+    memo[id(self)] = obj
+    for k, v in self.__dict__.items():
+      if k == 'cache':
+        obj.cache = v
+      else:
+        setattr(obj, k, copy.deepcopy(v, memo))
+    return obj
 
   def __or__(self, fn):
     """Overwrites the '|' operator to enable pipeline chaining."""
@@ -820,14 +870,10 @@ class MetricList(Metric):
       A list of results.
     """
     res = []
-    key = self.cache_key or self.RESERVED_KEY
     for m in self:
       try:
-        child = m.compute_on(
-            df,
-            split_by,
-            return_dataframe=self.children_return_dataframe,
-            cache_key=key)
+        child = self.compute_util_metric_on(
+            m, df, split_by, return_dataframe=self.children_return_dataframe)
         if isinstance(child, pd.DataFrame):
           if self.name_tmpl:
             child.columns = [self.name_tmpl.format(c) for c in child.columns]
@@ -902,7 +948,6 @@ class MetricList(Metric):
         from_data = sql.Join(from_data, alias, join=join, using=indexes)
 
     query = sql.Sql(columns, from_data)
-
     if self.columns:
       columns = query.columns[len(indexes):]
       if len(columns) != len(self.columns):
@@ -957,8 +1002,8 @@ class MetricList(Metric):
     """Rename the columns of the MetricList.
 
     Useful for instances where you have Metrics in the MetricList that are
-    CompositeMetrics with undesirable names. Alters the the name of the
-    children inplace.
+    CompositeMetrics with undesirable names. Alters the the name of the children
+    inplace.
 
     Args:
       rename_columns: The names to rename the columns of the output dataframe
@@ -1020,7 +1065,12 @@ class CompositeMetric(Metric):
       raise ValueError('MetricList must take at least one Metric!')
 
     name = name_tmpl.format(*map(utils.get_name, children))
-    super(CompositeMetric, self).__init__(name, children, where, name_tmpl)
+    super(CompositeMetric, self).__init__(
+        name,
+        children,
+        where,
+        name_tmpl,
+        additional_fingerprint_attrs=['name_tmpl'])
     self.op = op
     self.columns = rename_columns
 
@@ -1032,6 +1082,15 @@ class CompositeMetric(Metric):
     self.name = name
     return self
 
+  def get_fingerprint(self):
+    # Make Sum(x) / Count(x) indistinguishable to Mean(x) in cache.
+    s = self.children[0]
+    c = self.children[1]
+    if isinstance(s, Sum) and isinstance(
+        c, Count) and s.var == c.var and s.where == c.where and not c.distinct:
+      return Mean(s.var, where=s.where_raw).get_fingerprint()
+    return super(CompositeMetric, self).get_fingerprint()
+
   def compute_children(self, df, split_by):
     if len(self.children) != 2:
       raise ValueError('CompositeMetric can only have two children.')
@@ -1040,12 +1099,12 @@ class CompositeMetric(Metric):
     children = []
     for m in self.children:
       if isinstance(m, Metric):
-        m = m.compute_on(
+        m = self.compute_util_metric_on(
+            m,
             df,
             split_by,
             # MetricList returns an undesired list when not return_dataframe.
-            return_dataframe=isinstance(m, MetricList),
-            cache_key=self.cache_key or self.RESERVED_KEY)
+            return_dataframe=isinstance(m, MetricList))
       children.append(m)
     return children
 
@@ -1223,7 +1282,15 @@ class Ratio(CompositeMetric):
         lambda x, y: x / y,
         '{} / {}', (Sum(numerator), Sum(denominator)),
         where=where)
+    self.numerator = numerator
+    self.denominator = denominator
     self.name = name or self.name
+
+  def get_fingerprint(self):
+    # Make the fingerprint same as the equivalent CompositeMetric for caching.
+    util = Sum(self.numerator) / Sum(self.denominator)
+    util.where = self.where_raw
+    return util.get_fingerprint()
 
 
 class SimpleMetric(Metric):
@@ -1234,6 +1301,7 @@ class SimpleMetric(Metric):
                name: Optional[Text] = None,
                name_tmpl=None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
+               additional_fingerprint_attrs: Optional[List[str]] = None,
                **kwargs):
     name = name or name_tmpl.format(var)
     self.var = var
@@ -1241,11 +1309,14 @@ class SimpleMetric(Metric):
     postcompute = kwargs.pop('postcompute', None)
     final_compute = kwargs.pop('final_compute', None)
     self.kwargs = kwargs
+    additional_fingerprint_attrs = ['var', 'var2', 'kwargs'] + (
+        additional_fingerprint_attrs or [])
     super(SimpleMetric, self).__init__(
         name,
         None,
         where,
         name_tmpl,
+        additional_fingerprint_attrs=additional_fingerprint_attrs,
         precompute=precompute,
         postcompute=postcompute,
         final_compute=final_compute)
@@ -1284,7 +1355,8 @@ class Count(SimpleMetric):
     self.distinct = distinct
     if distinct:
       name = name or 'count(distinct %s)' % var
-    super(Count, self).__init__(var, name, 'count({})', where, **kwargs)
+    super(Count, self).__init__(var, name, 'count({})', where, ['distinct'],
+                                **kwargs)
 
   def compute_slices(self, df, split_by=None):
     grped = self.group(df, split_by)[self.var]
@@ -1334,8 +1406,8 @@ class Dot(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.sum() or .mean(). And all other
-      attributes inherited from SimpleMetric.
+    kwargs: Other kwargs passed to pd.DataFrame.sum() or .mean().
+    And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
@@ -1348,7 +1420,8 @@ class Dot(SimpleMetric):
     self.var2 = var2
     self.normalize = normalize
     name_tmpl = ('mean({} * %s)' if normalize else 'sum({} * %s)') % var2
-    super(Dot, self).__init__(var1, name, name_tmpl, where, **kwargs)
+    super(Dot, self).__init__(var1, name, name_tmpl, where, ['normalize'],
+                              **kwargs)
 
   def compute_slices(self, df, split_by=None):
     if not split_by:
@@ -1364,6 +1437,14 @@ class Dot(SimpleMetric):
   def get_sql_columns(self, local_filter):
     tmpl = 'AVG({} * {})' if self.normalize else 'SUM({} * {})'
     return sql.Column((self.var, self.var2), tmpl, self.name, local_filter)
+
+  def get_fingerprint(self):
+    if str(self.var) > str(self.var2):
+      util = copy.deepcopy(self)
+      util.var = self.var2
+      util.var2 = self.var
+      return util.get_fingerprint()
+    return super(Dot, self).get_fingerprint()
 
 
 class Mean(SimpleMetric):
@@ -1387,7 +1468,8 @@ class Mean(SimpleMetric):
                where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     name_tmpl = '%s-weighted mean({})' % weight if weight else 'mean({})'
-    super(Mean, self).__init__(var, name, name_tmpl, where, **kwargs)
+    super(Mean, self).__init__(var, name, name_tmpl, where, ['weight'],
+                               **kwargs)
     self.weight = weight
 
   def compute(self, df):
@@ -1482,15 +1564,20 @@ class Quantile(SimpleMetric):
 
   def __init__(self,
                var: Text,
-               quantile: Union[float, int] = 0.5,
+               quantile: Union[float, int, Sequence[Union[float, int]]] = 0.5,
                weight: Optional[Text] = None,
                interpolation='linear',
                name: Optional[Text] = None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
-    self.one_quantile = isinstance(quantile, (int, float))
-    if not self.one_quantile:
+    if isinstance(quantile, (int, float)):
+      self.one_quantile = True
+    else:
+      self.one_quantile = False
       quantile = np.array(quantile)
+      if len(quantile) == 1:
+        quantile = quantile[0]
+        self.one_quantile = True
     if self.one_quantile and not 0 <= quantile <= 1:
       raise ValueError('quantiles must be in [0, 1].')
     if not self.one_quantile and not (np.all(quantile >= 0) and
@@ -1503,7 +1590,9 @@ class Quantile(SimpleMetric):
     self.quantile = quantile
     self.interpolation = interpolation
     self.weight = weight
-    super(Quantile, self).__init__(var, name, name_tmpl, where, **kwargs)
+    super(Quantile,
+          self).__init__(var, name, name_tmpl, where,
+                         ['quantile', 'weight', 'interpolation'], **kwargs)
 
   def compute(self, df):
     """Adapted from https://stackoverflow.com/a/29677616/12728137."""
@@ -1588,7 +1677,8 @@ class Variance(SimpleMetric):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
     name_tmpl = '%s-weighted var({})' % weight if weight else 'var({})'
-    super(Variance, self).__init__(var, name, name_tmpl, where, **kwargs)
+    super(Variance, self).__init__(var, name, name_tmpl, where,
+                                   ['ddof', 'weight'], **kwargs)
 
   def compute(self, df):
     if not self.weight:
@@ -1648,7 +1738,7 @@ class StandardDeviation(SimpleMetric):
     self.weight = weight
     name_tmpl = '%s-weighted sd({})' % weight if weight else 'sd({})'
     super(StandardDeviation, self).__init__(var, name, name_tmpl, where,
-                                            **kwargs)
+                                            ['ddof', 'weight'], **kwargs)
 
   def compute(self, df):
     if not self.weight:
@@ -1768,7 +1858,7 @@ class CV(SimpleMetric):
                where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     self.ddof = 1 if unbiased else 0
-    super(CV, self).__init__(var, name, 'cv({})', where, **kwargs)
+    super(CV, self).__init__(var, name, 'cv({})', where, ['ddof'], **kwargs)
 
   def compute_slices(self, df, split_by=None):
     var_grouped = self.group(df, split_by)[self.var]
@@ -1820,7 +1910,8 @@ class Correlation(SimpleMetric):
     self.var2 = var2
     self.method = method
     self.weight = weight
-    super(Correlation, self).__init__(var1, name, name_tmpl, where, **kwargs)
+    super(Correlation, self).__init__(var1, name, name_tmpl, where,
+                                      ['method', 'weight'], **kwargs)
 
   def compute(self, df):
     if not self.weight:
@@ -1857,6 +1948,14 @@ class Correlation(SimpleMetric):
     return sql.Column((self.var, self.var2), 'CORR({}, {})', self.name,
                       local_filter)
 
+  def get_fingerprint(self):
+    if str(self.var) > str(self.var2):
+      util = copy.deepcopy(self)
+      util.var = self.var2
+      util.var2 = self.var
+      return util.get_fingerprint()
+    return super(Correlation, self).get_fingerprint()
+
 
 class Cov(SimpleMetric):
   """Covariance estimator.
@@ -1887,14 +1986,14 @@ class Cov(SimpleMetric):
     name_tmpl = 'cov({}, {})'
     if weight:
       name_tmpl = '%s-weighted %s' % (weight, name_tmpl)
-
     if name is None:
       name = name_tmpl.format(var1, var2)
     self.var2 = var2
     self.bias = bias
     self.ddof = ddof
     self.weight = weight
-    super(Cov, self).__init__(var1, name, name_tmpl, where, **kwargs)
+    super(Cov, self).__init__(var1, name, name_tmpl, where,
+                              ['bias', 'ddof', 'weight'], **kwargs)
 
   def compute(self, df):
     return np.cov(
@@ -1920,3 +2019,11 @@ class Cov(SimpleMetric):
                         local_filter)
     else:
       raise ValueError('Only ddof being 0 or 1 is supported!')
+
+  def get_fingerprint(self):
+    if str(self.var) > str(self.var2):
+      util = copy.deepcopy(self)
+      util.var = self.var2
+      util.var2 = self.var
+      return util.get_fingerprint()
+    return super(Cov, self).get_fingerprint()

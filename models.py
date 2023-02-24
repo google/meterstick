@@ -272,7 +272,8 @@ class Model(operations.Operation):
                where=None,
                name=None,
                fit_intercept=True,
-               normalize=False):
+               normalize=False,
+               additional_fingerprint_attrs: Optional[List[str]] = None):
     """Initialize the model.
 
     Args:
@@ -292,6 +293,8 @@ class Model(operations.Operation):
       normalize: This parameter is ignored when fit_intercept is False. If True,
         the regressors X will be normalized before regression by subtracting the
         mean and dividing by the l2-norm.
+      additional_fingerprint_attrs: Additioinal attributes to be encoded into
+        the fingerprint. See get_fingerprint() for how it's used.
     """
     if not isinstance(y, metrics.Metric):
       raise ValueError('y must be a Metric!')
@@ -314,7 +317,8 @@ class Model(operations.Operation):
         name_tmpl,
         group_by, [],
         name=name,
-        where=where)
+        where=where,
+        additional_fingerprint_attrs=['fit_intercept', 'normalize'])
     self.computable_in_pure_sql = False
     self.fit_intercept = fit_intercept
     self.normalize = normalize
@@ -389,7 +393,7 @@ class LinearRegression(Model):
 
   def compute_on_sql_magic_mode(self, table, split_by, execute):
     return Ridge(self.y, self.x, self.group_by, 0, self.fit_intercept,
-                 self.normalize, self.where,
+                 self.normalize, self.where_raw,
                  self.name).compute_on_sql_magic_mode(table, split_by, execute)
 
 
@@ -421,7 +425,7 @@ class Ridge(Model):
         solver=solver,
         random_state=random_state)
     super(Ridge, self).__init__(y, x, group_by, model, 'Ridge', where, name,
-                                fit_intercept, normalize)
+                                fit_intercept, normalize, ['alpha'])
     self.alpha = alpha
 
   def compute_on_sql_magic_mode(self, table, split_by, execute):
@@ -526,7 +530,8 @@ class Lasso(Model):
         random_state=random_state,
         selection=selection)
     super(Lasso, self).__init__(y, x, group_by, model, 'Lasso', where, name,
-                                fit_intercept, normalize)
+                                fit_intercept, normalize,
+                                ['alpha', 'tol', 'max_iter', 'random_state'])
     self.alpha = alpha
     self.tol = tol
     self.max_iter = max_iter
@@ -541,7 +546,7 @@ class Lasso(Model):
         1,
         self.fit_intercept,
         self.normalize,
-        self.where,
+        self.where_raw,
         self.name,
         tol=self.tol,
         max_iter=self.max_iter).compute_on_sql_magic_mode(
@@ -582,8 +587,9 @@ class ElasticNet(Model):
         positive=positive,
         random_state=random_state,
         selection=selection)
-    super(ElasticNet, self).__init__(y, x, group_by, model, 'ElasticNet', where,
-                                     name, fit_intercept, normalize)
+    super(ElasticNet, self).__init__(
+        y, x, group_by, model, 'ElasticNet', where, name, fit_intercept,
+        normalize, ['alpha', 'tol', 'max_iter', 'l1_ratio', 'random_state'])
     self.alpha = alpha
     self.tol = tol
     self.max_iter = max_iter
@@ -810,7 +816,10 @@ class LogisticRegression(Model):
         l1_ratio=l1_ratio)
     super(LogisticRegression,
           self).__init__(y, x, group_by, model, 'LogisticRegression', where,
-                         name, fit_intercept)
+                         name, fit_intercept, [
+                             'penalty', 'tol', 'c', 'intercept_scaling',
+                             'max_iter', 'l1_ratio', 'random_state'
+                         ])
     self.penalty = penalty
     self.tol = tol
     self.c = C

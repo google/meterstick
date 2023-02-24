@@ -143,41 +143,6 @@ class DistributionTests(unittest.TestCase):
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
 
-  def test_distribution_cache_key(self):
-    sum_x = metrics.Sum('X', 'X')
-    metric = operations.Distribution('grp', sum_x)
-    metric.compute_on(self.df, cache_key=42)
-    testing.assert_series_equal(
-        self.df.groupby('grp').X.sum(), sum_x.get_cached(42, 'grp'))
-    self.assertTrue(metric.in_cache(42))
-
-  def test_distribution_internal_caching_cleaned_up(self):
-    sum_x = metrics.Sum('X')
-    m = operations.Distribution('grp', sum_x)
-    m.compute_on(self.df)
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(m.cache_key)
-
-  def test_distribution_with_jackknife_internal_caching_cleaned_up(self):
-    df = pd.DataFrame({
-        'X': [1, 1, 1, 5],
-        'grp': ['A', 'A', 'B', 'B'],
-        'country': ['US', 'US', 'US', 'EU'],
-        'cookie': [1, 2, 1, 2]
-    })
-    sum_x = metrics.Sum('X')
-    m = operations.Distribution('grp', sum_x)
-    jk = operations.Jackknife('cookie', m)
-    jk.compute_on(df)
-    self.assertEqual(jk.cache, {})
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertIsNone(jk.cache_key)
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(sum_x.cache_key)
-
 
 class CumulativeDistributionTests(unittest.TestCase):
 
@@ -314,42 +279,6 @@ class CumulativeDistributionTests(unittest.TestCase):
                             index=['A', 'B'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
-
-  def test_cumulative_distribution_cache_key(self):
-    sum_x = metrics.Sum('X', 'X')
-    metric = operations.CumulativeDistribution('grp', sum_x)
-    metric.compute_on(self.df, cache_key=42)
-    testing.assert_series_equal(
-        self.df.groupby('grp').X.sum(), sum_x.get_cached(42, 'grp'))
-    self.assertTrue(metric.in_cache(42))
-
-  def test_cumulative_distribution_internal_caching_cleaned_up(self):
-    sum_x = metrics.Sum('X')
-    m = operations.CumulativeDistribution('grp', sum_x)
-    m.compute_on(self.df)
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(m.cache_key)
-
-  def test_cumulative_distribution_with_jackknife_internal_caching_cleaned_up(
-      self):
-    df = pd.DataFrame({
-        'X': [1, 1, 1, 5],
-        'grp': ['B', 'B', 'A', 'A'],
-        'country': ['US', 'US', 'US', 'EU'],
-        'cookie': [1, 2, 1, 2]
-    })
-    sum_x = metrics.Sum('X')
-    m = operations.CumulativeDistribution('grp', sum_x)
-    jk = operations.Jackknife('cookie', m)
-    jk.compute_on(df)
-    self.assertEqual(jk.cache, {})
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertIsNone(jk.cache_key)
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(sum_x.cache_key)
 
 
 class PercentChangeTests(unittest.TestCase):
@@ -524,41 +453,6 @@ class PercentChangeTests(unittest.TestCase):
     expected.index.name = 'Condition'
     testing.assert_frame_equal(output, expected)
 
-  def test_percent_change_cache_key(self):
-    sum_x = metrics.Sum('X', 'X')
-    metric = operations.PercentChange('Condition', 0, sum_x)
-    metric.compute_on(self.df, cache_key=42)
-    testing.assert_series_equal(
-        self.df.groupby('Condition').X.sum(), sum_x.get_cached(42, 'Condition'))
-    self.assertTrue(metric.in_cache(42))
-
-  def test_percent_change_internal_caching_cleaned_up(self):
-    sum_x = metrics.Sum('X')
-    m = operations.PercentChange('Condition', 0, sum_x)
-    m.compute_on(self.df)
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(m.cache_key)
-
-  def test_percent_change_with_jackknife_internal_caching_cleaned_up(self):
-    df = pd.DataFrame({
-        'X': [1, 2, 3, 4, 5, 6],
-        'Condition': [0, 0, 0, 1, 1, 1],
-        'grp': ['A', 'A', 'B', 'A', 'B', 'C'],
-        'cookie': [1, 2, 3] * 2
-    })
-    sum_x = metrics.Sum('X')
-    m = operations.PercentChange('Condition', 0, sum_x)
-    jk = operations.Jackknife('cookie', m)
-    jk.compute_on(df)
-    self.assertEqual(jk.cache, {})
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertIsNone(jk.cache_key)
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(sum_x.cache_key)
-
 
 class AbsoluteChangeTests(unittest.TestCase):
 
@@ -731,51 +625,6 @@ class AbsoluteChangeTests(unittest.TestCase):
         index=[1])
     expected.index.name = 'Condition'
     testing.assert_frame_equal(output, expected)
-
-  def test_absolute_change_internal_caching(self):
-    sum_x = metrics.Sum('X')
-    pct = operations.PercentChange('Condition', 0, sum_x)
-    ab = operations.AbsoluteChange('Condition', 0, sum_x)
-    metric = metrics.MetricList((pct, ab))
-    with mock.patch.object(
-        sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
-      metric.compute_on(self.df)
-      mock_fn.assert_called_once()
-
-  def test_absolute_change_cache_key(self):
-    sum_x = metrics.Sum('X', 'X')
-    metric = operations.AbsoluteChange('Condition', 0, sum_x)
-    metric.compute_on(self.df, cache_key=42)
-    testing.assert_series_equal(
-        self.df.groupby('Condition').X.sum(), sum_x.get_cached(42, 'Condition'))
-    self.assertTrue(metric.in_cache(42))
-
-  def test_absolute_change_internal_caching_cleaned_up(self):
-    sum_x = metrics.Sum('X')
-    m = operations.AbsoluteChange('Condition', 0, sum_x)
-    m.compute_on(self.df)
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(m.cache_key)
-
-  def test_absolute_change_with_jackknife_internal_caching_cleaned_up(self):
-    df = pd.DataFrame({
-        'X': [1, 2, 3, 4, 5, 6],
-        'Condition': [0, 0, 0, 1, 1, 1],
-        'grp': ['A', 'A', 'B', 'A', 'B', 'C'],
-        'cookie': [1, 2, 3] * 2
-    })
-    sum_x = metrics.Sum('X')
-    m = operations.AbsoluteChange('Condition', 0, sum_x)
-    jk = operations.Jackknife('cookie', m)
-    jk.compute_on(df)
-    self.assertEqual(jk.cache, {})
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertIsNone(jk.cache_key)
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(sum_x.cache_key)
 
 
 class PrePostChangeTests(unittest.TestCase):
@@ -1490,72 +1339,6 @@ class MHTests(unittest.TestCase):
     expected.index.name = 'Condition'
     testing.assert_frame_equal(output, expected)
 
-  def test_internal_caching(self):
-    sum_click = metrics.Sum('clicks')
-    sum_conv = metrics.Sum('conversions')
-    m = metrics.MetricList((sum_conv / sum_click, sum_conv / sum_conv))
-    with mock.patch.object(
-        sum_conv, 'compute_through', return_value=1, autospec=True) as mock_fn:
-      m.compute_on(self.df, return_dataframe=False)
-      mock_fn.assert_called_once()
-
-  def test_cache_key(self):
-    sum_click = metrics.Sum('clicks')
-    sum_conv = metrics.Sum('conversions')
-    metric_lst = metrics.MetricList([sum_conv / sum_click])
-    metric = operations.MH('Condition', 0, 'Id', metric_lst)
-    metric.compute_on(self.df, cache_key=42)
-    testing.assert_series_equal(
-        self.df.groupby(['Condition', 'Id']).clicks.sum(),
-        sum_click.get_cached(42, ['Condition', 'Id']))
-    testing.assert_series_equal(
-        self.df.groupby(['Condition', 'Id']).conversions.sum(),
-        sum_conv.get_cached(42, ['Condition', 'Id']))
-    self.assertTrue(metric.in_cache(42))
-
-  def test_internal_caching_cleaned_up(self):
-    sum_click = metrics.Sum('clicks')
-    sum_conv = metrics.Sum('conversions')
-    metric_lst = metrics.MetricList([sum_conv / sum_click])
-    m = operations.MH('Condition', 0, 'Id', metric_lst)
-    m.compute_on(self.df)
-    self.assertEqual(m.cache, {})
-    self.assertEqual(metric_lst.cache, {})
-    self.assertEqual(sum_click.cache, {})
-    self.assertEqual(sum_conv.cache, {})
-
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(metric_lst.cache_key)
-    self.assertIsNone(sum_click.cache_key)
-    self.assertIsNone(sum_conv.cache_key)
-
-  def test_with_jackknife_internal_caching_cleaned_up(self):
-    df = pd.DataFrame({
-        'clicks': [1, 3, 2, 3, 1, 2],
-        'conversions': [1, 0, 1, 2, 1, 1],
-        'Id': [1, 2, 3, 1, 2, 3],
-        'Condition': [0, 0, 0, 1, 1, 1],
-        'cookie': [1, 2, 3] * 2
-    })
-    sum_click = metrics.Sum('clicks')
-    sum_conv = metrics.Sum('conversions')
-    metric_lst = metrics.MetricList([sum_conv / sum_click])
-    m = operations.MH('Condition', 0, 'Id', metric_lst)
-    jk = operations.Jackknife('cookie', m)
-    jk.compute_on(df)
-
-    self.assertEqual(jk.cache, {})
-    self.assertEqual(m.cache, {})
-    self.assertEqual(metric_lst.cache, {})
-    self.assertEqual(sum_click.cache, {})
-    self.assertEqual(sum_conv.cache, {})
-
-    self.assertIsNone(jk.cache_key)
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(metric_lst.cache_key)
-    self.assertIsNone(sum_click.cache_key)
-    self.assertIsNone(sum_conv.cache_key)
-
 
 class JackknifeTests(unittest.TestCase):
 
@@ -1753,20 +1536,6 @@ class JackknifeTests(unittest.TestCase):
     testing.assert_frame_equal(output[0], expected[0])
     testing.assert_frame_equal(output[1], expected[1])
 
-  def test_cache_key(self):
-    df = pd.DataFrame({
-        'X': range(6),
-        'cookie': [1, 2, 3, 1, 2, 3],
-    })
-    sum_x = metrics.Sum('X')
-    count_x = sum_x / metrics.Mean('X')
-    metric = metrics.MetricList((sum_x, count_x))
-    jk = operations.Jackknife('cookie', metric)
-    jk.compute_on(df, cache_key='foo')
-    self.assertEqual(sum(df.X), sum_x.get_cached('foo'))
-    self.assertEqual(6, count_x.get_cached('foo'))
-    self.assertTrue(jk.in_cache('foo'))
-
   def test_disable_optimization(self):
     m = metrics.Sum('X')
     jk = operations.Jackknife('cookie', m, enable_optimization=False)
@@ -1900,29 +1669,6 @@ class JackknifeTests(unittest.TestCase):
       m.compute_on(df)
       self.assertEqual(2, mock_fn.call_count)
 
-  def test_internal_caching_cleaned_up(self):
-    df = pd.DataFrame({
-        'X': range(6),
-        'cookie': [1, 2, 3, 1, 2, 3],
-    })
-    sum_x = metrics.Sum('X')
-    mean_x = metrics.Mean('X')
-    count_x = metrics.Count('X')
-    metric = metrics.MetricList((sum_x, mean_x, count_x))
-    jk = operations.Jackknife('cookie', metric)
-    jk.compute_on(df)
-    self.assertEqual(sum_x.cache, {})
-    self.assertEqual(mean_x.cache, {})
-    self.assertEqual(count_x.cache, {})
-    self.assertEqual(metric.cache, {})
-    self.assertEqual(jk.cache, {})
-
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(mean_x.cache_key)
-    self.assertIsNone(count_x.cache_key)
-    self.assertIsNone(metric.cache_key)
-    self.assertIsNone(jk.cache_key)
-
   def test_monkey_patched_compute_slices_recovered(self):
     df = pd.DataFrame({
         'X': range(6),
@@ -1936,29 +1682,8 @@ class JackknifeTests(unittest.TestCase):
     jk.compute_on(df)
 
     sum_x.compute_slices(df)
-    self.assertEqual(sum_x.cache, {})
     mean_x.compute_slices(df)
-    self.assertEqual(mean_x.cache, {})
     count_x.compute_slices(df)
-    self.assertEqual(count_x.cache, {})
-
-  def test_internal_caching_splitby(self):
-    df = pd.DataFrame({
-        'X': range(12),
-        'cookie': [1, 2, 3, 1, 2, 3] * 2,
-        'grp': ['A', 'B'] * 6
-    })
-    sum_x = metrics.Sum('X')
-    count_x = sum_x / metrics.Mean('X')
-    metric = metrics.MetricList((sum_x, count_x))
-    jk = operations.Jackknife('cookie', metric)
-    # Don't use autospec=True. It conflicts with wraps.
-    # https://bugs.python.org/issue31807
-    with mock.patch.object(
-        sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
-      jk.compute_on(df, 'grp')
-      mock_fn.assert_called_once()
-      mock_fn.assert_has_calls([mock.call(df, ['grp'])])
 
   def test_jackknife_with_count_distinct(self):
     df = pd.DataFrame({
@@ -2038,24 +1763,6 @@ class JackknifeTests(unittest.TestCase):
     expected = pd.concat((expected_sum, expected_mean), 1)
     testing.assert_frame_equal(output, expected)
 
-  def test_cache_key_with_operation(self):
-    df = pd.DataFrame({
-        'X': range(1, 11),
-        'cookie': [1, 1, 2, 3, 4] * 2,
-        'condition': ['foo', 'foo', 'bar', 'bar', 'bar'] * 2,
-    })
-    sum_x = metrics.Sum('X')
-    count_x = sum_x / metrics.Mean('X')
-    metric = metrics.MetricList((sum_x, count_x))
-    change = operations.AbsoluteChange('condition', 'foo', metric)
-    jk = operations.Jackknife('cookie', change)
-    jk.compute_on(df, cache_key=42)
-    self.assertTrue(sum_x.in_cache(42, 'condition'))
-    self.assertTrue(count_x.in_cache(42, 'condition'))
-    self.assertTrue(metric.in_cache(42, 'condition'))
-    self.assertTrue(change.in_cache(42))
-    self.assertTrue(jk.in_cache(42))
-
   def test_internal_caching_with_operation(self):
     df = pd.DataFrame({
         'X': np.arange(0, 6, 0.5),
@@ -2092,11 +1799,8 @@ class JackknifeTests(unittest.TestCase):
     jk.compute_on(df)
 
     sum_x.compute_slices(df)
-    self.assertEqual(sum_x.cache, {})
     mean_x.compute_slices(df)
-    self.assertEqual(mean_x.cache, {})
     count_x.compute_slices(df)
-    self.assertEqual(count_x.cache, {})
 
   def test_jackknife_with_operation_splitby(self):
     df = pd.DataFrame({
@@ -2111,75 +1815,6 @@ class JackknifeTests(unittest.TestCase):
       expected.append(self.jk_change.compute_on(df[df.grp == g]))
     expected = pd.concat(expected, keys=['A', 'B'], names=['grp'])
     testing.assert_frame_equal(output, expected)
-
-  def test_internal_caching_with_operation_splitby(self):
-    df = pd.DataFrame({
-        'X': np.arange(0, 6, 0.5),
-        'cookie': [1, 2, 3, 1, 2, 3] * 2,
-        'grp': list('AABBAB') * 2,
-        'condition': [0, 1] * 6
-    })
-    sum_x = metrics.Sum('X')
-    count_x = sum_x / metrics.Mean('X')
-    metric = metrics.MetricList((sum_x, count_x))
-    pct = operations.PercentChange('condition', 0, metric)
-    jk = operations.Jackknife('cookie', pct)
-    # Don't use autospec=True. It conflicts with wraps.
-    # https://bugs.python.org/issue31807
-    with mock.patch.object(
-        sum_x, 'compute_through', wraps=sum_x.compute_through) as mock_fn:
-      jk.compute_on(df, 'grp')
-      mock_fn.assert_called_once()
-      mock_fn.assert_has_calls([mock.call(df, ['grp', 'condition'])])
-
-  def test_internal_caching_with_operation_cleaned_up(self):
-    df = pd.DataFrame({
-        'X': range(12),
-        'cookie': [1, 2, 3] * 4,
-        'grp': list('AABBAB') * 2,
-        'condition': [0, 1] * 6
-    })
-    sum_x = metrics.Sum('X')
-    mean_x = metrics.Mean('X')
-    count_x = metrics.Count('X')
-    metric = metrics.MetricList((sum_x, mean_x, count_x))
-    expected = metric.compute_on(df)
-    pct = operations.PercentChange('condition', 0, metric)
-    jk = operations.Jackknife('cookie', pct)
-    jk.compute_on(df, 'grp')
-    self.assertEqual(sum_x.cache, {})
-    self.assertEqual(mean_x.cache, {})
-    self.assertEqual(count_x.cache, {})
-    self.assertEqual(metric.cache, {})
-    self.assertEqual(pct.cache, {})
-    self.assertEqual(jk.cache, {})
-
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(mean_x.cache_key)
-    self.assertIsNone(count_x.cache_key)
-    self.assertIsNone(metric.cache_key)
-    self.assertIsNone(pct.cache_key)
-    self.assertIsNone(jk.cache_key)
-
-    # Check monkey patched methods are recovered
-    testing.assert_frame_equal(metric.compute_on(df), expected)
-
-  def test_unequal_leaf_index_broacasting(self):
-    df = pd.DataFrame({
-        'X': range(6),
-        'grp': ['A'] * 3 + ['B'] * 3,
-        'cookie': [1, 2, 3, 1, 2, 3]
-    })
-    s = metrics.Sum('X')
-    pct = operations.PercentChange('grp', 'A', s)
-    m = operations.Jackknife('cookie', s * pct, 0.9)
-    output = m.compute_on(df, melted=True)
-    output_pt_est = output['Value']
-    expected = pct.compute_on(df, melted=True).iloc[:, 0] * df.X.sum()
-    expected.index = expected.index.set_levels(
-        ['sum(X) * sum(X) Percent Change'], 0)
-    testing.assert_series_equal(expected, output_pt_est)
-    output.display()
 
   def test_integration(self):
     df = pd.DataFrame({
@@ -2202,15 +1837,15 @@ class JackknifeTests(unittest.TestCase):
         'X': np.arange(0, 3, 0.5),
         'cookie': [1, 2, 3, 1, 2, 3],
     })
-    m = operations.Jackknife('cookie', metrics.Sum('X'), 0.9)
+    m = operations.Jackknife('cookie', metrics.Sum('X', where='X > 0.5'), 0.9)
     res = m.compute_on(df)
     output = res.display(return_formatted_df=True)
     expected = pd.DataFrame({
         'sum(X)': [
             '<div class="ci-display-good-change ci-display-cell"><div>'
-            '<span class="ci-display-ratio">7.5000</span>'
+            '<span class="ci-display-ratio">7.0000</span>'
             '<div class="ci-display-flex-line-break"></div>'
-            '<span class="ci-display-ci-range">[4.1283, 10.8717]</span>'
+            '<span class="ci-display-ci-range">[3.4906, 10.5094]</span>'
             '</div></div>'
         ]
     })
@@ -2324,6 +1959,36 @@ class JackknifeTests(unittest.TestCase):
             ]
         },)
     expected.columns.name = 'Metric'
+    testing.assert_frame_equal(output, expected)
+
+  def test_display_change_filter(self):
+    df = pd.DataFrame({
+        'X': [1, 100, 2, 100, 3, 100, 4, 200],
+        'cookie': [1, 2, 3, 1, 2, 3, 4, 4],
+        'grp': ['A', 'B'] * 4
+    })
+    change = metrics.Sum('X') | operations.PercentChange(
+        'grp', 'A', where='cookie!=4')
+    m = operations.Jackknife('cookie', change, 0.9)
+    res = m.compute_on(df)
+    output = res.display(return_formatted_df=True)
+    expected = m.compute_on(
+        df[df.cookie != 4]).display(return_formatted_df=True)
+    testing.assert_frame_equal(output, expected)
+
+  def test_display_change_leaf_filter(self):
+    df = pd.DataFrame({
+        'X': [1, 100, 2, 100, 3, 100, 4, 200],
+        'cookie': [1, 2, 3, 1, 2, 3, 4, 4],
+        'grp': ['A', 'B'] * 4
+    })
+    change = metrics.Sum(
+        'X', where='cookie!=4') | operations.PercentChange('grp', 'A')
+    m = operations.Jackknife('cookie', change, 0.9)
+    res = m.compute_on(df)
+    output = res.display(return_formatted_df=True)
+    expected = m.compute_on(
+        df[df.cookie != 4]).display(return_formatted_df=True)
     testing.assert_frame_equal(output, expected)
 
 
@@ -2450,13 +2115,11 @@ class BootstrapTests(unittest.TestCase):
           self.bootstrap_no_unit.compute_on(self.df[self.df.grp == g]))
     expected = pd.concat(expected, keys=grps, names=['grp'])
     expected = expected.droplevel(-1)  # empty level
-    # The order of grps is not derterministic, so we don't check exaclty.
-    testing.assert_frame_equal(unmelted, expected, check_less_precise=1)
+    testing.assert_frame_equal(unmelted, expected, rtol=0.04)
 
     np.random.seed(42)
     melted = self.bootstrap_no_unit.compute_on(self.df, 'grp', melted=True)
-    testing.assert_frame_equal(
-        melted, utils.melt(expected), check_less_precise=1)
+    testing.assert_frame_equal(melted, utils.melt(expected), rtol=0.04)
 
   def test_bootstrap_splitby_multiple(self):
     df = pd.concat([self.df, self.df], keys=['foo', 'bar'], names=['grp0'])
@@ -2506,40 +2169,6 @@ class BootstrapTests(unittest.TestCase):
     testing.assert_frame_equal(unmelted, expected)
     unmelted.display()  # Check display() runs.
 
-  def test_cache_key(self):
-    df = pd.DataFrame({'X': range(6), 'Y': range(100, 106)})
-    sum_x = metrics.Sum('X')
-    sum_y = metrics.Sum('Y')
-    ratio = sum_x / sum_y
-    metric = metrics.MetricList((sum_x, ratio))
-    bootstrap = operations.Bootstrap(None, metric, self.n)
-    bootstrap.compute_on(df, cache_key='foo')
-    self.assertTrue(sum_x.in_cache('foo'))
-    self.assertTrue(sum_y.in_cache('foo'))
-    self.assertTrue(ratio.in_cache('foo'))
-    self.assertTrue(metric.in_cache('foo'))
-    self.assertTrue(bootstrap.in_cache('foo'))
-
-  def test_internal_caching_cleaned_up(self):
-    df = pd.DataFrame({'X': range(6), 'Y': range(100, 106)})
-    sum_x = metrics.Sum('X')
-    sum_y = metrics.Sum('Y')
-    ratio = sum_x / sum_y
-    metric = metrics.MetricList((sum_x, ratio))
-    bootstrap = operations.Bootstrap(None, metric, self.n)
-    bootstrap.compute_on(df)
-    self.assertEqual(sum_x.cache, {})
-    self.assertEqual(sum_y.cache, {})
-    self.assertEqual(ratio.cache, {})
-    self.assertEqual(metric.cache, {})
-    self.assertEqual(bootstrap.cache, {})
-
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(sum_y.cache_key)
-    self.assertIsNone(ratio.cache_key)
-    self.assertIsNone(metric.cache_key)
-    self.assertIsNone(bootstrap.cache_key)
-
   def test_integration(self):
     change = metrics.Sum('X') | operations.AbsoluteChange('grp', 'A')
     m = change | operations.Bootstrap(None, n_replicates=self.n)
@@ -2563,21 +2192,49 @@ class BootstrapTests(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-@parameterized.named_parameters(
-    ('Distribution', operations.Distribution('condition')),
-    ('CumulativeDistribution', operations.CumulativeDistribution('condition')),
-    ('PercentChange', operations.PercentChange('condition', 0)),
-    ('AbsoluteChange', operations.AbsoluteChange('condition', 0)),
-    ('MH', operations.MH('condition', 0, 'cookie')),
-    ('Jackknife', operations.Jackknife('cookie')))
+OPERATIONS = [('Distribution', operations.Distribution('condition')),
+              ('CumulativeDistribution',
+               operations.CumulativeDistribution('condition')),
+              ('PercentChange', operations.PercentChange('condition', 0)),
+              ('AbsoluteChange', operations.AbsoluteChange('condition', 0)),
+              ('CUPED',
+               operations.CUPED(
+                   'condition',
+                   0,
+                   covariates=metrics.Mean('clicks'),
+                   stratified_by='grp')),
+              ('PrePost',
+               operations.PrePostChange(
+                   'condition',
+                   0,
+                   covariates=metrics.Mean('clicks'),
+                   stratified_by='grp')),
+              ('MH', operations.MH('condition', 0, 'cookie'))]
+OPERATIONS_AND_JACKKNIFE = OPERATIONS + [
+    ('Jackknife no confidence', operations.Jackknife('cookie')),
+    ('Jackknife with confidence', operations.Jackknife('cookie', confidence=.9))
+]
+ALL_OPERATIONS = OPERATIONS_AND_JACKKNIFE + [
+    ('Bootstrap no unit no confidence',
+     operations.Bootstrap(None, n_replicates=5)),
+    ('Bootstrap with unit no confidence',
+     operations.Bootstrap('grp', n_replicates=5)),
+    ('Bootstrap no unit',
+     operations.Bootstrap(None, confidence=.9, n_replicates=5)),
+    ('Bootstrap with unit',
+     operations.Bootstrap('grp', confidence=.9, n_replicates=5))
+]
+
+
+@parameterized.named_parameters(*OPERATIONS_AND_JACKKNIFE)
 class FilterTest(parameterized.TestCase):
-  np.random.seed(42)
-  n = 40
+  n = 100
   df = pd.DataFrame({
       'clicks': np.random.choice(range(20), n),
       'impressions': np.random.choice(range(20), n),
       'cookie': np.random.choice(range(5), n),
       'condition': np.random.choice(range(2), n),
+      'grp': np.random.choice(range(3), n),
   })
 
   def test_parent(self, op):
@@ -2590,6 +2247,8 @@ class FilterTest(parameterized.TestCase):
 
   def test_child(self, op):
     metric = op(metrics.Ratio('impressions', 'clicks', where='clicks > 5'))
+    if isinstance(metric, (operations.CUPED, operations.PrePostChange)):
+      metric.covariates.where = 'clicks > 5'
     output = metric.compute_on(self.df)
     expected = op(metrics.Ratio('impressions', 'clicks')).compute_on(
         self.df[self.df.clicks > 5])
@@ -2605,26 +2264,167 @@ class FilterTest(parameterized.TestCase):
     expected = pd.concat((expected1, expected2), 1)
     testing.assert_frame_equal(output, expected)
 
-  def test_metriclist_child(self, op):
+  def test_metriclist(self, op):
     m = metrics.Ratio('impressions', 'clicks', where='clicks > 5')
     m = metrics.MetricList([m], where='impressions > 4')
     metric = op(m)
+    if isinstance(metric, (operations.CUPED, operations.PrePostChange)):
+      metric.covariates.where = ('clicks > 5', 'impressions > 4')
     output = metric.compute_on(self.df)
     expected = op(metrics.Ratio('impressions', 'clicks')).compute_on(
         self.df[(self.df.clicks > 5) & (self.df.impressions > 4)])
     testing.assert_frame_equal(output, expected)
 
-  def test_metriclist_children(self, op):
-    m1 = metrics.Ratio('clicks', 'impressions', where='clicks > 5')
-    m2 = metrics.Ratio('impressions', 'clicks', where='clicks > 10')
-    m = metrics.Ratio('impressions', 'clicks', where='clicks > 5')
-    m = metrics.MetricList([m1, m2], where='impressions > 4')
-    metric = op(m)
-    output = metric.compute_on(self.df)
-    expected1 = op(m1).compute_on(self.df[self.df.impressions > 4])
-    expected2 = op(m2).compute_on(self.df[self.df.impressions > 4])
-    expected = pd.concat((expected1, expected2), 1)
+
+def spy_decorator(method_to_decorate):
+  # Adapted from https://stackoverflow.com/a/41599695.
+  m = mock.MagicMock()
+
+  def wrapper(self, *args, **kwargs):
+    m(*args, **kwargs)
+    return method_to_decorate(self, *args, **kwargs)
+
+  wrapper.mock = m
+  return wrapper
+
+
+SUM_COMPUTE_THROUGH = spy_decorator(metrics.Sum.compute_through)
+
+
+@mock.patch.object(metrics.Sum, 'compute_through', SUM_COMPUTE_THROUGH)
+class CachingTest(parameterized.TestCase):
+  n = 100
+  df = pd.DataFrame({
+      'clicks': np.random.choice(range(20), n),
+      'impressions': np.random.choice(range(20), n),
+      'cookie': np.random.choice(range(5), n),
+      'condition': np.random.choice(range(3), n),
+      'grp': np.random.choice(range(3), n),
+  })
+  ctr = metrics.Ratio('clicks', 'impressions')
+
+  @parameterized.named_parameters(*ALL_OPERATIONS)
+  def test_leaf_caching(self, op):
+    leaf = metrics.MetricList([
+        metrics.Ratio('impressions', 'clicks'),
+        metrics.Ratio('clicks', 'impressions')
+    ])
+    m = op(leaf)
+    SUM_COMPUTE_THROUGH.mock.reset_mock()
+    output = m.compute_on(self.df)
+    actual_call_ct = SUM_COMPUTE_THROUGH.mock.call_count
+    expected_call_ct = 2 * op.n_replicates + 2 if isinstance(
+        op, operations.Bootstrap) else 2
+    expected = pd.concat([op(l).compute_on(self.df) for l in leaf], 1)
+
+    self.assertEqual(actual_call_ct, expected_call_ct)
+    if isinstance(op, operations.Bootstrap):
+      self.assertEqual(output.shape, expected.shape)
+      self.assertEqual(list(output.columns), list(expected.columns))
+      self.assertEqual(output.index, expected.index)
+    else:
+      testing.assert_frame_equal(output, expected)
+
+  @parameterized.named_parameters(*ALL_OPERATIONS)
+  def test_operation_with_different_names(self, op):
+    SUM_COMPUTE_THROUGH.mock.reset_mock()
+    op1 = op(self.ctr)
+    op2 = op(self.ctr)
+    op2.name = 'Foo'
+    m = op1 - op2
+    with mock.patch.object(
+        op2, 'compute_through', wraps=op2.compute_through) as mock_fn:
+      output = m.compute_on(self.df)
+    actual_call_ct = SUM_COMPUTE_THROUGH.mock.call_count
+    expected_call_ct = 2 * op.n_replicates + 2 if isinstance(
+        op, operations.Bootstrap) else 2
+    expected = op1.compute_on(self.df)
+
+    self.assertEqual(actual_call_ct, expected_call_ct)
+    mock_fn.assert_not_called()
+    self.assertEqual(output.shape, expected.shape)
+    self.assertTrue((output.values == 0).all())
+
+  @parameterized.named_parameters(*OPERATIONS)
+  def test_filter_at_different_levels(self, op):
+    SUM_COMPUTE_THROUGH.mock.reset_mock()
+    op1 = copy.deepcopy(op)
+    op2 = copy.deepcopy(op)
+    op3 = copy.deepcopy(op)
+    op4 = copy.deepcopy(op)
+    f1 = 'clicks > 2'
+    f2 = 'impressions > 1'
+    op1 = op1(metrics.Ratio('clicks', 'impressions', where=f1))
+    op1.where = f2
+    op2 = op2(metrics.Ratio('clicks', 'impressions', where=f2))
+    op2.where = f1
+    op3 = op3(metrics.Ratio('clicks', 'impressions'))
+    op3.where = (f1, f2)
+    op4 = op4(metrics.Ratio('clicks', 'impressions', where=(f2, f1)))
+    m = metrics.MetricList((op1, op2, op3, op4))
+    if isinstance(op, (operations.CUPED, operations.PrePostChange)):
+      op1.covariates = metrics.Mean('clicks', where=f1)
+      op2.covariates = metrics.Mean('clicks', where=f2)
+      op4.covariates = metrics.Mean('clicks', where=(f1, f2))
+    output = m.compute_on(self.df)
+    actual_call_ct = SUM_COMPUTE_THROUGH.mock.call_count
+    expected = pd.concat([
+        op(metrics.Ratio('clicks', 'impressions')).compute_on(
+            self.df[(self.df.clicks > 2) & (self.df.impressions > 1)])
+    ] * 4, 1)
+
+    self.assertEqual(actual_call_ct, 2)
     testing.assert_frame_equal(output, expected)
+
+  def test_different_metrics_have_different_fingerprints(self):
+    distinct_ops = [
+        operations.Distribution('x'),
+        operations.Distribution('y'),
+        operations.CumulativeDistribution('x'),
+        operations.CumulativeDistribution('y'),
+        operations.CumulativeDistribution('x', order='foo'),
+        operations.CumulativeDistribution('x', ascending=False),
+        operations.PercentChange('x', 'y'),
+        operations.PercentChange('z', 'y'),
+        operations.PercentChange('x', 'z'),
+        operations.PercentChange('x', 'y', include_base=True),
+        operations.AbsoluteChange('x', 'y'),
+        operations.AbsoluteChange('z', 'y'),
+        operations.AbsoluteChange('x', 'z'),
+        operations.AbsoluteChange('x', 'y', include_base=True),
+        operations.PrePostChange(
+            'x', 'y', covariates=metrics.Count('x'), stratified_by='q'),
+        operations.PrePostChange(
+            'x', 'y', covariates=metrics.Mean('x'), stratified_by='q'),
+        operations.PrePostChange(
+            'x', 'y', covariates=metrics.Count('x'), stratified_by='w'),
+        operations.PrePostChange(
+            'b', 'y', covariates=metrics.Count('x'), stratified_by='q'),
+        operations.PrePostChange(
+            'x', 'a', covariates=metrics.Count('x'), stratified_by='q'),
+        operations.CUPED(
+            'x', 'y', covariates=metrics.Count('x'), stratified_by='q'),
+        operations.CUPED(
+            'x', 'y', covariates=metrics.Mean('x'), stratified_by='q'),
+        operations.CUPED(
+            'x', 'y', covariates=metrics.Count('x'), stratified_by='w'),
+        operations.CUPED(
+            'b', 'y', covariates=metrics.Count('x'), stratified_by='q'),
+        operations.CUPED(
+            'x', 'a', covariates=metrics.Count('x'), stratified_by='q'),
+        operations.Jackknife('x'),
+        operations.Jackknife('y'),
+        operations.Jackknife('x', confidence=.9),
+        operations.Jackknife('x', confidence=.95),
+        operations.Bootstrap(None),
+        operations.Bootstrap('x'),
+        operations.Bootstrap('x', n_replicates=10),
+        operations.Bootstrap('x', confidence=.9),
+        operations.Bootstrap('x', confidence=.95),
+    ]
+    fingerprints = set(
+        [m(metrics.Ratio('x', 'y')).get_fingerprint() for m in distinct_ops])
+    self.assertLen(fingerprints, len(distinct_ops))
 
 
 if __name__ == '__main__':

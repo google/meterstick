@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
 from typing import Iterable, List, Optional, Text, Union
 import pandas as pd
 
@@ -44,16 +45,15 @@ class CacheKey():
   there will be a cache miss, but
   Sum('X')).compute_on(df, condition, cache_key='foo')
   will hit the cache. So internally the key used in cache have to encode
-  split_by infomation. It cannot just be 'foo'.
+  split_by information. It cannot just be 'foo'.
   Similarly, internal cache key needs to encode the 'where' arg in Metric too or
   PercentChange(sumx, where='grp == 1') - PercentChange(sumx, where='grp == 0')
   would always return 0.
-  The last piece is the slice infomation. It matters when a Metric is not
-  vectorized.
-  CacheKey is the internal key we use in cache. It encodes split_by and where.
-  A cache_key users provide is first converted to a CacheKey.
+  The last piece is the slice information. It matters when a Metric is not
+  vectorized. We need to store which slice the result is for.
 
   Attributes:
+    metric: A Metric instance whose results are cached under the CacheKey.
     key: The raw cache_key user provides, or the default key.
     where: The filters to apply to the input DataFrame.
     split_by: The columns to split by.
@@ -63,32 +63,40 @@ class CacheKey():
       data slice with the keys being columns in split_by.
     all_filters: The merge of all 'where' conditions that can be passed to
       df.query().
+    extra_info: Extra information to distinguish CacheKeys.
   """
 
   def __init__(self,
+               metric,
                key,
                where: Optional[Union[Text, Iterable[Text]]] = None,
                split_by: Optional[Union[Text, List[Text]]] = None,
-               slice_val=None):
-    """Wraps cache_key, split_by, filters and slice infomation.
+               slice_val=None,
+               extra_info=()):
+    """Wraps cache_key, split_by, filters and slice information.
 
     Args:
+      metric: A Metric instance.
       key: A raw key or a CacheKey. If it's a CacheKey, we unwrap it and extend
         its split_by and where.
       where: The filters to apply to the input DataFrame.
       split_by: The columns to split by.
       slice_val: An ordered tuple of key, value pair in slice_val.
+      extra_info: Extra information to distinguish CacheKeys.
     """
-    split_by = [split_by] if isinstance(split_by, str) else split_by or ()
+    self.metric = copy.deepcopy(metric)
+    # `where` accumulates the filters so far and already includes metric.where.
+    self.metric.where = None
+    split_by = (split_by,) if isinstance(split_by, str) else split_by or ()
     where = [where] if isinstance(where, str) else where or []
     if isinstance(key, CacheKey):
       self.key = key.key
       self.where = key.where.copy()
       if where is not None:
         self.where.update(where)
-      self.split_by = key.split_by[:]
-      self.extend(split_by)
+      self.split_by = tuple(split_by) if split_by else key.split_by[:]
       self.slice_val = slice_val or {}
+      self.extra_info = key.extra_info
       for k, v in key.slice_val:
         if k in self.slice_val and self.slice_val[k] != v:
           raise ValueError('Incompatible data slice values!')
@@ -98,48 +106,24 @@ class CacheKey():
       self.where = set(where)
       self.split_by = tuple(split_by)
       self.slice_val = slice_val or {}
+      self.extra_info = extra_info
     self.slice_val = tuple(sorted(self.slice_val.items()))
 
-  def extend(self, split_by: Union[Text, List[Text]]):
-    split_by = [split_by] if isinstance(split_by, str) else split_by
-    new_split_by = [s for s in split_by if s not in self.split_by]
-    self.split_by = tuple(list(self.split_by) + new_split_by)
-    return self
-
-  def add_filters(self, filters):
-    self.where.update(filters)
-    return self
-
-  @property
-  def all_filters(self):
-    return ' & '.join('(%s)' % c for c in sorted(tuple(self.where))) or None
-
-  def includes(self, other):
-    """Decides if self is extended from other."""
-    return (isinstance(other, CacheKey) and self.key == other.key and
-            self.where == other.where and self.slice_val == other.slice_val and
-            self.split_by[:len(other.split_by)] == other.split_by)
+  def add_extra_info(self, extra_info: str):
+    self.extra_info = tuple(list(self.extra_info) + [extra_info])
 
   def __eq__(self, other):
-    return self.includes(other) and self.split_by == other.split_by
+    return isinstance(other, CacheKey) and hash(self) == hash(other)
 
   def __hash__(self):
-    return hash((self.key, self.split_by, self.slice_val,
-                 tuple(sorted(tuple(self.where)))))
+    return hash(
+        (self.metric.get_fingerprint(), self.key, self.split_by, self.slice_val,
+         self.extra_info, tuple(sorted(tuple(self.where)))))
 
   def __repr__(self):
-    return 'key: %s, split_by: %s, slice: %s, where: %s' % (
-        self.key, self.split_by, self.slice_val, self.where)
-
-
-def is_tmp_key(key):
-  if isinstance(key, str):
-    return key == '_RESERVED'
-  if isinstance(key, tuple) and len(key) > 1 and isinstance(key[0], str):
-    return key[0] == '_RESERVED'
-  if isinstance(key, CacheKey):
-    return is_tmp_key(key.key)
-  return False
+    return ('metric: %s, key: %s, split_by: %s, slice: %s, where: %s, '
+            'extra_info: %s') % (self.metric.name, self.key, self.split_by,
+                                 self.slice_val, self.where, self.extra_info)
 
 
 def adjust_slices_for_loo(bucket_res: pd.Series,

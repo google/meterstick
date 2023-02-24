@@ -54,7 +54,7 @@ class Operation(metrics.Metric):
       that used in Sum('X'). The latter has more columns in the split_by.
       extra_split_by records what columns need to be added to children Metrics
       so we can flush the cache correctly. The convention is extra_split_by
-      comes after split_by. If not, you need to overwrite flush_children().
+      comes after split_by.
     extra_index: Not every extra_split_by show up in the result. For example,
       the group_by columns in Models don't show up in the final output.
       extra_index stores the columns that will show up and should be a subset of
@@ -89,18 +89,13 @@ class Operation(metrics.Metric):
                extra_index: Optional[Union[Text, Iterable[Text]]] = None,
                name: Optional[Text] = None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
+               additional_fingerprint_attrs: Optional[List[str]] = None,
                **kwargs):
     if name_tmpl and not name:
       name = name_tmpl.format(utils.get_name(child))
-    super(Operation, self).__init__(name, child or (), where, name_tmpl,
-                                    **kwargs)
-    self.extra_split_by = [extra_split_by] if isinstance(
-        extra_split_by, str) else extra_split_by or []
-    if extra_index is None:
-      self.extra_index = self.extra_split_by
-    else:
-      self.extra_index = [extra_index] if isinstance(extra_index,
-                                                     str) else extra_index
+    super(Operation,
+          self).__init__(name, child or (), where, name_tmpl, extra_split_by,
+                         extra_index, additional_fingerprint_attrs, **kwargs)
     self.precomputable_in_jk = True
     self.precompute_child = True
     self.apply_name_tmpl = True
@@ -140,9 +135,8 @@ class Operation(metrics.Metric):
                     return_dataframe=True,
                     cache_key=None):
     child = self.children[0]
-    cache_key = cache_key or self.cache_key or self.RESERVED_KEY
-    cache_key = self.wrap_cache_key(cache_key, split_by)
-    return child.compute_on(df, split_by, melted, return_dataframe, cache_key)
+    return self.compute_util_metric_on(child, df, split_by, melted,
+                                       return_dataframe, cache_key)
 
   def compute_child_sql(self,
                         table,
@@ -152,31 +146,19 @@ class Operation(metrics.Metric):
                         mode=None,
                         cache_key=None):
     child = self.children[0]
-    cache_key = cache_key or self.cache_key or self.RESERVED_KEY
     cache_key = self.wrap_cache_key(cache_key, split_by)
-    return child.compute_on_sql(table, split_by, execute, melted, mode,
-                                cache_key)
+    return self.compute_util_metric_on_sql(child, table, split_by, execute,
+                                           melted, mode, cache_key)
 
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
     res = super(Operation,
                 self).compute_on_sql_mixed_mode(table, split_by, execute, mode)
     return utils.apply_name_tmpl(self.name_tmpl, res)
 
-  def flush_children(self,
-                     key=None,
-                     split_by=None,
-                     where=None,
-                     recursive=True,
-                     prune=True):
-    split_by = (split_by or []) + self.extra_split_by
-    super(Operation, self).flush_children(key, split_by, where, recursive,
-                                          prune)
-
   def __call__(self, child: metrics.Metric):
     op = copy.deepcopy(self) if self.children else self
     op.name = op.name_tmpl.format(utils.get_name(child))
     op.children = (child,)
-    op.cache = {}
     return op
 
 
@@ -267,8 +249,12 @@ class CumulativeDistribution(Operation):
                **kwargs):
     self.order = order
     self.ascending = ascending
-    super(CumulativeDistribution,
-          self).__init__(child, 'Cumulative Distribution of {}', over, **kwargs)
+    super(CumulativeDistribution, self).__init__(
+        child,
+        'Cumulative Distribution of {}',
+        over,
+        additional_fingerprint_attrs=['order', 'ascending'],
+        **kwargs)
 
   def compute(self, df):
     if self.order:
@@ -355,11 +341,18 @@ class Comparison(Operation):
                child: Optional[metrics.Metric] = None,
                include_base: bool = False,
                name_tmpl: Optional[Text] = None,
+               additional_fingerprint_attrs=None,
                **kwargs):
     self.baseline_key = baseline_key
     self.include_base = include_base
-    super(Comparison, self).__init__(child, name_tmpl, condition_column,
-                                     **kwargs)
+    additional_fingerprint_attrs = additional_fingerprint_attrs or []
+    super(Comparison, self).__init__(
+        child,
+        name_tmpl,
+        condition_column,
+        additional_fingerprint_attrs=['baseline_key', 'include_base'] +
+        additional_fingerprint_attrs,
+        **kwargs)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -486,9 +479,8 @@ class PercentChange(Comparison):
                name_tmpl=None,
                **kwargs):
     name_tmpl = name_tmpl or '{} Percent Change'
-    super(PercentChange,
-          self).__init__(condition_column, baseline_key, child, include_base,
-                         name_tmpl, **kwargs)
+    super(PercentChange, self).__init__(condition_column, baseline_key, child,
+                                        include_base, name_tmpl, **kwargs)
 
   def compute_on_children(self, children, split_by):
     level = None
@@ -597,9 +589,14 @@ class PrePostChange(PercentChange):
         stratified_by, str) else stratified_by or []
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
-    super(PrePostChange, self).__init__(self.stratified_by + condition_column,
-                                        baseline_key, child, include_base,
-                                        '{} PrePost Percent Change', **kwargs)
+    super(PrePostChange, self).__init__(
+        self.stratified_by + condition_column,
+        baseline_key,
+        child,
+        include_base,
+        '{} PrePost Percent Change',
+        additional_fingerprint_attrs=['covariates'],
+        **kwargs)
     self.extra_index = condition_column
     self.covariates = covariates
     self.precomputable_in_jk = False
@@ -613,7 +610,8 @@ class PrePostChange(PercentChange):
                        cache_key=None):
     child = super(PrePostChange, self).compute_children(
         df, split_by, cache_key=cache_key)
-    covariates = self.covariates.compute_on(df, split_by)
+    covariates = self.compute_util_metric_on(
+        self.covariates, df, split_by, cache_key=cache_key)
     original_split_by = [s for s in split_by if s not in self.extra_split_by]
     return self.adjust_value(child, covariates, original_split_by)
 
@@ -667,8 +665,8 @@ class PrePostChange(PercentChange):
     split_by_with_extra = split_by + self.extra_split_by
     child = super(PrePostChange,
                   self).compute_children_sql(table, split_by, execute, mode)
-    covariates = self.covariates.compute_on_sql(table, split_by_with_extra,
-                                                execute, mode)
+    covariates = self.covariates.compute_on_sql(
+        table, split_by_with_extra, execute, mode=mode)
     return self.adjust_value(child, covariates, split_by)
 
 
@@ -696,7 +694,8 @@ class CUPED(AbsoluteChange):
     covariates: The Metric(s) we want to use to reduce variance. Usually they
       are some metrics from the preperiod.
     include_base: A boolean for whether the baseline condition should be
-      included in the output. And all other attributes inherited from Operation.
+      included in the output.
+    And all other attributes inherited from Operation.
   """
 
   def __init__(self,
@@ -715,9 +714,14 @@ class CUPED(AbsoluteChange):
         stratified_by, str) else stratified_by or []
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
-    super(CUPED, self).__init__(self.stratified_by + condition_column,
-                                baseline_key, child, include_base,
-                                '{} CUPED Change', **kwargs)
+    super(CUPED, self).__init__(
+        self.stratified_by + condition_column,
+        baseline_key,
+        child,
+        include_base,
+        '{} CUPED Change',
+        additional_fingerprint_attrs=['covariates'],
+        **kwargs)
     self.extra_index = condition_column
     self.covariates = covariates
     self.precomputable_in_jk = False
@@ -731,7 +735,8 @@ class CUPED(AbsoluteChange):
                        cache_key=None):
     child = super(CUPED, self).compute_children(
         df, split_by, cache_key=cache_key)
-    covariates = self.covariates.compute_on(df, split_by)
+    covariates = self.compute_util_metric_on(
+        self.covariates, df, split_by, cache_key=cache_key)
     original_split_by = [s for s in split_by if s not in self.extra_split_by]
     return self.adjust_value(child, covariates, original_split_by)
 
@@ -776,8 +781,8 @@ class CUPED(AbsoluteChange):
     split_by_with_extra = split_by + self.extra_split_by
     child = super(CUPED, self).compute_children_sql(table, split_by, execute,
                                                     mode)
-    covariates = self.covariates.compute_on_sql(table, split_by_with_extra,
-                                                execute, mode)
+    covariates = self.covariates.compute_on_sql(
+        table, split_by_with_extra, execute, mode=mode)
     return self.adjust_value(child, covariates, split_by)
 
 
@@ -813,8 +818,16 @@ class MH(Comparison):
                **kwargs):
     self.stratified_by = stratified_by if isinstance(stratified_by,
                                                      list) else [stratified_by]
-    super(MH, self).__init__(condition_column, baseline_key, metric,
-                             include_base, '{} MH Ratio', **kwargs)
+    condition_column = [condition_column] if isinstance(
+        condition_column, str) else condition_column
+    super(MH, self).__init__(
+        condition_column + self.stratified_by,
+        baseline_key,
+        metric,
+        include_base,
+        '{} MH Ratio',
+        extra_index=condition_column,
+        **kwargs)
 
   def check_is_ratio(self, metric=None):
     metric = metric or self.children[0]
@@ -822,9 +835,11 @@ class MH(Comparison):
       for m in metric:
         self.check_is_ratio(m)
     else:
-      if not isinstance(metric,
-                        metrics.CompositeMetric) or metric.op(2.0, 2) != 1:
-        raise ValueError('MH only makes sense on ratio Metrics.')
+      if not isinstance(
+          metric,
+          (metrics.CompositeMetric, metrics.Ratio)) or metric.op(2.0, 2) != 1:
+        raise ValueError('MH only makes sense on ratio Metrics. Got %s.' %
+                         metric)
 
   def compute_children(self,
                        df: pd.DataFrame,
@@ -834,20 +849,19 @@ class MH(Comparison):
                        cache_key=None):
     self.check_is_ratio()
     child = self.children[0]
-    cache_key = cache_key or self.cache_key or self.RESERVED_KEY
-    cache_key = self.wrap_cache_key(cache_key, split_by + self.stratified_by)
     if isinstance(child, metrics.MetricList):
       children = []
       for m in child.children:
         util_metric = metrics.MetricList(
-            [metrics.MetricList(m.children, where=m.where)], where=child.where)
+            [metrics.MetricList(m.children, where=m.where_raw)],
+            where=child.where_raw)
         children.append(
-            util_metric.compute_on(
-                df, split_by + self.stratified_by, cache_key=cache_key))
+            self.compute_util_metric_on(
+                util_metric, df, split_by, cache_key=cache_key))
       return children
-    util_metric = metrics.MetricList(child.children, where=child.where)
-    return util_metric.compute_on(
-        df, split_by + self.stratified_by, cache_key=cache_key)
+    util_metric = metrics.MetricList(child.children, where=child.where_raw)
+    return self.compute_util_metric_on(
+        util_metric, df, split_by, cache_key=cache_key)
 
   def compute_on_children(self, children, split_by):
     child = self.children[0]
@@ -894,36 +908,19 @@ class MH(Comparison):
       children = []
       for m in child.children:
         util_metric = metrics.MetricList(
-            [metrics.MetricList(m.children, where=m.where)], where=child.where)
-        c = util_metric.compute_on_sql(
+            [metrics.MetricList(m.children, where=m.where_raw)],
+            where=child.where_raw)
+        c = self.compute_util_metric_on_sql(
+            util_metric,
             table,
-            split_by + self.extra_index + self.stratified_by,
+            split_by + self.extra_split_by,
             execute,
-            cache_key=self.cache_key or self.RESERVED_KEY,
             mode=mode)
         children.append(c)
       return children
-    util_metric = metrics.MetricList(child.children, where=child.where)
-    return util_metric.compute_on_sql(
-        table,
-        split_by + self.extra_index + self.stratified_by,
-        execute,
-        cache_key=self.cache_key or self.RESERVED_KEY,
-        mode=mode)
-
-  def flush_children(self,
-                     key=None,
-                     split_by=None,
-                     where=None,
-                     recursive=True,
-                     prune=True):
-    """Flushes the grandchildren as child is not computed."""
-    split_by = (split_by or []) + self.extra_index + self.stratified_by
-    if isinstance(self.children[0], metrics.MetricList):
-      for c in self.children[0]:
-        c.flush_children(key, split_by, where, recursive, prune)
-    else:
-      self.children[0].flush_children(key, split_by, where, recursive, prune)
+    util_metric = metrics.MetricList(child.children, where=child.where_raw)
+    return self.compute_util_metric_on_sql(
+        util_metric, table, split_by + self.extra_split_by, execute, mode=mode)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -993,13 +990,13 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       grandchildren = []
       for m in child:
-        grandchildren.append(metrics.MetricList(m.children, where=m.where))
-      util_metric = metrics.MetricList(grandchildren, where=child.where)
+        grandchildren.append(metrics.MetricList(m.children, where=m.where_raw))
+      util_metric = metrics.MetricList(grandchildren, where=child.where_raw)
     else:
-      util_metric = metrics.MetricList(child.children, where=child.where)
+      util_metric = metrics.MetricList(child.children, where=child.where_raw)
 
     cond_cols = sql.Columns(self.extra_index)
-    groupby = sql.Columns(split_by).add(cond_cols).add(self.stratified_by)
+    groupby = sql.Columns(split_by).add(self.extra_split_by)
     util_indexes = sql.Columns(indexes).add(self.stratified_by)
     raw_table_sql, with_data = util_metric.get_sql_and_with_clause(
         table, groupby, global_filter, util_indexes, local_filter, with_data)
@@ -1039,14 +1036,14 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       for c in child:
         with_data2 = copy.deepcopy(with_data)
-        util = metrics.MetricList(c.children[:1], where=c.where)
+        util = metrics.MetricList(c.children[:1], where=c.where_raw)
         numer_sql, with_data2 = util.get_sql_and_with_clause(
             table, groupby, global_filter, util_indexes, local_filter,
             with_data2)
         with_data2.merge(sql.Datasource(numer_sql))
         numer = numer_sql.columns[-1].alias
         with_data2 = copy.deepcopy(with_data)
-        util = metrics.MetricList(c.children[1:], where=c.where)
+        util = metrics.MetricList(c.children[1:], where=c.where_raw)
         denom_sql, with_data2 = util.get_sql_and_with_clause(
             table, groupby, global_filter, util_indexes, local_filter,
             with_data2)
@@ -1061,13 +1058,13 @@ class MH(Comparison):
                 alias=alias_tmpl.format(c.name)))
     else:
       with_data2 = copy.deepcopy(with_data)
-      util = metrics.MetricList(child.children[:1], where=child.where)
+      util = metrics.MetricList(child.children[:1], where=child.where_raw)
       numer_sql, with_data2 = util.get_sql_and_with_clause(
           table, groupby, global_filter, util_indexes, local_filter, with_data2)
       with_data2.merge(sql.Datasource(numer_sql))
       numer = numer_sql.columns[-1].alias
       with_data2 = copy.deepcopy(with_data)
-      util = metrics.MetricList(child.children[1:], where=child.where)
+      util = metrics.MetricList(child.children[1:], where=child.where_raw)
       denom_sql, with_data2 = util.get_sql_and_with_clause(
           table, groupby, global_filter, util_indexes, local_filter, with_data2)
       with_data2.merge(sql.Datasource(denom_sql))
@@ -1259,18 +1256,26 @@ class MetricWithCI(Operation):
                confidence: Optional[float] = None,
                name_tmpl: Optional[Text] = None,
                prefix: Optional[Text] = None,
+               additional_fingerprint_attrs=None,
                sql_batch_size=None,
                **kwargs):
     if confidence and not 0 < confidence < 1:
       raise ValueError('Confidence must be in (0, 1).')
     self.unit = unit
     self.confidence = confidence
-    super(MetricWithCI, self).__init__(child, name_tmpl, **kwargs)
+    additional_fingerprint_attrs = additional_fingerprint_attrs or []
+    additional_fingerprint_attrs += ['unit', 'confidence']
+    super(MetricWithCI, self).__init__(
+        child,
+        name_tmpl,
+        additional_fingerprint_attrs=additional_fingerprint_attrs,
+        **kwargs)
     self.apply_name_tmpl = False
     self.prefix = prefix
     self.sql_batch_size = sql_batch_size
     if not self.prefix and self.name_tmpl:
       self.prefix = prefix or self.name_tmpl.format('').strip()
+    self.precomputable_in_jk = False
 
   def compute_on_samples(self,
                          keyed_samples: Iterable[Tuple[Any, pd.DataFrame]],
@@ -1290,22 +1295,18 @@ class MetricWithCI(Operation):
     for keyed_sample in keyed_samples:
       try:
         cache_key, sample = keyed_sample
-        res = self.compute_child(
-            sample, split_by, melted=True, cache_key=cache_key)
+        if cache_key is None:
+          # If samples are unlikely to repeat, don't save res to self.cache.
+          res = self.children[0].compute_on(sample, split_by, melted=True)
+        else:
+          res = self.compute_child(
+              sample, split_by, melted=True, cache_key=cache_key)
         estimates.append(res)
       except Exception as e:  # pylint: disable=broad-except
         print(
             'Warning: Failed on %s sample data for reason %s. If you see many '
             'such failures, your data might be too sparse.' %
             (self.name_tmpl.format(''), repr(e)))
-      finally:
-        # Jackknife keys are unique so can be kept longer.
-        if isinstance(self, Bootstrap) and cache_key is not None:
-          cache_key = self.wrap_cache_key(cache_key, split_by)
-          # In case errors occur so the top Metric was not computed, we don't
-          # want to prune because the leaf Metrics still need to be cleaned up.
-          self.flush_children(cache_key, split_by, prune=False)
-    # There are funtions outside meterstick directly call this, so don't change.
     return estimates
 
   def compute_children(self,
@@ -1327,12 +1328,22 @@ class MetricWithCI(Operation):
                  melted=False,
                  return_dataframe=True,
                  apply_name_tmpl=False):
-    # Always return a melted df and don't add suffix like "Jackknife" because
-    # point_est won't have it.
-    del melted, return_dataframe  # unused
-    base = res.meterstick_change_base
-    res = super(MetricWithCI, self).manipulate(res, True, True, apply_name_tmpl)
-    return self.add_base_to_res(res, base)
+    """Saves and restores the base in addition when has confidence."""
+    if self.confidence:
+      key = self.wrap_cache_key(self.cache_key)
+      key.add_extra_info('base')
+      if hasattr(res, 'meterstick_change_base'):
+        # If res is computed from input data, it will have the attribute.
+        base = res.meterstick_change_base
+        self.save_to_cache(key, base)
+      else:
+        # If res is read from cache, it won't have the attribute, but it must
+        # have been computed already so base has been saved in cache.
+        base = self.find_all_in_cache(key)
+    # Don't add suffix like "Jackknife" because point_est won't have it.
+    res = super(MetricWithCI, self).manipulate(res, melted, return_dataframe,
+                                               apply_name_tmpl)
+    return self.add_base_to_res(res, base) if self.confidence else res
 
   def compute_slices(self, df, split_by):
     std = super(MetricWithCI, self).compute_slices(df, split_by)
@@ -1346,7 +1357,12 @@ class MetricWithCI(Operation):
     base = self.compute_change_base(df, split_by)
     return self.add_base_to_res(res, base)
 
-  def compute_change_base(self, df, split_by, execute=None, mode=None):
+  def compute_change_base(self,
+                          df,
+                          split_by,
+                          execute=None,
+                          mode=None,
+                          cache_key=None):
     """Computes the base values for Change. It's used in res.display()."""
     if not self.confidence:
       return None
@@ -1355,12 +1371,16 @@ class MetricWithCI(Operation):
       return None
     base = None
     change = self.children[0]
+    util_metric = change.children[0]
+    util_metric = metrics.MetricList([util_metric], where=change.where_raw)
     to_split = (
         split_by + change.extra_index if split_by else change.extra_index)
     if execute is None:
-      base = change.compute_child(df, to_split)
+      base = self.compute_util_metric_on(
+          util_metric, df, to_split, cache_key=cache_key)
     else:
-      base = change.compute_child_sql(df, to_split, execute, mode=mode)
+      base = self.compute_util_metric_on_sql(
+          util_metric, df, to_split, execute, mode=mode, cache_key=cache_key)
     base.columns = [change.name_tmpl.format(c) for c in base.columns]
     base = utils.melt(base)
     base.columns = ['_base_value']
@@ -1381,10 +1401,6 @@ class MetricWithCI(Operation):
                     df=None):
     """Add a display function if confidence is specified."""
     del return_dataframe  # unused
-    base = res.meterstick_change_base
-    if not melted:
-      res = utils.unmelt(res)
-      self.add_base_to_res(res, base)
     if self.confidence:
       indexes = list(res.index.names)
       if melted:
@@ -1533,8 +1549,7 @@ class MetricWithCI(Operation):
                 alias=c.alias_raw) for c in base.columns.difference(indexes))
 
     join = 'LEFT' if using else 'CROSS'
-    from_data = sql.Join(
-        pt_est_alias, se_alias, join=join, using=using)
+    from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
     if has_base_vals:
       from_data = from_data.join(base_alias, join=join, using=using)
     return sql.Sql(using.add(columns), from_data), with_data
@@ -1547,6 +1562,7 @@ class MetricWithCI(Operation):
       melted=False,
       mode=None,
       cache_key=None,
+      cache=None,
       batch_size=None,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
@@ -1572,6 +1588,8 @@ class MetricWithCI(Operation):
       cache_key: What key to use to cache the result. You can use anything that
         can be a key of a dict except '_RESERVED' and tuples like
         ('_RESERVED', ..).
+      cache: The global cache the whole Metric tree shares. If it's None, we
+        initiate an empty dict.
       batch_size: The number of resamples to compute in one SQL run. It only has
         effect in the 'mixed' mode. It precedes self.batch_size.
 
@@ -1580,8 +1598,9 @@ class MetricWithCI(Operation):
     """
     self._runtime_batch_size = batch_size
     try:
-      return super(MetricWithCI, self).compute_on_sql(table, split_by, execute,
-                                                      melted, mode, cache_key)
+      return super(MetricWithCI,
+                   self).compute_on_sql(table, split_by, execute, melted, mode,
+                                        cache_key, cache)
     finally:
       self._runtime_batch_size = None
 
@@ -1726,16 +1745,14 @@ def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
       # total - each_bucket might put the unit as the innermost level, but we
       # want the unit as the outermost level.
       loo = loo.reorder_levels(split_by_with_unit)
-    key = utils.CacheKey(('_RESERVED', 'Jackknife', unit), self.cache_key.where,
-                         [unit] + split_by)
+    key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit),
+                         self.cache_key.where, [unit] + split_by)
     self.save_to_cache(key, loo)
-    self.tmp_cache_keys.add(key)
     buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
     for bucket in buckets:
       key = self.wrap_cache_key(('_RESERVED', 'Jackknife', unit, bucket),
-                                split_by, self.cache_key.where)
+                                split_by)
       self.save_to_cache(key, loo.loc[bucket])
-      self.tmp_cache_keys.add(key)
     return total
 
   return precompute_loo
@@ -1803,15 +1820,13 @@ def get_mean_monkey_patch_fn(unit, original_split_by):
         loo = loo.reorder_levels(split_by_with_unit)
 
     buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
-    key = utils.CacheKey(('_RESERVED', 'Jackknife', unit), self.cache_key.where,
-                         [unit] + split_by)
+    key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit),
+                         self.cache_key.where, [unit] + split_by)
     self.save_to_cache(key, loo)
-    self.tmp_cache_keys.add(key)
     for bucket in buckets:
-      key = utils.CacheKey(('_RESERVED', 'Jackknife', unit, bucket),
+      key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit, bucket),
                            self.cache_key.where, split_by)
       self.save_to_cache(key, loo.loc[bucket])
-      self.tmp_cache_keys.add(key)
     return mean
 
   return precompute_loo
@@ -1873,15 +1888,13 @@ def get_dot_monkey_patch_fn(unit, original_split_by, original_compute):
         loo = loo.reorder_levels(split_by_with_unit)
 
     buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
-    key = utils.CacheKey(('_RESERVED', 'Jackknife', unit), self.cache_key.where,
-                         [unit] + split_by)
+    key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit),
+                         self.cache_key.where, [unit] + split_by)
     self.save_to_cache(key, loo)
-    self.tmp_cache_keys.add(key)
     for bucket in buckets:
-      key = utils.CacheKey(('_RESERVED', 'Jackknife', unit, bucket),
+      key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit, bucket),
                            self.cache_key.where, split_by)
       self.save_to_cache(key, loo.loc[bucket])
-      self.tmp_cache_keys.add(key)
     return total
 
   return precompute_loo
@@ -1915,10 +1928,9 @@ def save_to_cache_for_jackknife(self, key, val, split_by=None):
   if isinstance(key.key, tuple) and key.key[:2] == ('_RESERVED', 'jk'):
     val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
     base_key = key.key[2]
-    base_key = utils.CacheKey(base_key, key.where, key.split_by, key.slice_val)
+    base_key = utils.CacheKey(self, base_key, key.where, key.split_by,
+                              key.slice_val)
     self.cache[base_key] = val
-    if utils.is_tmp_key(base_key):
-      self.tmp_cache_keys.add(base_key)
   val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
   self.cache[key] = val
 
@@ -1998,8 +2010,7 @@ class Jackknife(MetricWithCI):
           m.compute_slices = get_dot_monkey_patch_fn(
               self.unit, split_by, original_dot_compute_slices).__get__(m)
         m.save_to_cache = save_to_cache_for_jackknife.__get__(m)
-      cache_key = self.cache_key or self.RESERVED_KEY
-      cache_key = ('_RESERVED', 'jk', cache_key, self.unit)
+      cache_key = ('_RESERVED', 'jk', self.cache_key, self.unit)
       self.compute_child(df, split_by, cache_key=cache_key)
     finally:
       for m in self.traverse():
@@ -2090,7 +2101,7 @@ class Jackknife(MetricWithCI):
     """If all leaf Metrics are Sum/Count/Dot/Mean, LOO can be precomputed."""
     if not self.enable_optimization:
       return False
-    for m in self.traverse():
+    for m in self.traverse(include_self=False):
       if isinstance(m, Operation) and not m.precomputable_in_jk:
         return False
       if not m.children and not isinstance(
@@ -2174,8 +2185,13 @@ class Bootstrap(MetricWithCI):
                n_replicates: int = 10000,
                confidence: Optional[float] = None,
                **kwargs):
-    super(Bootstrap, self).__init__(unit, child, confidence, '{} Bootstrap',
-                                    None, **kwargs)
+    super(Bootstrap, self).__init__(
+        unit,
+        child,
+        confidence,
+        '{} Bootstrap',
+        additional_fingerprint_attrs=['n_replicates'],
+        **kwargs)
     self.n_replicates = n_replicates
 
   def get_samples(self, df, split_by=None):
@@ -2183,8 +2199,7 @@ class Bootstrap(MetricWithCI):
     if self.unit is None:
       to_sample = self.group(df, split_by)
       for _ in range(self.n_replicates):
-        yield ('_RESERVED', 'Bootstrap', None), to_sample.sample(
-            frac=1, replace=True)
+        yield None, to_sample.sample(frac=1, replace=True)
     else:
       grp_by = split_by + [self.unit] if split_by else self.unit
       grped = df.groupby(grp_by)
@@ -2194,12 +2209,10 @@ class Bootstrap(MetricWithCI):
         resampled = self.group(units_split_by, split_by).sample(
             frac=1, replace=True).values
         if not split_by:
-          yield ('_RESERVED', 'Bootstrap',
-                 self.unit), df.iloc[np.concatenate([idx[i] for i in resampled
-                                                    ])]
+          yield None, df.iloc[np.concatenate([idx[i] for i in resampled])]
         else:
-          yield ('_RESERVED', 'Bootstrap', self.unit), df.iloc[np.concatenate(
-              [idx[tuple(i)] for i in resampled])]
+          yield None, df.iloc[np.concatenate([idx[tuple(i)] for i in resampled
+                                             ])]
 
   def compute_children_sql(self, table, split_by, execute, mode, batch_size):
     """Compute the children on resampled data in SQL."""

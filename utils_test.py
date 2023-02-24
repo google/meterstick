@@ -26,34 +26,8 @@ import unittest
 
 class UtilsTest(unittest.TestCase):
 
-  def test_cache_key_init_with_cache_key(self):
-    expected = utils.CacheKey('foo', 'where', ['bar'])
-    output = utils.CacheKey(expected)
-    self.assertEqual(expected, output)
-
-  def test_cache_key_extend(self):
-    output = utils.CacheKey('foo', 'where', ['bar', 'baz'])
-    output.extend(['baz', 'qux'])
-    self.assertEqual(
-        utils.CacheKey('foo', 'where', ['bar', 'baz', 'qux']), output)
-
-  def test_cache_key_includes(self):
-    derived = utils.CacheKey('foo', 'where', ['bar', 'baz'])
-    base = utils.CacheKey('foo', 'where', ['bar'])
-    self.assertTrue(derived.includes(base))
-
-  def test_cache_key_where(self):
-    output = utils.CacheKey('foo', 'where', ['bar', 'baz'])
-    output = utils.CacheKey(output, 'where2')
-    output.add_filters(['where', 'where3'])
-    self.assertEqual(set(('where', 'where2', 'where3')), output.where)
-    self.assertEqual('(where) & (where2) & (where3)', output.all_filters)
-
   def test_adjust_slices_for_loo_no_splitby_no_extra(self):
-    s = pd.Series(
-        range(1, 4),
-        index=pd.Index(range(3), name='unit')
-    )
+    s = pd.Series(range(1, 4), index=pd.Index(range(3), name='unit'))
     output = utils.adjust_slices_for_loo(s)
     self.assertIs(s, output)
 
@@ -289,6 +263,7 @@ class UtilsTest(unittest.TestCase):
     expected = df.droplevel(0)
     actual = utils.remove_empty_level(df)
     testing.assert_frame_equal(expected, actual)
+
 
 if __name__ == '__main__':
   unittest.main()

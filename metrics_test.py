@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import parameterized
 from meterstick import metrics
 from meterstick import operations
 import mock
@@ -48,6 +49,7 @@ class MetricTest(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
   def test_postcompute(self):
+
     def postcompute(values, split_by):
       del split_by
       return values / values.sum()
@@ -1344,11 +1346,35 @@ class TestMetricList(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class TestCaching(unittest.TestCase):
+class TestCaching(parameterized.TestCase):
 
-  df = pd.DataFrame({'X': [0, 1], 'grp': ['A', 'B']})
+  df = pd.DataFrame({'X': [0, 1], 'Y': [0, 1], 'grp': ['A', 'B']})
 
   def test_simple_metric_caching(self):
+    m1 = metrics.Sum('X')
+    m2 = metrics.Sum('X', name='s') + metrics.Sum('X')
+    m3 = metrics.Ratio('X', 'X')
+    m = metrics.MetricList((m1, m2, m3))
+    with mock.patch.object(
+        metrics.Sum, 'compute_through', autospec=True) as mock_fn:
+      m.compute_on(self.df)
+    mock_fn.assert_called_once()
+    self.assertIsNone(m1.cache_key)
+    self.assertIsNone(m2.cache_key)
+    self.assertIsNone(m3.cache_key)
+    self.assertIsNone(m.cache_key)
+
+  def test_custom_compute_caching(self):
+    fn = lambda x: x['X'].sum()
+    m1 = metrics.Metric('foo', compute=fn)
+    m2 = metrics.Metric('foo', compute=fn)
+    m = metrics.MetricList((m1, m2))
+    with mock.patch.object(
+        metrics.Metric, 'compute_through', autospec=True) as mock_fn:
+      m.compute_on(self.df, return_dataframe=False)
+    mock_fn.assert_called_once()
+
+  def test_cache_in_multiple_runs(self):
     m = metrics.Count('X')
     with mock.patch.object(m, 'compute_through', autospec=True) as mock_fn:
       m.compute_on(self.df)
@@ -1358,30 +1384,19 @@ class TestCaching(unittest.TestCase):
     with mock.patch.object(
         m, 'compute_through', return_value='a', autospec=True) as mock_fn:
       m.compute_on(self.df, cache_key='foo')
-      output = m.compute_on(self.df, cache_key='foo', return_dataframe=False)
+      output = m.compute_on(
+          self.df, cache_key='foo', return_dataframe=False, cache=m.cache)
       mock_fn.assert_called_once_with(self.df, [])
       self.assertEqual('a', output)
-      self.assertTrue(m.in_cache('foo'))
-      self.assertEqual('a', m.get_cached('foo'))
 
-  def test_simple_metric_flush_cache(self):
-    m = metrics.Count('X')
-    m.compute_on(self.df, cache_key=42)
-    m.flush_cache(42)
-    self.assertFalse(m.in_cache(42))
-
-  def test_flush_cache_when_fail(self):
+  def test_clear_cache_key_when_fail(self):
     sum_x = metrics.Sum('X')
     sum_fail = metrics.Sum('fail')
     try:
       metrics.MetricList((sum_x, sum_fail)).compute_on(self.df)
     except KeyError:
       pass
-    self.assertEqual(sum_x.cache, {})
-    self.assertEqual(sum_x.tmp_cache_keys, set())
     self.assertIsNone(sum_x.cache_key)
-    self.assertEqual(sum_fail.cache, {})
-    self.assertEqual(sum_fail.tmp_cache_keys, set())
     self.assertIsNone(sum_fail.cache_key)
 
   def test_simple_metric_caching_split_by(self):
@@ -1389,204 +1404,94 @@ class TestCaching(unittest.TestCase):
     with mock.patch.object(m, 'compute_through', autospec=True) as mock_fn:
       m.compute_on(self.df, 'grp')
       m.compute_on(self.df, ['grp'])
-      self.assertEqual(2, mock_fn.call_count)
+
+    self.assertEqual(2, mock_fn.call_count)
+
     m = metrics.Count('X')
     with mock.patch.object(
         m, 'compute_through', return_value='a', autospec=True) as mock_fn:
-      m.compute_on(self.df, 'grp', cache_key='foo')
+      m.compute_on(self.df, 'grp')
       output = m.compute_on(
-          self.df, ['grp'], cache_key='foo', return_dataframe=False)
-      mock_fn.assert_called_once_with(self.df, ['grp'])
-      self.assertEqual('a', output)
-      self.assertTrue(m.in_cache('foo', 'grp'))
-      self.assertEqual('a', m.get_cached('foo', 'grp'))
+          self.df, ['grp'], return_dataframe=False, cache=m.cache)
 
-  def test_simple_metric_flush_cache_split_by(self):
-    m = metrics.Count('X')
-    m.compute_on(self.df, 'grp', cache_key=42)
-    self.assertTrue(m.in_cache(42, 'grp'))
-    m.flush_cache(42, 'grp')
-    self.assertFalse(m.in_cache(42, 'grp'))
+    mock_fn.assert_called_once_with(self.df, ['grp'])
+    self.assertEqual('a', output)
 
-  def test_one_time_caching(self):
-    m = metrics.Count('X')
-    key = (42, 'foo')
-    m.compute_on(self.df, cache_key=key)
-    self.assertTrue(m.in_cache(key))
-    self.assertEqual(2, m.get_cached(key))
+  equivalent_metrics = [
+      ('Ratio', metrics.Ratio('X', 'Y'), metrics.Sum('X') / metrics.Sum('Y')),
+      ('Mean', metrics.Mean('X'), metrics.Sum('X') / metrics.Count('X')),
+      ('Dot', metrics.Dot('X', 'Y'), metrics.Dot('Y', 'X')),
+      ('Correlation', metrics.Correlation('X',
+                                          'Y'), metrics.Correlation('Y', 'X')),
+      ('Cov', metrics.Cov('X', 'Y'), metrics.Cov('Y', 'X'))
+  ]
 
-  def test_simple_metric_cache_key(self):
-    m = metrics.Count('X')
-    m.compute_on(self.df, cache_key=42)
-    self.assertTrue(m.in_cache(42))
-    self.assertEqual(2, m.get_cached(42))
-    output = m.compute_on(None, cache_key=42, return_dataframe=False)
-    self.assertEqual(2, output)
+  @parameterized.named_parameters(*equivalent_metrics)
+  def test_equivalent_metrics(self, m1, m2):
+    expected = m1.compute_on(self.df)
+    expected.columns = [m2.name]
+    output = m2.compute_on(None, cache=m1.cache)
+    testing.assert_frame_equal(output, expected)
 
-  def test_metriclist_internal_caching(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    m = metrics.MetricList((sum_x, double_sum_x))
-    with mock.patch.object(sum_x, 'compute_through', autospec=True) as mock_fn:
-      m.compute_on(self.df, return_dataframe=False)
-      mock_fn.assert_called_once_with(self.df, [])
+  def test_filter_has_effect(self):
+    df = pd.DataFrame({'X': [1, 2]})
+    output = metrics.MetricList(
+        (metrics.Count('X'), metrics.Count('X', where='X > 1'))).compute_on(df)
+    expected = pd.DataFrame([[2, 1]], columns=['count(X)'] * 2)
+    testing.assert_frame_equal(output, expected)
 
-  def test_metriclist_cache_key(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    m = metrics.MetricList((sum_x, double_sum_x))
-    m.compute_on(self.df, cache_key=42)
-    self.assertEqual(1, sum_x.get_cached(42))
-    self.assertEqual(2, double_sum_x.get_cached(42))
-    self.assertTrue(m.in_cache(42))
+  def test_different_var_has_effect(self):
+    df = pd.DataFrame({'X': [2], 'Y': [1]})
+    output = metrics.MetricList(
+        (metrics.Sum('X'), metrics.Sum('Y'))).compute_on(df)
+    expected = pd.DataFrame([[2, 1]], columns=['sum(X)', 'sum(Y)'])
+    testing.assert_frame_equal(output, expected)
 
-  def test_metriclist_internal_caching_cleaned_up(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    m = metrics.MetricList((sum_x, double_sum_x))
-    m.compute_on(self.df)
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertEqual(double_sum_x.cache, {})
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(double_sum_x.cache_key)
+  def test_different_metrics_have_different_fingerprints(self):
+    distinct_metrics = [
+        metrics.Ratio('x', 'y'),
+        metrics.Ratio('x', 'x'),
+        metrics.Ratio('y', 'y'),
+        metrics.MetricList([metrics.Sum('x')]),
+        metrics.MetricList([metrics.Sum('y')]),
+        metrics.Sum('x') + metrics.Sum('y'),
+        metrics.Sum('x') + metrics.Sum('x'),
+        metrics.Count('x'),
+        metrics.Count('x', distinct=True),
+        metrics.Sum('x'),
+        metrics.Dot('x', 'y'),
+        metrics.Mean('x'),
+        metrics.Mean('x', 'y'),
+        metrics.Max('x'),
+        metrics.Min('x'),
+        metrics.Quantile('x'),
+        metrics.Quantile('x', 0.2),
+        metrics.Variance('x', True),
+        metrics.Variance('x', False),
+        metrics.Variance('x', weight='y'),
+        metrics.StandardDeviation('x', True),
+        metrics.StandardDeviation('x', False),
+        metrics.StandardDeviation('x', weight='y'),
+        metrics.CV('x', True),
+        metrics.CV('x', False),
+        metrics.Correlation('x', 'y'),
+        metrics.Correlation('x', 'y', 'w'),
+        metrics.Correlation('x', 'y', method='kendall'),
+        metrics.Cov('x', 'y', True),
+        metrics.Cov('x', 'y', False),
+        metrics.Cov('x', 'y', True, 3),
+        metrics.Cov('x', 'y', True, weight='w'),
+    ]
+    fingerprints = set([m.get_fingerprint() for m in distinct_metrics])
+    self.assertLen(fingerprints, len(distinct_metrics))
 
-  def test_metrics_with_different_indexes(self):
-    df = pd.DataFrame({'X': [0, 1, 2], 'grp': ['A', 'B', 'C']})
-    sum_x = metrics.Sum('X')
-    cum = operations.CumulativeDistribution('grp', sum_x)
-    change = operations.PercentChange('grp', 'B', sum_x, where='grp != "C"')
-    bst = operations.Bootstrap(None, change, 100)
-    m = metrics.MetricList((cum, change, sum_x, bst))
-    output = m.compute_on(df, return_dataframe=False)
-
-    cum_expected = (
-        metrics.Sum('X') | operations.CumulativeDistribution('grp')
-        | metrics.compute_on(df))
-    pct_expected = (
-        metrics.Sum('X')
-        | operations.PercentChange('grp', 'B', where='grp != "C"')
-        | metrics.compute_on(df))
-    bst_expected = (
-        metrics.Sum('X')
-        | operations.PercentChange('grp', 'B', where='grp != "C"')
-        | operations.Bootstrap(None, n_replicates=100) | metrics.compute_on(df))
-    testing.assert_frame_equal(output[0], cum_expected)
-    testing.assert_frame_equal(output[1], pct_expected)
-    testing.assert_frame_equal(output[2], metrics.Sum('X').compute_on(df))
-    testing.assert_frame_equal(output[3], bst_expected)
-
-  def test_compositemetric_internal_caching(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    m = double_sum_x / sum_x
-    with mock.patch.object(
-        sum_x, 'compute_through', return_value=1, autospec=True) as mock_fn:
-      m.compute_on(self.df, return_dataframe=False)
-      mock_fn.assert_called_once_with(self.df, [])
-
-  def test_compositemetric_cache_key(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    m = double_sum_x / sum_x
-    m.compute_on(self.df, cache_key=42)
-    self.assertEqual(1, sum_x.get_cached(42))
-    self.assertEqual(2, double_sum_x.get_cached(42))
-    self.assertEqual(2, m.get_cached(42))
-
-  def test_compositemetric_internal_caching_cleaned_up(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    m = double_sum_x / sum_x
-    m.compute_on(self.df)
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertEqual(double_sum_x.cache, {})
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(double_sum_x.cache_key)
-
-  def test_complex_metric_internal_caching(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    m = metrics.MetricList((sum_x, double_sum_x / sum_x))
-    with mock.patch.object(
-        sum_x, 'compute_through', return_value=1, autospec=True) as mock_fn:
-      m.compute_on(self.df)
-      mock_fn.assert_called_once_with(self.df, [])
-
-  def test_complex_metric_cache_key(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    comp = double_sum_x / sum_x
-    m = metrics.MetricList((sum_x, comp))
-    m.compute_on(self.df, cache_key=42)
-    self.assertEqual(1, sum_x.get_cached(42))
-    self.assertEqual(2, double_sum_x.get_cached(42))
-    self.assertEqual(2, comp.get_cached(42))
-    self.assertTrue(m.in_cache(42))
-
-  def test_complex_metric_internal_caching_cleaned_up(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    comp = double_sum_x / sum_x
-    m = metrics.MetricList((sum_x, comp))
-    m.compute_on(self.df)
-    self.assertEqual(m.cache, {})
-    self.assertEqual(sum_x.cache, {})
-    self.assertEqual(double_sum_x.cache, {})
-    self.assertEqual(comp.cache, {})
-    self.assertIsNone(m.cache_key)
-    self.assertIsNone(sum_x.cache_key)
-    self.assertIsNone(double_sum_x.cache_key)
-    self.assertIsNone(comp.cache_key)
-
-  def test_complex_metric_flush_cache_nonrecursive(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    comp = double_sum_x / sum_x
-    m = metrics.MetricList((sum_x, comp))
-    m.compute_on(self.df, cache_key=42)
-    m.flush_cache(42, recursive=False)
-    self.assertFalse(m.in_cache(42))
-    self.assertTrue(sum_x.in_cache(42))
-    self.assertTrue(double_sum_x.in_cache(42))
-    self.assertTrue(comp.in_cache(42))
-
-  def test_complex_metric_flush_cache_recursive(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * metrics.Sum('X')
-    comp = double_sum_x / sum_x
-    m = metrics.MetricList((sum_x, comp))
-    m.compute_on(self.df, cache_key=42)
-    m.flush_cache(42)
-    self.assertFalse(m.in_cache(42))
-    self.assertFalse(sum_x.in_cache(42))
-    self.assertFalse(double_sum_x.in_cache(42))
-    self.assertFalse(comp.in_cache(42))
-
-  def test_flush_cache_prune(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * sum_x
-    double_sum_x_plus_one = double_sum_x + 1
-    comp = double_sum_x_plus_one - double_sum_x
-    m = metrics.MetricList((double_sum_x, comp))
-    with mock.patch.object(sum_x, 'flush_cache', autospec=True) as mock_fn:
-      m.compute_on(self.df)
-      mock_fn.assert_called_once_with(
-          sum_x.wrap_cache_key('_RESERVED'), recursive=False)
-
-  def test_flush_cache_no_prune(self):
-    sum_x = metrics.Sum('X')
-    double_sum_x = 2 * sum_x
-    double_sum_x_plus_one = double_sum_x + 1
-    comp = double_sum_x_plus_one - double_sum_x
-    m = metrics.MetricList((double_sum_x, comp))
-    with mock.patch.object(sum_x, 'flush_cache', autospec=True) as mock_fn:
-      m.compute_on(self.df, cache_key=42)
-      m.flush_cache(42, prune=False)
-      self.assertEqual(3, mock_fn.call_count)
+  def test_kwargs(self):
+    df = pd.DataFrame({'X': [1, 1]})
+    s1 = metrics.Sum('X')
+    s2 = metrics.Sum('X', min_count=100)
+    output = metrics.MetricList([s1, s2]).compute_on(df)
+    expected = pd.DataFrame([[2, np.nan]], columns=['sum(X)'] * 2)
+    testing.assert_frame_equal(output, expected)
 
 
 if __name__ == '__main__':

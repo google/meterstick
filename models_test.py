@@ -19,6 +19,7 @@ from meterstick import metrics
 from meterstick import models
 from meterstick import operations
 from meterstick import utils
+import mock
 import numpy as np
 import pandas as pd
 from sklearn import linear_model
@@ -162,6 +163,20 @@ class ModelsTest(parameterized.TestCase):
         'Distribution of %s(sum(Y) ~ sum(X1)) Coefficient: sum(X1)' % name
     ]
     pd.testing.assert_frame_equal(output, expected)
+
+  def test_caching(self, model, sklearn_model, name):
+    del sklearn_model, name  # unused
+    m1 = model(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1')
+    m2 = model(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1', name='Foo')
+    m = m1 - m2
+    with mock.patch.object(
+        m2, 'compute_through', wraps=m2.compute_through) as mock_fn:
+      output = m.compute_on(DF)
+    expected = m.compute_on(DF)
+
+    mock_fn.assert_not_called()
+    self.assertEqual(output.shape, expected.shape)
+    self.assertTrue((output.values == 0).all())
 
 
 class LogisticRegressionTest(absltest.TestCase):
