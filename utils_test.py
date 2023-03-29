@@ -17,51 +17,76 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from meterstick import metrics
+from meterstick import operations
 from meterstick import utils
 import numpy as np
 import pandas as pd
 from pandas import testing
+
 import unittest
 
 
 class UtilsTest(unittest.TestCase):
 
-  def test_adjust_slices_for_loo_no_splitby_no_extra(self):
-    s = pd.Series(range(1, 4), index=pd.Index(range(3), name='unit'))
-    output = utils.adjust_slices_for_loo(s)
-    self.assertIs(s, output)
+  def test_adjust_slices_for_loo_no_splitby_no_operation_unit_filled(self):
+    df = pd.DataFrame({'unit': list('abc'), 'x': range(1, 4)})
+    bucket_res = df[df.unit != 'a'].groupby('unit').sum()
+    output = utils.adjust_slices_for_loo(bucket_res, [], df)
+    expected = pd.DataFrame({'x': [0, 2, 3]},
+                            index=pd.Index(list('abc'), name='unit'))
+    testing.assert_frame_equal(output, expected)
 
-  def test_adjust_slices_for_loo_no_extra(self):
-    s = pd.Series(
-        range(1, 5),
-        index=pd.MultiIndex.from_tuples(
-            (('A', 'grp1'), ('A', 'grp2'), ('B', 'grp1'), ('C', 'grp1')),
-            names=('unit', 'grp')))
-    output = utils.adjust_slices_for_loo(s, ['grp'])
-    self.assertIs(s, output)
+  def test_adjust_slices_for_loo_no_splitby_operation(self):
+    df = pd.DataFrame({
+        'unit': list('abb'),
+        'grp': list('bbc'),
+        'x': range(1, 4)
+    })
+    bucket_res = df[df.unit != 'a'].groupby(['unit', 'grp']).sum()
+    output = utils.adjust_slices_for_loo(bucket_res, [], df)
+    expected = pd.DataFrame({'x': [0, 0]},
+                            index=pd.MultiIndex.from_tuples(
+                                (('a', 'b'), ('a', 'c')),
+                                names=('unit', 'grp')))
+    testing.assert_frame_equal(output, expected)
 
-  def test_adjust_slices_for_no_partial_slices(self):
-    s = pd.Series(
-        range(1, 5),
-        index=pd.MultiIndex.from_tuples(
-            (('A', 'grp1'), ('A', 'grp2'), ('B', 'grp1'), ('B', 'grp2')),
-            names=('unit', 'grp')))
-    output = utils.adjust_slices_for_loo(s)
-    self.assertIs(s, output)
+  def test_adjust_slices_for_loo_splitby_no_operation(self):
+    df = pd.DataFrame({
+        'unit': list('abc'),
+        'grp': list('abb'),
+        'x': range(1, 4)
+    })
+    bucket_res = df[df.grp != 'b'].groupby(['grp', 'unit']).sum()
+    output = utils.adjust_slices_for_loo(bucket_res, ['grp'], df)
+    expected = pd.DataFrame({'x': [1, 0, 0]},
+                            index=pd.MultiIndex.from_tuples(
+                                (('a', 'a'), ('b', 'b'), ('b', 'c')),
+                                names=('grp', 'unit')))
+    testing.assert_frame_equal(output, expected)
 
-  def test_adjust_slices_for_has_partial_slices(self):
-    s = pd.Series(
-        range(1, 5),
-        index=pd.MultiIndex.from_tuples(
-            (('A', 'grp1'), ('A', 'grp2'), ('B', 'grp1'), ('C', 'grp1')),
-            names=('unit', 'grp')))
-    output = utils.adjust_slices_for_loo(s)
-    expected = pd.Series((1, 3, 0, 4, 0),
-                         index=pd.MultiIndex.from_tuples(
-                             (('A', 'grp1'), ('B', 'grp1'), ('B', 'grp2'),
-                              ('C', 'grp1'), ('C', 'grp2')),
-                             names=('unit', 'grp')))
-    testing.assert_series_equal(expected, output)
+  def test_adjust_slices_for_loo_splitby_operation(self):
+    df = pd.DataFrame({
+        'grp': list('aaabbb'),
+        'op': ['x'] * 2 + ['y'] * 2 + ['z'] * 2,
+        'unit': [1, 2, 3, 2, 3, 2],
+        'x': range(1, 7)
+    })
+    bucket_res = df[df.unit != 1].groupby(['grp', 'unit', 'op']).sum()
+    output = utils.adjust_slices_for_loo(bucket_res, ['grp'], df)
+    expected = pd.DataFrame({'x': [0, 0, 0, 0, 6, 0, 5]},
+                            index=pd.MultiIndex.from_tuples(
+                                (
+                                    ('a', 1, 'x'),
+                                    ('a', 1, 'y'),
+                                    ('a', 2, 'y'),
+                                    ('a', 3, 'x'),
+                                    ('b', 2, 'z'),
+                                    ('b', 3, 'y'),
+                                    ('b', 3, 'z'),
+                                ),
+                                names=('grp', 'unit', 'op')))
+    testing.assert_frame_equal(output, expected)
 
   def test_one_level_column_and_no_splitby_melt(self):
     unmelted = pd.DataFrame({'foo': [1], 'bar': [2]}, columns=['foo', 'bar'])
@@ -263,6 +288,33 @@ class UtilsTest(unittest.TestCase):
     expected = df.droplevel(0)
     actual = utils.remove_empty_level(df)
     testing.assert_frame_equal(expected, actual)
+
+  def test_get_extra_idx(self):
+    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
+    ab = operations.AbsoluteChange('foo', 'f', metrics.Sum('c'))
+    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
+    self.assertEqual(utils.get_extra_idx(m), ('foo',))
+
+  def test_get_extra_idx_raises(self):
+    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
+    ab = operations.AbsoluteChange('baz', 'f', metrics.Sum('c'))
+    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
+    with self.assertRaises(ValueError) as cm:
+      utils.get_extra_idx(m)
+    self.assertEqual(str(cm.exception), 'Incompatible indexes!')
+
+  def test_get_extra_split_by(self):
+    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
+    m = operations.AbsoluteChange('unit', 'a', mh)
+    self.assertEqual(utils.get_extra_split_by(m), ('unit', 'foo', 'bar'))
+
+  def test_get_extra_split_by_raises(self):
+    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
+    ab = operations.AbsoluteChange('foo', 'f', metrics.Sum('c'))
+    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
+    with self.assertRaises(ValueError) as cm:
+      utils.get_extra_split_by(m)
+    self.assertEqual(str(cm.exception), 'Incompatible split_by!')
 
 
 if __name__ == '__main__':

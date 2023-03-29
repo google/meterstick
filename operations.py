@@ -297,7 +297,7 @@ class CumulativeDistribution(Operation):
     child_table = sql.Datasource(child_sql, 'CumulativeDistributionRaw')
     child_table_alias, rename = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
-    order = list(metrics.get_extra_idx(self))
+    order = list(utils.get_extra_idx(self))
     order[0] = sql.Column(
         _get_order_for_cum_dist(sql.Column(order[0]).alias, self),
         auto_alias=False)
@@ -349,7 +349,7 @@ class Comparison(Operation):
     super(Comparison, self).__init__(
         child,
         name_tmpl,
-        condition_column,
+        extra_split_by=condition_column,
         additional_fingerprint_attrs=['baseline_key', 'include_base'] +
         additional_fingerprint_attrs,
         **kwargs)
@@ -563,11 +563,8 @@ class PrePostChange(PercentChange):
       "Control"). All conditions will be compared to this baseline. If
       condition_column contains multiple columns, then baseline_key should be a
       tuple.
-    children: A tuple of a Metric whose result we compute percentage change on.
-    stratified_by: The columns to preaggregate and perform adjustment using
-      preperiod metrics.
-    covariates: The Metric(s) we want to use to reduce variance. Usually they
-      are some metrics during the preperiod.
+    children: A MetricList whose first element is the Metric we want to compute
+      change on and the rest is the covariates for adjustment.
     include_base: A boolean for whether the baseline condition should be
       included in the output.
     And all other attributes inherited from Operation.
@@ -583,23 +580,18 @@ class PrePostChange(PercentChange):
                **kwargs):
     if isinstance(covariates, (List, Tuple)):
       covariates = metrics.MetricList(covariates)
-    if not isinstance(covariates, metrics.Metric):
-      raise ValueError('Covariates must be a Metric or an iterable of Metrics!')
-    self.stratified_by = [stratified_by] if isinstance(
-        stratified_by, str) else stratified_by or []
+    if child and covariates:
+      child = metrics.MetricList((child, covariates)) if child else covariates
+    else:
+      child = None
+    stratified_by = [stratified_by] if isinstance(stratified_by,
+                                                  str) else stratified_by or []
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
-    super(PrePostChange, self).__init__(
-        self.stratified_by + condition_column,
-        baseline_key,
-        child,
-        include_base,
-        '{} PrePost Percent Change',
-        additional_fingerprint_attrs=['covariates'],
-        **kwargs)
+    super(PrePostChange,
+          self).__init__(stratified_by + condition_column, baseline_key, child,
+                         include_base, '{} PrePost Percent Change', **kwargs)
     self.extra_index = condition_column
-    self.covariates = covariates
-    self.precomputable_in_jk = False
     self.computable_in_pure_sql = False
 
   def compute_children(self,
@@ -608,10 +600,8 @@ class PrePostChange(PercentChange):
                        melted=False,
                        return_dataframe=True,
                        cache_key=None):
-    child = super(PrePostChange, self).compute_children(
-        df, split_by, cache_key=cache_key)
-    covariates = self.compute_util_metric_on(
-        self.covariates, df, split_by, cache_key=cache_key)
+    child, covariates = super(PrePostChange, self).compute_children(
+        df, split_by, return_dataframe=False, cache_key=cache_key)
     original_split_by = [s for s in split_by if s not in self.extra_split_by]
     return self.adjust_value(child, covariates, original_split_by)
 
@@ -662,11 +652,10 @@ class PrePostChange(PercentChange):
     return adjusted.compute_on(aligned, split_by + self.extra_index)
 
   def compute_children_sql(self, table, split_by, execute, mode=None):
-    split_by_with_extra = split_by + self.extra_split_by
     child = super(PrePostChange,
                   self).compute_children_sql(table, split_by, execute, mode)
-    covariates = self.covariates.compute_on_sql(
-        table, split_by_with_extra, execute, mode=mode)
+    covariates = child.iloc[:, 1:]
+    child = child.iloc[:, :1]
     return self.adjust_value(child, covariates, split_by)
 
 
@@ -688,11 +677,8 @@ class CUPED(AbsoluteChange):
       "Control"). All conditions will be compared to this baseline. If
       condition_column contains multiple columns, then baseline_key should be a
       tuple.
-    children: A tuple of a Metric whose result we compute percentage change on.
-    stratified_by: The columns to preaggregate and perform adjustment using
-      preperiod metrics.
-    covariates: The Metric(s) we want to use to reduce variance. Usually they
-      are some metrics from the preperiod.
+    children: A MetricList whose first element is the Metric we want to compute
+      change on and the rest is the covariates for adjustment.
     include_base: A boolean for whether the baseline condition should be
       included in the output.
     And all other attributes inherited from Operation.
@@ -708,23 +694,18 @@ class CUPED(AbsoluteChange):
                **kwargs):
     if isinstance(covariates, (List, Tuple)):
       covariates = metrics.MetricList(covariates)
-    if not isinstance(covariates, metrics.Metric):
-      raise ValueError('Covariates must be a Metric or an iterable of Metrics!')
-    self.stratified_by = [stratified_by] if isinstance(
-        stratified_by, str) else stratified_by or []
+    if child and covariates:
+      child = metrics.MetricList((child, covariates)) if child else covariates
+    else:
+      child = None
+    stratified_by = [stratified_by] if isinstance(stratified_by,
+                                                  str) else stratified_by or []
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
-    super(CUPED, self).__init__(
-        self.stratified_by + condition_column,
-        baseline_key,
-        child,
-        include_base,
-        '{} CUPED Change',
-        additional_fingerprint_attrs=['covariates'],
-        **kwargs)
+    super(CUPED,
+          self).__init__(stratified_by + condition_column, baseline_key, child,
+                         include_base, '{} CUPED Change', **kwargs)
     self.extra_index = condition_column
-    self.covariates = covariates
-    self.precomputable_in_jk = False
     self.computable_in_pure_sql = False
 
   def compute_children(self,
@@ -733,10 +714,8 @@ class CUPED(AbsoluteChange):
                        melted=False,
                        return_dataframe=True,
                        cache_key=None):
-    child = super(CUPED, self).compute_children(
-        df, split_by, cache_key=cache_key)
-    covariates = self.compute_util_metric_on(
-        self.covariates, df, split_by, cache_key=cache_key)
+    child, covariates = super(CUPED, self).compute_children(
+        df, split_by, return_dataframe=False, cache_key=cache_key)
     original_split_by = [s for s in split_by if s not in self.extra_split_by]
     return self.adjust_value(child, covariates, original_split_by)
 
@@ -778,11 +757,10 @@ class CUPED(AbsoluteChange):
     return adjusted.compute_on(aligned, split_by)
 
   def compute_children_sql(self, table, split_by, execute, mode=None):
-    split_by_with_extra = split_by + self.extra_split_by
     child = super(CUPED, self).compute_children_sql(table, split_by, execute,
                                                     mode)
-    covariates = self.covariates.compute_on_sql(
-        table, split_by_with_extra, execute, mode=mode)
+    covariates = child.iloc[:, 1:]
+    child = child.iloc[:, :1]
     return self.adjust_value(child, covariates, split_by)
 
 
@@ -829,17 +807,17 @@ class MH(Comparison):
         extra_index=condition_column,
         **kwargs)
 
-  def check_is_ratio(self, metric=None):
-    metric = metric or self.children[0]
-    if isinstance(metric, metrics.MetricList):
+  def check_is_ratio(self, metric, allow_metriclist=True):
+    if isinstance(metric, metrics.MetricList) and allow_metriclist:
       for m in metric:
-        self.check_is_ratio(m)
+        self.check_is_ratio(m, False)
     else:
       if not isinstance(
           metric,
           (metrics.CompositeMetric, metrics.Ratio)) or metric.op(2.0, 2) != 1:
-        raise ValueError('MH only makes sense on ratio Metrics. Got %s.' %
-                         metric)
+        raise ValueError(
+            'MH only makes sense on ratio Metrics or a MetricList of ratios. Got %s.'
+            % metric)
 
   def compute_children(self,
                        df: pd.DataFrame,
@@ -847,8 +825,8 @@ class MH(Comparison):
                        melted=False,
                        return_dataframe=True,
                        cache_key=None):
-    self.check_is_ratio()
     child = self.children[0]
+    self.check_is_ratio(child)
     if isinstance(child, metrics.MetricList):
       children = []
       for m in child.children:
@@ -902,8 +880,8 @@ class MH(Comparison):
     return pd.DataFrame(res.sort_index(level=split_by + self.extra_index))
 
   def compute_children_sql(self, table, split_by, execute, mode=None):
-    self.check_is_ratio()
     child = self.children[0]
+    self.check_is_ratio(child)
     if isinstance(child, metrics.MetricList):
       children = []
       for m in child.children:
@@ -982,10 +960,10 @@ class MH(Comparison):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    self.check_is_ratio()
+    child = self.children[0]
+    self.check_is_ratio(child)
     local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
 
-    child = self.children[0]
     grandchildren = []
     if isinstance(child, metrics.MetricList):
       grandchildren = []
@@ -1354,6 +1332,8 @@ class MetricWithCI(Operation):
           ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
       res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
     res = utils.unmelt(res)
+    if not self.confidence:
+      return res
     base = self.compute_change_base(df, split_by)
     return self.add_base_to_res(res, base)
 
@@ -1372,6 +1352,9 @@ class MetricWithCI(Operation):
     base = None
     change = self.children[0]
     util_metric = change.children[0]
+    if isinstance(self.children[0], (PrePostChange, CUPED)):
+      util_metric = metrics.MetricList([util_metric.children[0]],
+                                       where=util_metric.where_raw)
     util_metric = metrics.MetricList([util_metric], where=change.where_raw)
     to_split = (
         split_by + change.extra_index if split_by else change.extra_index)
@@ -1496,7 +1479,8 @@ class MetricWithCI(Operation):
     local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
 
     name = 'Jackknife' if isinstance(self, Jackknife) else 'Bootstrap'
-    se, with_data = get_se(self, table, split_by, global_filter, indexes,
+    self_copy = copy.deepcopy(self)
+    se, with_data = get_se(self_copy, table, split_by, global_filter, indexes,
                            local_filter, with_data)
     se_alias, se_rename = with_data.merge(sql.Datasource(se, name + 'SE'))
 
@@ -1704,237 +1688,6 @@ class MetricWithCI(Operation):
     raise NotImplementedError
 
 
-def get_sum_ct_monkey_patch_fn(unit, original_split_by, original_compute):
-  """Gets a function that can be monkey patched to Sum/Count.compute_slices.
-
-  Args:
-    unit: The column whose levels define the jackknife buckets.
-    original_split_by: The split_by passed to Jackknife().compute_on().
-    original_compute: The compute_slices() of Sum or Count. We will monkey patch
-      it.
-
-  Returns:
-    A function that can be monkey patched to Sum/Count.compute_slices().
-  """
-
-  def precompute_loo(self, df, split_by=None):
-    """Precomputes leave-one-out (LOO) results to make Jackknife faster.
-
-    For Sum, Count, Dot and Mean, it's possible to compute the LOO estimates in
-    a vectorized way. For Sum and Count, we can get the LOO estimates by
-    subtracting the sum/count of each bucket from the total. Here we precompute
-    and cache the LOO results.
-
-    Args:
-      self: The Sum or Count instance callling this function.
-      df: The DataFrame passed to Sum/Count.compute_slies().
-      split_by: The split_by passed to Sum/Count.compute_slies().
-
-    Returns:
-      Same as what normal Sum/Count.compute_slies() would have returned.
-    """
-    total = original_compute(self, df, split_by)
-    if isinstance(self, metrics.Count) and self.distinct:
-      # For Count distinct, we cannot cut the corner.
-      return total
-    split_by_with_unit = [unit] + split_by if split_by else [unit]
-    each_bucket = original_compute(self, df, split_by_with_unit)
-    each_bucket = utils.adjust_slices_for_loo(each_bucket, original_split_by)
-    loo = total - each_bucket
-    if split_by:
-      # total - each_bucket might put the unit as the innermost level, but we
-      # want the unit as the outermost level.
-      loo = loo.reorder_levels(split_by_with_unit)
-    key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit),
-                         self.cache_key.where, [unit] + split_by)
-    self.save_to_cache(key, loo)
-    buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
-    for bucket in buckets:
-      key = self.wrap_cache_key(('_RESERVED', 'Jackknife', unit, bucket),
-                                split_by)
-      self.save_to_cache(key, loo.loc[bucket])
-    return total
-
-  return precompute_loo
-
-
-def get_mean_monkey_patch_fn(unit, original_split_by):
-  """Gets a function that can be monkey patched to Mean.compute_slices.
-
-  Args:
-    unit: The column whose levels define the jackknife buckets.
-    original_split_by: The split_by passed to Jackknife().compute_on().
-
-  Returns:
-    A function that can be monkey patched to Mean.compute_slices().
-  """
-
-  def precompute_loo(self, df, split_by=None):
-    """Precomputes leave-one-out (LOO) results to make Jackknife faster.
-
-    For Sum, Count, Dot and Mean, it's possible to compute the LOO estimates in
-    a vectorized way. LOO mean is just LOO sum / LOO count. Here we precompute
-    and cache the LOO results.
-
-    Args:
-      self: The Mean instance callling this function.
-      df: The DataFrame passed to Mean.compute_slies().
-      split_by: The split_by passed to Mean.compute_slies().
-
-    Returns:
-      Same as what normal Mean.compute_slies() would have returned.
-    """
-    data = df.copy()
-    split_by_with_unit = [unit] + split_by if split_by else [unit]
-    if self.weight:
-      weighted_var = '_weighted_%s' % self.var
-      data[weighted_var] = data[self.var] * data[self.weight]
-      total_sum = self.group(data, split_by)[weighted_var].sum()
-      total_weight = self.group(data, split_by)[self.weight].sum()
-      bucket_sum = self.group(data, split_by_with_unit)[weighted_var].sum()
-      bucket_sum = utils.adjust_slices_for_loo(bucket_sum, original_split_by)
-      bucket_weight = self.group(data, split_by_with_unit)[self.weight].sum()
-      bucket_weight = utils.adjust_slices_for_loo(bucket_weight,
-                                                  original_split_by)
-      loo_sum = total_sum - bucket_sum
-      loo_weight = total_weight - bucket_weight
-      if split_by:
-        # total - bucket_sum might put the unit as the innermost level, but we
-        # want the unit as the outermost level.
-        loo_sum = loo_sum.reorder_levels(split_by_with_unit)
-        loo_weight = loo_weight.reorder_levels(split_by_with_unit)
-      loo = loo_sum / loo_weight
-      mean = total_sum / total_weight
-    else:
-      total_sum = self.group(data, split_by)[self.var].sum()
-      bucket_sum = self.group(data, split_by_with_unit)[self.var].sum()
-      bucket_sum = utils.adjust_slices_for_loo(bucket_sum, original_split_by)
-      total_ct = self.group(data, split_by)[self.var].count()
-      bucket_ct = self.group(data, split_by_with_unit)[self.var].count()
-      bucket_ct = utils.adjust_slices_for_loo(bucket_ct, original_split_by)
-      loo_sum = total_sum - bucket_sum
-      loo_ct = total_ct - bucket_ct
-      loo = loo_sum / loo_ct
-      mean = total_sum / total_ct
-      if split_by:
-        loo = loo.reorder_levels(split_by_with_unit)
-
-    buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
-    key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit),
-                         self.cache_key.where, [unit] + split_by)
-    self.save_to_cache(key, loo)
-    for bucket in buckets:
-      key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit, bucket),
-                           self.cache_key.where, split_by)
-      self.save_to_cache(key, loo.loc[bucket])
-    return mean
-
-  return precompute_loo
-
-
-def get_dot_monkey_patch_fn(unit, original_split_by, original_compute):
-  """Gets a function that can be monkey patched to Dot.compute_slices.
-
-  Args:
-    unit: The column whose levels define the jackknife buckets.
-    original_split_by: The split_by passed to Jackknife().compute_on().
-    original_compute: The compute_slices() of Dot. We will monkey patch it.
-
-  Returns:
-    A function that can be monkey patched to Dot.compute_slices().
-  """
-
-  def precompute_loo(self, df, split_by=None):
-    """Precomputes leave-one-out (LOO) results to make Jackknife faster.
-
-    For Sum, Count, Dot and Mean, it's possible to compute the LOO estimates in
-    a vectorized way. Dot is the Sum of the product of two columns, so similarly
-    to Sum, we can get the LOO estimates by subtracting the sum of each bucket
-    from the total. Here we precompute and cache the LOO results.
-
-    Args:
-      self: The Dot instance callling this function.
-      df: The DataFrame passed to Mean.compute_slies().
-      split_by: The split_by passed to Mean.compute_slies().
-
-    Returns:
-      Same as what normal Dot.compute_slies() would have returned.
-    """
-    data = df.copy()
-    split_by_with_unit = [unit] + split_by if split_by else [unit]
-    if not self.normalize:
-      total = original_compute(self, df, split_by)
-      each_bucket = original_compute(self, df, split_by_with_unit)
-      each_bucket = utils.adjust_slices_for_loo(each_bucket, original_split_by)
-      loo = total - each_bucket
-      if split_by:
-        # total - each_bucket might put the unit as the innermost level, but we
-        # want the unit as the outermost level.
-        loo = loo.reorder_levels(split_by_with_unit)
-    else:
-      prod = '_meterstick_dot_prod'
-      data[prod] = data[self.var] * data[self.var2]
-      total_sum = self.group(data, split_by)[prod].sum()
-      bucket_sum = self.group(data, split_by_with_unit)[prod].sum()
-      bucket_sum = utils.adjust_slices_for_loo(bucket_sum, original_split_by)
-      total_ct = self.group(data, split_by)[prod].count()
-      bucket_ct = self.group(data, split_by_with_unit)[prod].count()
-      bucket_ct = utils.adjust_slices_for_loo(bucket_ct, original_split_by)
-      loo_sum = total_sum - bucket_sum
-      loo_ct = total_ct - bucket_ct
-      loo = loo_sum / loo_ct
-      total = total_sum / total_ct
-      if split_by:
-        loo = loo.reorder_levels(split_by_with_unit)
-
-    buckets = loo.index.get_level_values(0).unique() if split_by else loo.index
-    key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit),
-                         self.cache_key.where, [unit] + split_by)
-    self.save_to_cache(key, loo)
-    for bucket in buckets:
-      key = utils.CacheKey(self, ('_RESERVED', 'Jackknife', unit, bucket),
-                           self.cache_key.where, split_by)
-      self.save_to_cache(key, loo.loc[bucket])
-    return total
-
-  return precompute_loo
-
-
-def save_to_cache_for_jackknife(self, key, val, split_by=None):
-  """Used to monkey patch the save_to_cache() during Jackknife.precompute().
-
-  What cache_key to use for the point estimate of Jackknife is tricky because we
-  want to support two use cases at the same time.
-  1. We want sumx to be computed only once in
-    MetricList([Jackknife(sumx), sumx]).compute_on(df, return_dataframe=False),
-    so the key for point estimate should be the same sumx uses.
-  2. But then it will fail when multiple Jackknifes are involved. For example,
-    (Jackknife(unit1, sumx) - Jackknife(unit2, sumx)).compute_on(df)
-  will fail because two Jackknifes share point estimate but not LOO estimates.
-  When the 2nd Jackknife precomputes its point esitmate, as it uses the same key
-  as the 1st one, it will mistakenly assume LOO has been cached, but
-  unfortunately it's not true.
-  The solution here is we use different keys for different Jackknifes, so LOO
-  will always be precomputed. Additionally we cache the point estimate again
-  with the key other Metrics like Sum would use so they can reuse it.
-
-  Args:
-    self: An instance of metrics.Metric.
-    key: The cache key currently being used in computation.
-    val: The value to cache.
-    split_by: Something can be passed into df.group_by().
-  """
-  key = self.wrap_cache_key(key, split_by)
-  if isinstance(key.key, tuple) and key.key[:2] == ('_RESERVED', 'jk'):
-    val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
-    base_key = key.key[2]
-    base_key = utils.CacheKey(self, base_key, key.where, key.split_by,
-                              key.slice_val)
-    self.cache[base_key] = val
-  val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
-  self.cache[key] = val
-
-
 class Jackknife(MetricWithCI):
   """Class for Jackknife estimates of standard errors.
 
@@ -1945,8 +1698,9 @@ class Jackknife(MetricWithCI):
       Additionally, a display() function will be bound to the result so you can
       visualize the confidence interval nicely in Colab and Jupyter notebook.
     children: A tuple of a Metric whose result we jackknife on.
-    enable_optimization: If all leaf Metrics are Sum, Count, Dot, and Mean, then
-      we can cut the corner to compute leave-one-out estimates.
+    enable_optimization: If all leaf Metrics are Sum and/or Count, or can be
+      expressed equivalently by Sum and/or Count, then we can cut the corner to
+      compute leave-one-out estimates. See compute_slices() for more details.
     And all other attributes inherited from Operation.
   """
 
@@ -1957,91 +1711,103 @@ class Jackknife(MetricWithCI):
                enable_optimization=True,
                **kwargs):
     super(Jackknife, self).__init__(unit, child, confidence, '{} Jackknife',
-                                    None, **kwargs)
+                                    **kwargs)
     self.enable_optimization = enable_optimization
     if confidence:
       self.computable_in_pure_sql = False
 
-  def __call__(self, child: metrics.Metric):
-    jk = super(Jackknife, self).__call__(child)
-    return jk
+  def compute_slices(self, df, split_by=None):
+    """Computes Jackknife with precomputation when possible.
 
-  def precompute(self, df, split_by=None):
-    """Caches point estimate and leave-one-out (LOO) results for Sum/Count/Mean.
-
-    For Sum, Count, Dot and Mean, it's possible to compute the LOO estimates in
-    a vectorized way. For Sum and Count, we can get the LOO estimates
-    by subtracting the sum/count of each bucket from the total. For Mean, LOO
-    mean is LOO sum / LOO count. So we can monkey patch the compute_slices() of
-    the Metrics to cache the LOO results under certain keys when we precompute
-    the point estimate.
+    For Sum, Count, it's possible to compute the LOO estimates in a vectorized
+    way. The leave-one-out (LOO) estimates are the differences between the
+    sum/count of each bucket and the total. The trick applies to other Metrics
+    that can be expressed by Sum and Count too, for example, Mean(x) which is
+    equivalent to Sum(x) / Count(x). self.can_precompute() means all the leaf
+    Metrics in self can be expressed by Sum or Count so we apply the trick by
+    1. replace self with an equivalent tree whose leaf Metrics are all Sum or
+    Count.
+    2. computes it on self.unit + split_by.
+    3. loop through the cache and find all Sum and Count results in #2. Use them
+    to compute the LOOs and save to cache.
+    4. call super().compute_slices() which will just hits the cached results.
 
     Args:
-      df: The DataFrame passed from compute_on().
-      split_by: The split_by passed from compute_on().
+      df: The DataFrame to compute on.
+      split_by: The columns that we use to split the data.
 
     Returns:
-      The input df. All we do here is saving precomputed stuff to cache.
+      The unmelted result.
     """
-    # TODO: Remove monkey-patching after we switch to global caching.
     if not self.can_precompute():
-      return df
-    original_sum_compute_slices = metrics.Sum.compute_slices
-    original_ct_compute_slices = metrics.Count.compute_slices
-    original_mean_compute_slices = metrics.Mean.compute_slices
-    original_dot_compute_slices = metrics.Dot.compute_slices
-    original_save_to_cache = metrics.Metric.save_to_cache
-    # See
-    # https://stackoverflow.com/questions/28127874/monkey-patching-python-an-instance-method
-    # for how to monkey patch a method to instances. Also, pytype will complain.
-    # pytype: disable=attribute-error
-    try:
-      for m in self.traverse():
-        if isinstance(m, metrics.Sum):
-          m.compute_slices = get_sum_ct_monkey_patch_fn(
-              self.unit, split_by, original_sum_compute_slices).__get__(m)
-        elif isinstance(m, metrics.Count):
-          m.compute_slices = get_sum_ct_monkey_patch_fn(
-              self.unit, split_by, original_ct_compute_slices).__get__(m)
-        elif isinstance(m, metrics.Mean):
-          m.compute_slices = get_mean_monkey_patch_fn(self.unit,
-                                                      split_by).__get__(m)
-        elif isinstance(m, metrics.Dot):
-          m.compute_slices = get_dot_monkey_patch_fn(
-              self.unit, split_by, original_dot_compute_slices).__get__(m)
-        m.save_to_cache = save_to_cache_for_jackknife.__get__(m)
-      cache_key = ('_RESERVED', 'jk', self.cache_key, self.unit)
-      self.compute_child(df, split_by, cache_key=cache_key)
-    finally:
-      for m in self.traverse():
-        if isinstance(m, metrics.Sum):
-          m.compute_slices = original_sum_compute_slices.__get__(m)
-        elif isinstance(m, metrics.Count):
-          m.compute_slices = original_ct_compute_slices.__get__(m)
-        elif isinstance(m, metrics.Mean):
-          m.compute_slices = original_mean_compute_slices.__get__(m)
-        elif isinstance(m, metrics.Dot):
-          m.compute_slices = original_dot_compute_slices.__get__(m)
-        m.save_to_cache = original_save_to_cache.__get__(m)
-    # pytype: enable=attribute-error
-    return df
+      return super(Jackknife, self).compute_slices(df, split_by)
+    self.compute_child(df, split_by + [self.unit])
+    precomputed = self.find_all_in_cache(metric=metrics.Sum)
+    precomputed.update(self.find_all_in_cache(metric=metrics.Count))
+    precomputed = {
+        k: v for k, v in precomputed.items() if k.key == self.cache_key.key
+    }
+    for key, each_bucket in precomputed.items():
+      self.precompute_sum_or_count_for_jackknife(key, each_bucket, split_by, df)
+    return super(Jackknife, self).compute_slices(df, split_by)
+
+  def precompute_sum_or_count_for_jackknife(self, cache_key, each_bucket,
+                                            original_split_by, df):
+    """Caches point estimate and leave-one-out (LOO) results for Sum and Count.
+
+    For Sum, Count, it's possible to compute the LOO estimates in a vectorized
+    way. The LOO estimates are the differences between the sum/count of each
+    bucket and the total. We have computed the results sliced by self.unit in
+    compute_slices() and here we compute the LOOs and save them to the cache
+    under certain keys which will be used in compute_children() too.
+
+    Args:
+      cache_key: The key in the cache for a sum or count result that is split by
+        self.unit.
+      each_bucket: The result saved under cache_key.
+      original_split_by: The split_by passed to self.compute_on().
+      df: The df Jackknife computes on.
+
+    Returns:
+      None. Two additional results are saved to the cache.
+      1. The total sum/count, which is each_bucket summed over self.unit.
+      2. The LOO estimates, which is saved under key
+        ('_RESERVED', 'Jackknife', self.unit).
+    """
+    if not cache_key.split_by:
+      return
+    if cache_key.split_by[:len(original_split_by) +
+                          1] != tuple(original_split_by + [self.unit]):
+      return
+    split_by_with_unit = list(cache_key.split_by)
+    split_by = [i for i in split_by_with_unit if i != self.unit]
+    if split_by:
+      total = each_bucket.groupby(level=split_by).sum()
+    else:
+      total = each_bucket.sum()
+    key = copy.deepcopy(cache_key)
+    key.split_by = tuple(split_by)
+    self.save_to_cache(key, total)
+
+    key = cache_key.replace_key(('_RESERVED', 'Jackknife', self.unit))
+    if not self.in_cache(key):
+      each_bucket = utils.adjust_slices_for_loo(each_bucket, original_split_by,
+                                                df)
+      loo = total - each_bucket
+      if split_by:
+        # The levels might get messed up.
+        loo = loo.reorder_levels(split_by_with_unit)
+      self.save_to_cache(key, loo)
 
   def get_samples(self, df, split_by=None):
     """Yields leave-one-out (LOO) DataFrame with level value.
 
-    This step is the bottleneck of Jackknife so we have some tricks here.
-    1. If all leaf Metrics are Sum or Count, whose LOO results have already been
-    calculated, then we don't bother to get the right DataFrame. All we need is
-    the right cache_key to retrive the results. This saves lots of time.
-    2. If split_by is True, some slices may be missing buckets, so we only keep
-    the slices that appear in that bucket. In other words, if a slice doesn't
-    have bucket i, then the leave-i-out sample won't have the slice.
-    3. We yield the cache_key for bucket i together with the leave-i-out
-    DataFrame because we need the cache_key to retrieve results.
+    If self.can_precompute(), this function will not get triggered because the
+    results have been precomputed and saved in cache.
 
     Args:
       df: The DataFrame to compute on.
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
 
     Yields:
       ('_RESERVED', 'Jackknife', unit, i) and the leave-i-out DataFrame.
@@ -2050,25 +1816,21 @@ class Jackknife(MetricWithCI):
     if len(levels) < 2:
       raise ValueError('Too few %s to jackknife.' % self.unit)
 
-    if self.can_precompute():
+    if not split_by:
       for lvl in levels:
-        yield ('_RESERVED', 'Jackknife', self.unit, lvl), None
+        yield ('_RESERVED', 'Jackknife', self.unit, lvl), df[
+            df[self.unit] != lvl
+        ]
     else:
-      if not split_by:
-        for lvl in levels:
-          yield ('_RESERVED', 'Jackknife', self.unit,
-                 lvl), df[df[self.unit] != lvl]
-      else:
-        df = df.set_index(split_by)
-        max_slices = len(df.index.unique())
-        for lvl, idx in df.groupby(self.unit).groups.items():
-          df_rest = df[df[self.unit] != lvl]
-          unique_slice_val = idx.unique()
-          if len(unique_slice_val) != max_slices:
-            # Keep only the slices that appeared in the dropped bucket.
-            df_rest = df_rest[df_rest.index.isin(unique_slice_val)]
-          yield ('_RESERVED', 'Jackknife', self.unit,
-                 lvl), df_rest.reset_index()
+      df = df.set_index(split_by)
+      max_slices = len(df.index.unique())
+      for lvl, idx in df.groupby(self.unit).groups.items():
+        df_rest = df[df[self.unit] != lvl]
+        unique_slice_val = idx.unique()
+        if len(unique_slice_val) != max_slices:
+          # Keep only the slices that appeared in the dropped bucket.
+          df_rest = df_rest[df_rest.index.isin(unique_slice_val)]
+        yield ('_RESERVED', 'Jackknife', self.unit, lvl), df_rest.reset_index()
 
   def compute_children(self,
                        df: pd.DataFrame,
@@ -2076,21 +1838,16 @@ class Jackknife(MetricWithCI):
                        melted=False,
                        return_dataframe=True,
                        cache_key=None):
-    del melted, return_dataframe, cache_key  # unused
-    replicates = None
-    if self.can_precompute():
-      try:
-        replicates = self.compute_child(
-            None, [self.unit] + split_by,
-            True,
-            cache_key=('_RESERVED', 'Jackknife', self.unit))
-        replicates = [replicates.unstack(self.unit)]
-      except Exception:  # pylint: disable=broad-except
-        pass  # Fall back to computing slice by slice to salvage good slices.
-    if replicates is None:
-      samples = self.get_samples(df, split_by)
-      replicates = self.compute_on_samples(samples, split_by)
-    return replicates
+    if not self.can_precompute():
+      return super(Jackknife,
+                   self).compute_children(df, split_by, melted,
+                                          return_dataframe, cache_key)
+    replicates = self.compute_child(
+        df,
+        split_by + [self.unit],
+        True,
+        cache_key=('_RESERVED', 'Jackknife', self.unit))
+    return [replicates.unstack(self.unit)]
 
   @staticmethod
   def get_stderrs(bucket_estimates):
@@ -2098,18 +1855,25 @@ class Jackknife(MetricWithCI):
     return stderrs * dof / np.sqrt(dof + 1), dof
 
   def can_precompute(self):
-    """If all leaf Metrics are Sum/Count/Dot/Mean, LOO can be precomputed."""
+    """If all leafs can be expressed as Sum or Count, LOO can be precomputed."""
     if not self.enable_optimization:
       return False
-    for m in self.traverse(include_self=False):
-      if isinstance(m, Operation) and not m.precomputable_in_jk:
-        return False
-      if not m.children and not isinstance(
-          m, (metrics.Sum, metrics.Count, metrics.Mean, metrics.Dot)):
-        return False
-      if isinstance(m, metrics.Count) and m.distinct:
-        return False
-    return True
+
+    def precomputable(root):
+      for m in root.traverse(include_self=False):
+        if isinstance(m, Operation) and not m.precomputable_in_jk:
+          return False
+        if m.custom_fns:
+          return False
+        if isinstance(m, metrics.Count) and m.distinct:
+          return False
+        if isinstance(m, (metrics.Sum, metrics.Count)):
+          continue
+        if not m.children:
+          return False
+      return True
+
+    return precomputable(self)
 
   def compute_children_sql(self, table, split_by, execute, mode, batch_size):
     """Compute the children on leave-one-out data in SQL."""
@@ -2309,13 +2073,16 @@ def preaggregate_if_possible(metric, table, split_by, global_filter, indexes,
 
   For Jackknife and Bootstrap over group, we may preaggegate the data to make
   the query more efficient, though there are some requirements.
-  1. There cannot be any local filter in the metric tree, otherwise the filter
-    might need access to original rows.
-  2. All leaf Metrics need to be Sum. Techanically other Metrics could be
-    supported but Sum is the most common one in use and the easiest to handle.
+  1. All leaf Metrics need to be Sum or Count. Namely, metric.can_precompute()
+    is True.
+  2. There cannot be any local filter in the metric tree, otherwise the filter
+    might need access to original rows. Technically it's still possible to
+    preaggregate when there are local filters, but we impose this requirement
+    for code simplicity.
 
-  If preaggregatable, we sum over all split_bys used by the metric tree, and
-  clear all the local filters.
+  If preaggregatable, we precompute the sum and count over all split_bys used by
+  the metric tree, clear all the local filters, and replace Count(x) with
+  Sum(preaggregated_x).
 
   Args:
     metric: An instance of Jackknife or Bootstrap.
@@ -2337,34 +2104,45 @@ def preaggregate_if_possible(metric, table, split_by, global_filter, indexes,
   if not isinstance(metric, Jackknife) and not (isinstance(metric, Bootstrap)
                                                 and metric.unit):
     return metric, table, split_by, global_filter, indexes, with_data
+  if isinstance(metric, Jackknife) and not metric.can_precompute():
+    return metric, table, split_by, global_filter, indexes, with_data
 
-  all_split_by = sql.Columns([indexes, metric.unit])
-  sums = sql.Columns()
+  all_split_by = sql.Columns(indexes).add(utils.get_extra_split_by(metric)).add(
+      metric.unit)
+  cols = sql.Columns()
   for m in metric.traverse():
     if sql.Filters(m.where).remove(global_filter):
       return metric, table, split_by, global_filter, indexes, with_data
-    if isinstance(m, metrics.SimpleMetric):
-      if not isinstance(m, metrics.Sum):
-        return metric, table, split_by, global_filter, indexes, with_data
-      else:
-        sums.add(
-            sql.Column(m.var, 'SUM({})',
-                       sql.Column('', alias=m.var).alias))
-    if isinstance(m, MH):
-      all_split_by.add(m.stratified_by)
+    if isinstance(m, metrics.Sum):
+      cols.add(sql.Column(m.var, 'SUM({})'))
+    elif isinstance(m, metrics.Count):
+      cols.add(sql.Column(m.var, 'COUNT({})'))
 
   metric = copy.deepcopy(metric)
   metric.unit = sql.Column(metric.unit).alias
-  for m in metric.traverse():
-    m.where = None
-    if isinstance(m, Operation):
-      m.extra_index = [sql.Column(i, alias=i).alias for i in m.extra_index]
-      if isinstance(m, MH):
-        m.stratified_by = sql.Column(m.stratified_by).alias
-    if isinstance(m, metrics.Sum):
-      m.var = sql.Column('', alias=m.var).alias
+  todo = [metric]
+  while todo:
+    curr = todo.pop()
+    curr.where = None
+    new_children = list(curr.children)
+    for i, m in enumerate(curr.children):
+      if not isinstance(m, metrics.Metric):
+        continue
+      todo.append(m)
+      if isinstance(m, Operation):
+        m.extra_index = [sql.Column(i, alias=i).alias for i in m.extra_index]
+        m.extra_split_by = [
+            sql.Column(i, alias=i).alias for i in m.extra_split_by
+        ]
+        if isinstance(m, MH):
+          m.stratified_by = sql.Column(m.stratified_by).alias
+      elif isinstance(m, metrics.Sum):
+        m.var = sql.Column(m.var, 'SUM({})').alias
+      elif isinstance(m, metrics.Count):
+        new_children[i] = metrics.Sum(sql.Column(m.var, 'COUNT({})').alias)
+    curr.children = new_children
 
-  preagg = sql.Sql(sums, table, global_filter, all_split_by)
+  preagg = sql.Sql(cols, table, global_filter, all_split_by)
   preagg_alias = with_data.add(sql.Datasource(preagg, 'Preaggregated'))
 
   return metric, preagg_alias, sql.Columns(
@@ -2374,8 +2152,8 @@ def preaggregate_if_possible(metric, table, split_by, global_filter, indexes,
 def adjust_indexes_for_jk_fast(indexes):
   """For the indexes that get renamed, only keep the alias.
 
-  For a Jaccknife that only has Sum, Count, Dot and Mean as leaf Metrics, we cut
-  the corner by getting the LOO table first and select everything from it. See
+  For a Jackknife that only has Sum and Count as leaf Metrics, we cut the corner
+  by getting the LOO table first and select everything from it. See
   get_jackknife_data_fast() for how the LOO is constructed. If any of the index
   is renamed in LOO, for example, $Platform AS platform, then all the following
   selections from LOO should select 'platform' instead of $Platform. Here we
@@ -2503,7 +2281,7 @@ def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
                                           local_filter, with_data):
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
-  If all the leaf Metrics are Sum, Count, Dot or Mean, we can compute the
+  If all the leaf Metrics are Sum and/or Count, we can compute the
   leave-one-out (LOO) estimates faster. If there is no index added by Operation,
   then no adjustment for slices is needed. The query is just like
   WITH
@@ -2541,10 +2319,7 @@ def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
     The alias of the table in the WITH clause that has all resampled result.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  all_indexes = sql.Columns(indexes)
-  for m in metric.traverse():
-    if isinstance(m, MH):
-      all_indexes.add(m.stratified_by)
+  all_indexes = sql.Columns(indexes).add(utils.get_extra_split_by(metric))
   indexes_and_unit = sql.Columns(all_indexes).add(metric.unit)
   where = sql.Filters(global_filter).add(local_filter)
   columns = sql.Columns()
@@ -2568,10 +2343,10 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
                                             local_filter, with_data):
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
-  If all the leaf Metrics are Sum, Count, Dot or Mean, we can compute the
-  leave-one-out (LOO) estimates faster. If there is any index added by
-  Operation, then we need to adjust the slices. See
-  utils.adjust_slices_for_loo() for more discussions. The query will look like
+  If all the leaf Metrics are Sum and/or Count, we can compute the
+  leave-one-out (LOO) estimates faster. If there is any index added by Operation
+  then we need to adjust the slices. See utils.adjust_slices_for_loo() for more
+  discussions. The query will look like
   WITH
   UnitSliceCount AS (SELECT
     split_by,
@@ -2619,10 +2394,7 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
     The alias of the table in the WITH clause that has all resampled result.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  all_indexes = sql.Columns(indexes)
-  for m in metric.traverse():
-    if isinstance(m, MH):
-      all_indexes.add(m.stratified_by)
+  all_indexes = sql.Columns(indexes).add(utils.get_extra_split_by(metric))
   indexes_and_unit = sql.Columns(all_indexes).add(metric.unit)
   where = sql.Filters(global_filter).add(local_filter)
 
@@ -2653,19 +2425,21 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
           unit_slice_ct_alias))
   if split_by:
     loo_from = all_slices.join(
-        sql.Datasource(total_ct_alias, 'total'), using=split_by, join='LEFT')
+        sql.Datasource(total_ct_alias, 'total_table'),
+        using=split_by,
+        join='LEFT')
   else:
     loo_from = all_slices.join(
-        sql.Datasource(total_ct_alias, 'total'), join='CROSS')
+        sql.Datasource(total_ct_alias, 'total_table'), join='CROSS')
   loo_from = loo_from.join(
-      sql.Datasource(unit_slice_ct_alias, 'unit'),
-      using=indexes_and_unit,
+      sql.Datasource(unit_slice_ct_alias, 'unit_slice_table'),
+      using=indexes_and_unit.aliases,
       join='LEFT')
   loo = sql.Sql(
       sql.Columns(all_indexes.aliases).add(
           sql.Column(sql.Column(metric.unit).alias,
                      alias='_resample_idx')).add(columns_in_loo), loo_from,
-      'total.ct - COALESCE(unit.ct, 0) > 0')
+      'total_table.ct - COALESCE(unit_slice_table.ct, 0) > 0')
   loo_table = with_data.add(sql.Datasource(loo, 'LOO'))
   return loo_table, with_data
 
@@ -2678,7 +2452,7 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
   """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
 
   See the doc of get_jackknife_data_fast_no_adjustment() first. Here we
-  1. collects the LOO columns for all Sum, Count, Dot and Mean Metrics.
+  1. collects the LOO columns for all Sum and Count.
   2. Modify metric in-place so when we generate SQL later, they know what column
     to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
     but as we precompute LOO estimates, we need to query from a table that has
@@ -2717,66 +2491,13 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
   metric = copy.deepcopy(metric)
   local_filter = sql.Filters(local_filter).add(metric.where)
   metric.where = None
-  if isinstance(metric,
-                (metrics.Sum, metrics.Count, metrics.Mean, metrics.Dot)):
+  if isinstance(metric, (metrics.Sum, metrics.Count)):
     filters = sql.Filters(local_filter).remove(global_filter)
-    if isinstance(metric, (metrics.Sum, metrics.Count)):
-      c = metric.var
-      op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
-      total = sql.Column(c, op, filters=filters, partition=all_indexes)
-      unit_sum = sql.Column(c, op, filters=filters, partition=indexes_and_unit)
-      loo = (total - unit_sum)
-    elif isinstance(metric, metrics.Mean):
-      if metric.weight:
-        op = 'SUM({} * {})'
-        total_sum = sql.Column((metric.var, metric.weight),
-                               op,
-                               filters=filters,
-                               partition=all_indexes)
-        unit_sum = sql.Column((metric.var, metric.weight),
-                              op,
-                              filters=filters,
-                              partition=indexes_and_unit)
-        total_weight = sql.Column(
-            metric.weight, 'SUM({})', filters=filters, partition=all_indexes)
-        unit_weight = sql.Column(
-            metric.weight,
-            'SUM({})',
-            filters=filters,
-            partition=indexes_and_unit)
-      else:
-        total_sum = sql.Column(
-            metric.var, 'SUM({})', filters=filters, partition=all_indexes)
-        unit_sum = sql.Column(
-            metric.var, 'SUM({})', filters=filters, partition=indexes_and_unit)
-        total_weight = sql.Column(
-            metric.var, 'COUNT({})', filters=filters, partition=all_indexes)
-        unit_weight = sql.Column(
-            metric.var,
-            'COUNT({})',
-            filters=filters,
-            partition=indexes_and_unit)
-      loo = (total_sum - unit_sum) / (total_weight - unit_weight)
-    else:
-      total_sum = sql.Column((metric.var, metric.var2),
-                             'SUM({} * {})',
-                             filters=filters,
-                             partition=all_indexes)
-      unit_sum = sql.Column((metric.var, metric.var2),
-                            'SUM({} * {})',
-                            filters=filters,
-                            partition=indexes_and_unit)
-      loo = total_sum - unit_sum
-      if metric.normalize:
-        total_ct = sql.Column((metric.var, metric.var2),
-                              'COUNT({} * {})',
-                              filters=filters,
-                              partition=all_indexes)
-        unit_ct = sql.Column((metric.var, metric.var2),
-                             'COUNT({} * {})',
-                             filters=filters,
-                             partition=indexes_and_unit)
-        loo = (total_sum - unit_sum) / (total_ct - unit_ct)
+    c = metric.var
+    op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
+    total = sql.Column(c, op, filters=filters, partition=all_indexes)
+    unit_sum = sql.Column(c, op, filters=filters, partition=indexes_and_unit)
+    loo = (total - unit_sum)
     loo.set_alias(metric.name)
     columns.add(loo)
     return metrics.Sum(loo.alias, metric.name)
@@ -2795,13 +2516,13 @@ def modify_descendants_for_jackknife_fast_with_adjustment(
   """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
 
   See the doc of get_jackknife_data_fast_with_adjustment() first. Here we
-  1. collects the LOO columns for all Sum, Count, Dot and Mean Metrics.
+  1. collects the LOO columns for all Sum and Count.
   2. Modify them in-place so when we generate SQL later, they know what column
     to use. For example, Sum('X') would generate a SQL column 'SUM(X) AS sum_x',
     but as we precompute LOO estimates, we need to query from a table that has
-    "total.`sum(X)` - COALESCE(unit.`sum(X)`, 0) AS `sum(X)`". So the expression
-    of Sum('X') should now become 'SUM(`sum(X)`) AS `sum(X)`'. So we replace the
-    metric with Sum('sum(X)', metric.name) so it could handle it correctly.
+    "total_table.`sum(X)` - COALESCE(unit_slice_table.`sum(X)`, 0) AS `sum(X)`".
+    So the expression of Sum('X') should now become 'SUM(`sum(X)`) AS `sum(X)`'.
+    Here we will replace the metric with Sum('sum(X)', metric.name).
   3. Removes filters as they have already been applied in the LOO table. Note
     that we made a copy in get_se for metric so the removal won't affect the
     metric used in point estimate computation.
@@ -2835,29 +2556,14 @@ def modify_descendants_for_jackknife_fast_with_adjustment(
   metric = copy.deepcopy(metric)
   local_filter = sql.Filters(local_filter).add(metric.where)
   metric.where = None
-  tmpl = 'total.%s - COALESCE(unit.%s, 0)'
-  if isinstance(metric, (metrics.Sum, metrics.Count, metrics.Mean)):
+  tmpl = 'total_table.%s - COALESCE(unit_slice_table.%s, 0)'
+  if isinstance(metric, (metrics.Sum, metrics.Count)):
     filters = sql.Filters(local_filter).remove(global_filter)
-    if isinstance(metric, (metrics.Sum, metrics.Count)):
-      c = metric.var
-      op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
-      col = sql.Column(c, op, filters=filters)
-      columns_to_preagg.add(col)
-      loo = sql.Column(tmpl % (col.alias, col.alias), alias=metric.name)
-    elif isinstance(metric, metrics.Mean):
-      if metric.weight:
-        sum_col = sql.Column((metric.var, metric.weight),
-                             'SUM({} * {})',
-                             filters=filters)
-        weight_col = sql.Column(metric.weight, 'SUM({})', filters=filters)
-      else:
-        sum_col = sql.Column(metric.var, 'SUM({})', filters=filters)
-        weight_col = sql.Column(metric.var, 'COUNT({})', filters=filters)
-
-      columns_to_preagg.add([sum_col, weight_col])
-      loo_sum = sql.Column(tmpl % (sum_col.alias, sum_col.alias))
-      loo_weight = sql.Column(tmpl % (weight_col.alias, weight_col.alias))
-      loo = (loo_sum / loo_weight).set_alias(metric.name)
+    c = metric.var
+    op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
+    col = sql.Column(c, op, filters=filters)
+    columns_to_preagg.add(col)
+    loo = sql.Column(tmpl % (col.alias, col.alias), alias=metric.name)
     columns_in_loo.add(loo)
     return metrics.Sum(loo.alias, metric.name)
 

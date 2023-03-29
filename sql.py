@@ -301,8 +301,11 @@ class Column(SqlComponent):
     over = None
     if not (self.partition is None and self.order is None and
             self.window_frame is None):
+      partition_cols_str = [
+          'CAST(%s AS STRING)' % c for c in Columns(self.partition).expressions
+      ]
       partition = 'PARTITION BY %s' % ', '.join(
-          Columns(self.partition).expressions) if self.partition else ''
+          partition_cols_str) if self.partition else ''
       order = 'ORDER BY %s' % ', '.join(Columns(
           self.order).expressions) if self.order else ''
       frame = self.window_frame

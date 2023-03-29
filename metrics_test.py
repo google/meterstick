@@ -950,13 +950,6 @@ class SimpleMetricTest(unittest.TestCase):
         (self.df.X - self.df.X.mean()) * (self.df.Y - self.df.Y.mean()))
     self.assertEqual(output, expected)
 
-  def test_cov_kwargs(self):
-    metric = metrics.Cov('X', 'Y', fweights=self.df.Y)
-    output = metric.compute_on(self.df)
-    expected = np.cov(self.df.X, self.df.Y, fweights=self.df.Y)[0, 1]
-    expected = pd.DataFrame({'cov(X, Y)': [expected]})
-    testing.assert_frame_equal(output, expected)
-
   def test_weighted_cov(self):
     metric = metrics.Cov('X', 'Y', weight='Y')
     output = metric.compute_on(self.df)

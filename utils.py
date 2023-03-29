@@ -112,6 +112,16 @@ class CacheKey():
   def add_extra_info(self, extra_info: str):
     self.extra_info = tuple(list(self.extra_info) + [extra_info])
 
+  def replace_key(self, key):
+    new_key = copy.deepcopy(self)
+    new_key.key = key
+    return new_key
+
+  def replace_metric(self, new_metric):
+    new_key = copy.deepcopy(self)
+    new_key.metric = new_metric
+    return new_key
+
   def __eq__(self, other):
     return isinstance(other, CacheKey) and hash(self) == hash(other)
 
@@ -127,85 +137,79 @@ class CacheKey():
 
 
 def adjust_slices_for_loo(bucket_res: pd.Series,
-                          split_by: Optional[List[Text]] = None):
+                          split_by: Optional[List[Text]] = None,
+                          df=None):
   """Corrects the slices in the bucketized result.
 
   Jackknife has a precomputation step where we precompute leave-one-out (LOO)
-  results for Sum, Count and Mean. The idea is that, for example, for Sum, we
+  results for Sum and/or Count. The idea is that, for example, for Sum, we
   can get the LOO result by subtracting df.groupby([unit, groupby columns])
   from df.groupby([groupby columns]) where unit is the column to Jackknife on
   and groupby columns are optional and have two parts, both are optional too.
   The first part comes from Operations. For example,
   PercentChange(cond, base, Sum('x')).compute_on(df) internally computes
-  Sum('x').compute_on(df, cond). The second part is just the split_by passed
-  to Jackknife(...).compute_on(df, split_by). In other words, the groupby
-  columns are [cond] + split_by for
+  Sum('x').compute_on(df, cond). The second part is the split_by passed to
+  Jackknife(...).compute_on(df, split_by). In other words, the groupby
+  columns are split_by + [cond] for
   Jackknife(PercentChange(cond, base, Sum('x'))).compute_on(df, split_by).
-  The issue is for the bucketized sum/count, some slices will be missing for
-  sparse data and hence missing when we subtract it from the total, while some
-  slices should not be in the final LOO result because they are only present
-  in this bucket. For example, for data
+  The issue is that the index of the df.groupby([groupby columns]), the
+  bucket_res here, can be different to that of the correct LOO result for
+  two reasons.
+  1. Sparse data: If one slice only appears in one unit, then it will appear in
+  the bucket_res but shouldn't be included in the LOO.
+  2. If descendants of the Jackknife have filters that filter out certain
+  slices so bucket_res doesn't have them, we might need to add them back.
+  For example, for data
     unit  grp  cond  X
      1     A   foo   10
      2     A   foo   20
      2     A   bar   30
      2     B   bar   40,
-  to compute
+  the bucket_res of
   Jackknife('unit', PercentChange('cond', 'foo', Sum('X'))
-    ).compute_on(data, 'grp'),
-  the leave-unit-1-out result should only have slices A * foo and A * bar
-  because
-  1. grp B never appears in unit 1 so we shouldn't calculate leave-unit-1-out
-    for it.
-  2. slice A * bar should be added because it's in the sum of leave-unit-1-out
-    data.
-  And leave-unit-2-out result should have slices A * foo, A * bar and B * bar
-  because
-  1. A * foo is in the leave-unit-2-out data and grp A is in the unit-2 data.
-  2. A * bar and B * bar are in the unit-2 data, though their jackknife standard
-    errors will be NA because they are not in other units of data.
-  In summary, to get the slices that should be present for unit i,
-  1. Find all the slices in the leave-unit-i-out data.
-  2. Discard the slices whose split_by part is not in the unit-i data.
-  3. All slices in unit-i data need to be counted too.
-  In practice, we only enforce #1 and #2, namely, if a slice is expected ONLY
-  because it's in unit-i, we might not include it. The reason is that it only
-  happens when the slice appears in only one unit so its degrees of freedom is
-  1. In operations.py we make sure the standard error is always NA when dof is
-  1, so what we return doesn't matter. The slice won't be lost in the final
-  result either because we will join the standard error to the point estimate
-  and the latter has all slices. Nonetheless, for cases that no adjustment is
-  needed, the original data is returned, so #3 still holds.
+    ).compute_on(data, 'grp') won't have slice 1 * A * bar but we should have it
+  in the leave-unit-1-out result.
+  The procedure to get the correct indexes for LOO is that
+  1. For each split_by group, find all the unique Jackknife unit values.
+  2. For each unit, i, find all the slices remained in the levels added by
+  Operations, if any, in the leave-unit-i-out bucket_res. The
+  split_by slice * i * operation slice are what we need to include in the LOO.
 
   Args:
     bucket_res: The first level of its indexes is the unit to Jackknife on,
       followed by split_by, then levels added by Operations, if any.
     split_by: The list of column(s) from Jackknife().compute_on(df, split_by).
+    df: The df to jackknife.
 
   Returns:
     A pd.Series that has the same index names as bucket_res, but with some
     levels removed and/or added.
   """
-  slicing = bucket_res.index.names[1:]
-  operation_lvl = slicing[len(split_by or ()):]
+  indexes = bucket_res.index.names
+  unit_and_operation_lvl = indexes[len(split_by):]
+  operation_lvl = unit_and_operation_lvl[1:]
+  split_by_and_unit = indexes[:len(split_by) + 1]
+  unit = split_by_and_unit[-1]
+  expected_units = df.groupby(split_by_and_unit).first().iloc[:, [0]]
   if not operation_lvl:
-    return bucket_res
+    return bucket_res.reindex(expected_units.index, fill_value=0)
 
-  unit_slice_ct = bucket_res.groupby(bucket_res.index.names).size()
-  total_ct = unit_slice_ct.groupby(slicing).sum()
-  # We need all combinations of slices.
-  unit_slice_ct = unit_slice_ct.reindex(
-      pd.MultiIndex.from_product(unit_slice_ct.index.levels), fill_value=0)
-  if len(unit_slice_ct) == len(bucket_res):
-    return bucket_res  # No missing slice.
-  slices_in_other_units = total_ct - unit_slice_ct
-  slices_in_other_units = slices_in_other_units.index[slices_in_other_units > 0]
-  if slices_in_other_units.names != bucket_res.index.names:
-    slices_in_other_units = slices_in_other_units.reorder_levels(
-        bucket_res.index.names)
-  to_keep = slices_in_other_units.droplevel(operation_lvl).isin(
-      bucket_res.index.droplevel(operation_lvl))
-  return bucket_res.reindex(slices_in_other_units[to_keep], fill_value=0)
+  expected_units = expected_units.reset_index(unit)[[unit]]
+  b = bucket_res.reset_index(unit_and_operation_lvl)
+  suffix = '_meterstick'
+  while any((c.endswith(suffix) for c in b.columns)) or suffix == unit:
+    suffix += '_'
+  on = split_by
+  if not on:
+    expected_units[suffix] = 1
+    b[suffix] = 1
+    on = suffix
+  cross_joined = expected_units.merge(
+      b, on=on, how='outer', suffixes=('', suffix))
+  expected_slices = cross_joined[
+      cross_joined[unit] != cross_joined[f'{unit}{suffix}']].set_index(
+          unit_and_operation_lvl, append=split_by).index.drop_duplicates()
+  return bucket_res.reindex(expected_slices, fill_value=0)
 
 
 def melt(df):
@@ -317,6 +321,44 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
   return res
 
 
+def get_extra_idx(metric):
+  """Collects the extra indexes added by Operations for the metric tree.
+
+  Args:
+    metric: A Metric instance.
+
+  Returns:
+    A tuple of column names which are just the index of metric.compute_on(df).
+  """
+  extra_idx = metric.extra_index[:]
+  children_idx = [get_extra_idx(c) for c in metric.children if is_metric(c)]
+  if len(set(children_idx)) > 1:
+    raise ValueError('Incompatible indexes!')
+  if children_idx:
+    extra_idx += list(children_idx[0])
+  return tuple(extra_idx)
+
+
+def get_extra_split_by(metric):
+  """Collects the extra split_by added by Operations for the metric tree.
+
+  Args:
+    metric: A Metric instance.
+
+  Returns:
+    A tuple of all columns used to split the df in metric.compute_on(df).
+  """
+  extra_split_by = metric.extra_split_by[:]
+  children_idx = [
+      get_extra_split_by(c) for c in metric.children if is_metric(c)
+  ]
+  if len(set(children_idx)) > 1:
+    raise ValueError('Incompatible split_by!')
+  if children_idx:
+    extra_split_by += list(children_idx[0])
+  return tuple(extra_split_by)
+
+
 class MaybeBadSqlModeError(Exception):
   """An Error used in compute_on_sql(), when a better mode might exist."""
 
@@ -338,3 +380,7 @@ class MaybeBadSqlModeError(Exception):
     return (
         "Please see the root cause of the failure above. If it's caused by "
         'the query being too large/complex, you can try %s') % self.get_msg()
+
+
+def is_metric(m):
+  return hasattr(m, 'compute_on')

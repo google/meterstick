@@ -67,26 +67,6 @@ def to_sql(table, split_by=None):
   return lambda metric: metric.to_sql(table, split_by)
 
 
-def get_extra_idx(metric):
-  """Collects the extra indexes added by Operations for the metric tree.
-
-  Args:
-    metric: A Metric instance.
-
-  Returns:
-    A tuple of column names which are just the index of metric.compute_on(df).
-  """
-  extra_idx = metric.extra_index[:]
-  children_idx = [
-      get_extra_idx(c) for c in metric.children if isinstance(c, Metric)
-  ]
-  if len(set(children_idx)) > 1:
-    raise ValueError('Incompatible indexes!')
-  if children_idx:
-    extra_idx += list(children_idx[0])
-  return tuple(extra_idx)
-
-
 def get_global_filter(metric):
   """Collects the filters that can be applied globally to the Metric tree."""
   global_filter = sql.Filters()
@@ -104,7 +84,7 @@ def get_global_filter(metric):
 
 
 def is_operation(m):
-  """We can't use isinstance because of loop dependancy."""
+  """We can't use isinstance because of loop dependency."""
   return isinstance(m, Metric) and m.children and not isinstance(
       m, (MetricList, CompositeMetric))
 
@@ -490,6 +470,8 @@ class Metric(object):
     return pd.DataFrame({self.name: [res]})
 
   def wrap_cache_key(self, key, split_by=None, where=None, slice_val=None):
+    if key and not isinstance(key, utils.CacheKey) and self.cache_key:
+      key = self.cache_key.replace_key(key)
     key = key or self.cache_key
     return utils.CacheKey(self, key, where or self.where_raw, split_by,
                           slice_val)
@@ -524,7 +506,10 @@ class Metric(object):
             getattr(k, c) == cv for c, cv in conds.items())
     }
     if metric:
-      res = {k: v for k, v in res.items() if k.metric.__class__ == metric}
+      if isinstance(metric, Metric):
+        res = {k: v for k, v in res.items() if k.metric == metric}
+      else:
+        res = {k: v for k, v in res.items() if k.metric.__class__ == metric}
     return res
 
   def get_fingerprint(self):
@@ -709,14 +694,14 @@ class Metric(object):
     """Executes the query from to_sql() and process the result."""
     query = self.to_sql(table, split_by)
     res = execute(str(query))
-    extra_idx = list(get_extra_idx(self))
+    extra_idx = list(utils.get_extra_idx(self))
     indexes = split_by + extra_idx if split_by else extra_idx
     columns = [a.alias_raw for a in query.groupby.add(query.columns)]
     columns[:len(indexes)] = indexes
     res.columns = columns
     # We replace '$' with 'macro_' in the generated SQL. To recover the names,
     # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
-    # orignal names. We can get the index names so we can recover them but
+    # original names. We can get the index names so we can recover them but
     # unfortunately it's not as easy to recover metric/column names, so for the
     # metrics we just replace 'macro_' with '$'.
     if indexes:
@@ -729,7 +714,7 @@ class Metric(object):
   def to_sql(self, table, split_by: Optional[Union[Text, List[Text]]] = None):
     """Generates SQL query for the metric."""
     global_filter = get_global_filter(self)
-    indexes = sql.Columns(split_by).add(get_extra_idx(self))
+    indexes = sql.Columns(split_by).add(utils.get_extra_idx(self))
     with_data = sql.Datasources()
     if isinstance(table, sql.Sql) and table.with_data:
       table = copy.deepcopy(table)
@@ -1363,11 +1348,15 @@ class SimpleMetric(Metric):
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
-    del indexes  # unused
+    if self.kwargs:
+      raise ValueError('Cannot generate SQL for Metric with kwargs: %s.' %
+                       self.name)
     local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
-    return sql.Sql(
-        self.get_sql_columns(local_filter), table, global_filter,
-        split_by), with_data
+    cols = self.get_sql_columns(local_filter)
+    if cols:
+      return sql.Sql(cols, table, global_filter, split_by), with_data
+    else:
+      raise NotImplementedError
 
   def get_sql_columns(self, local_filter):
     raise ValueError('get_sql_columns is not implemented for %s.' % type(self))
@@ -1394,7 +1383,7 @@ class Count(SimpleMetric):
                **kwargs):
     self.distinct = distinct
     if distinct:
-      name = name or 'count(distinct %s)' % var
+      name = name or 'count(distinct %s)' % str(var)
     super(Count, self).__init__(var, name, 'count({})', where, ['distinct'],
                                 **kwargs)
 
@@ -1459,7 +1448,7 @@ class Dot(SimpleMetric):
                **kwargs):
     self.var2 = var2
     self.normalize = normalize
-    name_tmpl = ('mean({} * %s)' if normalize else 'sum({} * %s)') % var2
+    name_tmpl = ('mean({} * %s)' if normalize else 'sum({} * %s)') % str(var2)
     super(Dot, self).__init__(var1, name, name_tmpl, where, ['normalize'],
                               **kwargs)
 
@@ -1507,7 +1496,7 @@ class Mean(SimpleMetric):
                name: Optional[Text] = None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
-    name_tmpl = '%s-weighted mean({})' % weight if weight else 'mean({})'
+    name_tmpl = '%s-weighted mean({})' % str(weight) if weight else 'mean({})'
     super(Mean, self).__init__(var, name, name_tmpl, where, ['weight'],
                                **kwargs)
     self.weight = weight
@@ -1625,7 +1614,7 @@ class Quantile(SimpleMetric):
       raise ValueError('quantiles must be in [0, 1].')
     name_tmpl = 'quantile({}, {})'
     if weight:
-      name_tmpl = '%s-weighted quantile({}, {})' % weight
+      name_tmpl = '%s-weighted quantile({}, {})' % str(weight)
     name = name or name_tmpl.format(var, str(quantile))
     self.quantile = quantile
     self.interpolation = interpolation
@@ -1716,7 +1705,7 @@ class Variance(SimpleMetric):
                **kwargs):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
-    name_tmpl = '%s-weighted var({})' % weight if weight else 'var({})'
+    name_tmpl = '%s-weighted var({})' % str(weight) if weight else 'var({})'
     super(Variance, self).__init__(var, name, name_tmpl, where,
                                    ['ddof', 'weight'], **kwargs)
 
@@ -1776,7 +1765,7 @@ class StandardDeviation(SimpleMetric):
                **kwargs):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
-    name_tmpl = '%s-weighted sd({})' % weight if weight else 'sd({})'
+    name_tmpl = '%s-weighted sd({})' % str(weight) if weight else 'sd({})'
     super(StandardDeviation, self).__init__(var, name, name_tmpl, where,
                                             ['ddof', 'weight'], **kwargs)
 
@@ -1944,7 +1933,7 @@ class Correlation(SimpleMetric):
                **kwargs):
     name_tmpl = 'corr({}, {})'
     if weight:
-      name_tmpl = '%s-weighted corr({}, {})' % weight
+      name_tmpl = '%s-weighted corr({}, {})' % str(weight)
     if name is None:
       name = name_tmpl.format(var1, var2)
     self.var2 = var2
