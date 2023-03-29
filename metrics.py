@@ -1346,6 +1346,8 @@ class Ratio(CompositeMetric):
         lambda x, y: x / y,
         '{} / {}', (Sum(numerator), Sum(denominator)),
         where=where)
+    self.numerator = numerator
+    self.denominator = denominator
     self.name = name or self.name
 
   def get_fingerprint(self):
