@@ -303,7 +303,7 @@ class Metric(object):
 
     Args:
       children: The return of compute_children() or compute_children_sql().
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
 
     Returns:
       Almost the final result. Only some manipulations are still needed.
@@ -351,7 +351,7 @@ class Metric(object):
 
     Args:
       df: The DataFrame to compute on.
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
       melted: Whether to transform the result to long format.
       return_dataframe: Whether to convert the result to DataFrame if it's not.
         If False, it could still return a DataFrame.
@@ -644,7 +644,7 @@ class Metric(object):
     self.cache = {} if cache is None else cache
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
     try:
-      cache_key = self.wrap_cache_key(cache_key, split_by)
+      cache_key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
       if self.in_cache(cache_key):
         res = self.find_all_in_cache(cache_key)
       else:
@@ -783,6 +783,26 @@ class Metric(object):
                              False, mode, self.cache_key, self.cache))
     return children[0] if len(self.children) == 1 else children
 
+  def get_equivalent(self, *auxiliary_cols):
+    """Gets a Metric that is equivalent to self."""
+    res = self.get_equivalent_without_filter(*auxiliary_cols)
+    if res:
+      res.name = self.name
+      res.where = self.where_raw
+    return res
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    """Gets a Metric that is equivalent to self but ignoring the filter."""
+    del auxiliary_cols  # might be used in derived classes
+    return
+
+  def get_auxiliary_cols(self):
+    """Returns the auxiliary columns required by the equivalent Metric.
+
+    See utils.add_auxiliary_cols() for the format of the return.
+    """
+    return ()
+
   def __deepcopy__(self, memo):
     # We don't copy self.cache, for two reasons.
     # 1. The copied Metric can share the same cache to maximize caching.
@@ -843,6 +863,25 @@ class Metric(object):
   def __rpow__(self, other):
     return CompositeMetric(lambda x, y: x**y, '{} ^ {}', (other, self))
 
+  def __eq__(self, other):
+    if not isinstance(other, type(self)) or not isinstance(self, type(other)):
+      return False
+    if self.name != other.name:
+      return False
+    if self.get_fingerprint() != other.get_fingerprint():
+      return False
+    # Some Metrics share fingerprints. For example, Mean has the same
+    # fingerprint as Sum(x) / Count(x) so we need to further check.
+    if len(self.children) != len(other.children):
+      return False
+    for m1, m2 in zip(self.children, other.children):
+      if m1 != m2:
+        return False
+    return True
+
+  def __hash__(self):
+    return hash((self.name, self.get_fingerprint()))
+
 
 class MetricList(Metric):
   """Wraps Metrics and compute them with caching.
@@ -889,7 +928,7 @@ class MetricList(Metric):
 
     Args:
       df: The DataFrame to compute on.
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
 
     Returns:
       A list of results.
@@ -1150,7 +1189,7 @@ class CompositeMetric(Metric):
     Args:
       children: A length-2 list. The elements could be numbers, pd.Series or
         pd.DataFrames.
-      split_by: Something can be passed into df.group_by().
+      split_by: The columns that we use to split the data.
 
     Returns:
       The result to be sent to final_compute().
@@ -1307,14 +1346,12 @@ class Ratio(CompositeMetric):
         lambda x, y: x / y,
         '{} / {}', (Sum(numerator), Sum(denominator)),
         where=where)
-    self.numerator = numerator
-    self.denominator = denominator
     self.name = name or self.name
 
   def get_fingerprint(self):
     # Make the fingerprint same as the equivalent CompositeMetric for caching.
-    util = Sum(self.numerator) / Sum(self.denominator)
-    util.where = self.where_raw
+    util = self.children[0] / self.children[1]
+    util.where = self.where_raw  # pytype: disable=not-writable
     return util.get_fingerprint()
 
 
@@ -1355,8 +1392,9 @@ class SimpleMetric(Metric):
     cols = self.get_sql_columns(local_filter)
     if cols:
       return sql.Sql(cols, table, global_filter, split_by), with_data
-    else:
-      raise NotImplementedError
+    equiv, _ = utils.get_equivalent_metric(self)
+    return equiv.get_sql_and_with_clause(table, split_by, global_filter,
+                                         indexes, local_filter, with_data)
 
   def get_sql_columns(self, local_filter):
     raise ValueError('get_sql_columns is not implemented for %s.' % type(self))
@@ -1467,6 +1505,14 @@ class Dot(SimpleMetric):
     tmpl = 'AVG({} * {})' if self.normalize else 'SUM({} * {})'
     return sql.Column((self.var, self.var2), tmpl, self.name, local_filter)
 
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    if self.normalize:
+      return Sum(auxiliary_cols[0]) / Count(auxiliary_cols[0])
+    return Sum(auxiliary_cols[0])
+
+  def get_auxiliary_cols(self):
+    return ((self.var, '*', self.var2),)
+
   def get_fingerprint(self):
     if str(self.var) > str(self.var2):
       util = copy.deepcopy(self)
@@ -1520,6 +1566,12 @@ class Mean(SimpleMetric):
                        'total_sum', local_filter)
       res /= sql.Column(self.weight, 'SUM({})', 'total_weight', local_filter)
       return res.set_alias(self.name)
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    if not self.weight:
+      return Sum(self.var) / Count(self.var)
+    return Dot(self.var, self.weight) / Sum(self.weight)
 
 
 class Max(SimpleMetric):
@@ -1723,22 +1775,27 @@ class Variance(SimpleMetric):
       return super(Variance, self).compute_slices(df, split_by)
     return self.group(df, split_by)[self.var].var(ddof=self.ddof, **self.kwargs)
 
-  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
-                              local_filter, with_data):
-    if self.weight:
-      return _get_sql_for_weighted_var_or_se(self, table, split_by,
-                                             global_filter, local_filter,
-                                             with_data)
-    return super(Variance,
-                 self).get_sql_and_with_clause(table, split_by, global_filter,
-                                               indexes, local_filter, with_data)
-
   def get_sql_columns(self, local_filter):
+    if self.weight:
+      return
+    if self.ddof == 1:
+      return sql.Column(self.var, 'VAR_SAMP({})', self.name, local_filter)
+    else:
+      return sql.Column(self.var, 'VAR_POP({})', self.name, local_filter)
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
     if not self.weight:
-      if self.ddof == 1:
-        return sql.Column(self.var, 'VAR_SAMP({})', self.name, local_filter)
-      else:
-        return sql.Column(self.var, 'VAR_POP({})', self.name, local_filter)
+      return Cov(self.var, self.var, ddof=self.ddof)
+    numer = Dot(auxiliary_cols[0],
+                self.weight) - Dot(self.var, self.weight)**2 / Sum(self.weight)
+    denom = Sum(self.weight) - self.ddof if self.ddof else Sum(self.weight)
+    # ddof is invalid if it makes the denom negative so we use ((denom)^0.5)^2.
+    return numer / (denom**0.5)**2
+
+  def get_auxiliary_cols(self):
+    if self.weight:
+      return ((self.var, '**', 2),)
+    return ()
 
 
 class StandardDeviation(SimpleMetric):
@@ -1783,87 +1840,17 @@ class StandardDeviation(SimpleMetric):
       return super(StandardDeviation, self).compute_slices(df, split_by)
     return self.group(df, split_by)[self.var].std(ddof=self.ddof, **self.kwargs)
 
-  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
-                              local_filter, with_data):
-    if self.weight:
-      query, with_data = _get_sql_for_weighted_var_or_se(
-          self, table, split_by, global_filter, local_filter, with_data)
-      return query, with_data
-    return super(StandardDeviation,
-                 self).get_sql_and_with_clause(table, split_by, global_filter,
-                                               indexes, local_filter, with_data)
-
   def get_sql_columns(self, local_filter):
-    if not self.weight:
-      if self.ddof == 1:
-        return sql.Column(self.var, 'STDDEV_SAMP({})', self.name, local_filter)
-      else:
-        return sql.Column(self.var, 'STDDEV_POP({})', self.name, local_filter)
+    if self.weight:
+      return
+    if self.ddof == 1:
+      return sql.Column(self.var, 'STDDEV_SAMP({})', self.name, local_filter)
+    else:
+      return sql.Column(self.var, 'STDDEV_POP({})', self.name, local_filter)
 
-
-def _get_sql_for_weighted_var_or_se(metric, table, split_by, global_filter,
-                                    local_filter, with_data):
-  """Gets the SQL for weighted Variance or StandardDeviation.
-
-  For Variance the query is like
-  WITH
-  WeightedBase AS (SELECT
-    split_by,
-    weight,
-    weight * POWER(var - SAFE_DIVIDE(
-      SUM(weight * var) OVER (PARTITION BY split_by),
-      SUM(weight) OVER (PARTITION BY split_by)), 2) AS weighted_squared_diff
-  FROM table)
-  SELECT
-    split_by,
-    SAFE_DIVIDE(SUM(weighted_squared_diff), SUM(weight) - 1)
-      AS weighted_metric
-  FROM WeightedBase
-  GROUP BY split_by.
-
-  For StandardDeviation we take the square root of weighted_metric.
-
-  Args:
-    metric: An instance of Variance or StandardDeviation, with weight.
-    table: The table we want to query from.
-    split_by: The columns that we use to split the data.
-    global_filter: The filters that can be applied to the whole Metric tree.
-    local_filter: The filters that have been accumulated so far.
-    with_data: A global variable that contains all the WITH clauses we need.
-
-  Returns:
-    The SQL instance for metric, without the WITH clause component.
-    The global with_data which holds all datasources we need in the WITH clause.
-  """
-  where = sql.Filters([metric.where, local_filter]).remove(global_filter)
-  weight = metric.weight
-  var = metric.var
-  columns = sql.Columns(split_by).add(
-      sql.Column(weight, alias=weight, filters=where))
-  total_sum = sql.Column(
-      '%s * %s' % (weight, var), 'SUM({})', filters=where, partition=split_by)
-  total_weight = sql.Column(
-      weight, 'SUM({})', filters=where, partition=split_by)
-  weighted_mean = total_sum / total_weight
-  weighted_squared_diff = sql.Column(
-      '%s * POWER(%s - %s, 2)' % (weight, var, weighted_mean.expression),
-      alias='weighted_squared_diff',
-      filters=where)
-  weighted_base_table = sql.Sql(
-      columns.add(weighted_squared_diff), table, global_filter)
-  weighted_base_table_alias, rename = with_data.merge(
-      sql.Datasource(weighted_base_table, 'WeightedBase'))
-
-  weight = sql.Column(weight).alias
-  weighted_var = sql.Column(
-      rename.get('weighted_squared_diff', 'weighted_squared_diff'),
-      'SUM({})') / sql.Column(rename.get(weight, weight), 'SUM({}) - 1')
-  if isinstance(metric, StandardDeviation):
-    weighted_var = weighted_var**0.5
-  weighted_var.set_alias(metric.name)
-  return sql.Sql(
-      weighted_var, weighted_base_table_alias,
-      groupby=split_by.aliases), with_data
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    return Variance(self.var, bool(self.ddof), self.weight)**0.5
 
 
 class CV(SimpleMetric):
@@ -1904,6 +1891,10 @@ class CV(SimpleMetric):
                        self.name, local_filter) / sql.Column(
                            self.var, 'AVG({})', self.name, local_filter)
     return res.set_alias(self.name)
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    return StandardDeviation(self.var, bool(self.ddof)) / Mean(self.var)
 
 
 class Correlation(SimpleMetric):
@@ -1971,7 +1962,7 @@ class Correlation(SimpleMetric):
 
   def get_sql_columns(self, local_filter):
     if self.weight:
-      raise ValueError('SQL for weighted correlation is not supported!')
+      return
     if self.method != 'pearson':
       raise ValueError('Only Pearson correlation is supported!')
     return sql.Column((self.var, self.var2), 'CORR({}, {})', self.name,
@@ -1985,6 +1976,14 @@ class Correlation(SimpleMetric):
       return util.get_fingerprint()
     return super(Correlation, self).get_fingerprint()
 
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    if self.method == 'pearson':
+      return Cov(
+          self.var, self.var2, True, weight=self.weight) / StandardDeviation(
+              self.var, False, self.weight) / StandardDeviation(
+                  self.var2, False, self.weight)
+
 
 class Cov(SimpleMetric):
   """Covariance estimator.
@@ -1994,8 +1993,10 @@ class Cov(SimpleMetric):
     var2: Column of second variable.
     bias: The same arg passed to np.cov().
     ddof: The same arg passed to np.cov().
-    weight: Column name of aweights passed to np.cov(). If you need fweights,
-      pass it in kwargs.
+    weight: Column name of aweights.
+    fweight: Column name of fweights. We will convert the values to integer
+      because that's required by definition. For the definitions of aweights and
+      fweight, see the cod of numpy.cov().
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
@@ -2009,20 +2010,25 @@ class Cov(SimpleMetric):
                bias: bool = False,
                ddof: Optional[int] = None,
                weight: Optional[Text] = None,
+               fweight: Optional[Text] = None,
                name: Optional[Text] = None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
                **kwargs):
     name_tmpl = 'cov({}, {})'
     if weight:
-      name_tmpl = '%s-weighted %s' % (weight, name_tmpl)
+      name_tmpl = '%s-weighted %s' % (str(weight), name_tmpl)
+    if fweight:
+      name_tmpl = '%s-fweighted %s' % (str(fweight), name_tmpl)
+
     if name is None:
       name = name_tmpl.format(var1, var2)
     self.var2 = var2
     self.bias = bias
     self.ddof = ddof
     self.weight = weight
+    self.fweight = fweight
     super(Cov, self).__init__(var1, name, name_tmpl, where,
-                              ['bias', 'ddof', 'weight'], **kwargs)
+                              ['bias', 'ddof', 'weight', 'fweight'], **kwargs)
 
   def compute(self, df):
     return np.cov(
@@ -2031,12 +2037,13 @@ class Cov(SimpleMetric):
         bias=self.bias,
         ddof=self.ddof,
         aweights=df[self.weight] if self.weight else None,
+        fweights=df[self.fweight].astype(int) if self.fweight else None,
         **self.kwargs)[0, 1]
 
   def get_sql_columns(self, local_filter):
     """Get SQL columns."""
-    if self.weight:
-      raise ValueError('SQL for weighted covariance is not supported!')
+    if self.weight or self.fweight:
+      return
     ddof = self.ddof
     if ddof is None:
       ddof = 0 if self.bias else 1
@@ -2046,8 +2053,7 @@ class Cov(SimpleMetric):
     elif ddof == 0:
       return sql.Column((self.var, self.var2), 'COVAR_POP({}, {})', self.name,
                         local_filter)
-    else:
-      raise ValueError('Only ddof being 0 or 1 is supported!')
+    return
 
   def get_fingerprint(self):
     if str(self.var) > str(self.var2):
@@ -2056,3 +2062,48 @@ class Cov(SimpleMetric):
       util.var2 = self.var
       return util.get_fingerprint()
     return super(Cov, self).get_fingerprint()
+
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    """Gets the equivalent Metric for Cov."""
+    # See https://numpy.org/doc/stable/reference/generated/numpy.cov.html.
+    ddof = self.ddof if self.ddof is not None else int(not self.bias)
+    if not self.weight:
+      if not self.fweight:
+        v1 = Count(self.var)
+        v2 = v1
+        res = Dot(self.var, self.var2, normalize=True) - Mean(self.var) * Mean(
+            self.var2
+        )
+      else:
+        v1 = Sum(self.fweight)
+        v2 = v1
+        res = Mean(auxiliary_cols[0], self.fweight) - Mean(
+            self.var, self.fweight) * Mean(self.var2, self.fweight)
+    elif not self.fweight:
+      v1 = Sum(self.weight)
+      v2 = Dot(self.weight, self.weight)
+      res = Mean(auxiliary_cols[0], self.weight) - Mean(
+          self.var, self.weight) * Mean(self.var2, self.weight)
+    else:
+      v1 = Dot(self.weight, self.fweight)
+      v2 = Dot(auxiliary_cols[1], self.weight)
+      res = Mean(auxiliary_cols[0], auxiliary_cols[1]) - Mean(
+          self.var, auxiliary_cols[1]) * Mean(self.var2, auxiliary_cols[1])
+
+    # ddof is invalid if it makes the denom negative so we use ((denom)^0.5)^2.
+    if ddof:
+      if v1 != v2:
+        res /= ((1 - ddof * v2 / v1**2) ** 0.5) ** 2
+      else:
+        res /= ((1 - ddof / v1) ** 0.5) ** 2
+    return res
+
+  def get_auxiliary_cols(self):
+    if not self.weight and not self.fweight:
+      return ()
+    if not self.weight or not self.fweight:
+      return ((self.var, '*', self.var2),)
+    return (
+        (self.var, '*', self.var2),
+        (self.fweight, '*', self.weight),
+    )

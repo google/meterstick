@@ -21,6 +21,7 @@ import copy
 
 from absl.testing import parameterized
 from meterstick import metrics
+from meterstick import models
 from meterstick import operations
 from meterstick import utils
 import mock
@@ -1269,22 +1270,56 @@ PRECOMPUTABLE_OPERATIONS = [
     ('PercentChange', operations.PercentChange('condition', 0)),
     ('AbsoluteChange', operations.AbsoluteChange('condition', 0)),
     ('MH', operations.MH('condition', 0, 'cookie')),
-    (
-        'PrePostChange',
-        operations.PrePostChange(
-            'condition', 0, metrics.Sum('X'), metrics.Sum('Y'), 'cookie'
-        ),
-    ),
-    (
-        'CUPED',
-        operations.CUPED(
-            'condition', 0, metrics.Sum('X'), metrics.Sum('Y'), 'cookie'
-        ),
-    ),
+    ('PrePostChange',
+     operations.PrePostChange('condition', 0, metrics.Sum('X'),
+                              metrics.Sum('Y'), 'cookie')),
+    ('CUPED',
+     operations.CUPED('condition', 0, metrics.Sum('X'), metrics.Sum('Y'),
+                      'cookie')),
+    ('LinearRegression',
+     models.LinearRegression(metrics.Sum('X'), metrics.Mean('Y'), 'condition')),
+    ('Ridge', models.Ridge(metrics.Sum('X'), metrics.Mean('Y'), 'condition')),
+    ('Lasso', models.Lasso(metrics.Sum('X'), metrics.Mean('Y'), 'condition')),
+    ('ElasticNet',
+     models.ElasticNet(metrics.Sum('X'), metrics.Mean('Y'), 'condition'))
 ]
 PRECOMPUTABLE_METRICS_JK = [
-    ('Sum', metrics.Sum('X')),
-    ('Count', metrics.Count('X')),
+    ('Sum', metrics.Sum('X')), ('Count', metrics.Count('X')),
+    ('Mean', metrics.Mean('X')), ('Weighted Mean', metrics.Mean('X', 'Y')),
+    ('Dot', metrics.Dot('X', 'Y')),
+    ('Normalized Dot', metrics.Dot('X', 'Y', True)),
+    ('Variance', metrics.Variance('X', True)),
+    ('Biased Variance', metrics.Variance('X', False)),
+    ('Weighted Variance', metrics.Variance('X', True, 'Y')),
+    ('Biased Weighted Variance', metrics.Variance('X', False, 'Y')),
+    ('StandardDeviation', metrics.StandardDeviation('X', True)),
+    ('Biased StandardDeviation', metrics.StandardDeviation('X', False)),
+    ('Weighted StandardDeviation', metrics.StandardDeviation('X', True, 'Y')),
+    ('Biased Weighted StandardDeviation',
+     metrics.StandardDeviation('X', False, 'Y')), ('CV', metrics.CV('X', True)),
+    ('Biased CV', metrics.CV('X', False)), ('Cov', metrics.Cov('X', 'Y',
+                                                               False)),
+    ('Biased Cov', metrics.Cov('X', 'Y', True)),
+    ('Cov ddof', metrics.Cov('X', 'Y', False, 2)),
+    ('Biased Cov ddof', metrics.Cov('X', 'Y', True, 2)),
+    ('Weighted Cov', metrics.Cov('X', 'Y', False, weight='w')),
+    ('Biased Weighted Cov', metrics.Cov('X', 'Y', True, weight='w')),
+    ('Weighted Cov ddof', metrics.Cov('X', 'Y', False, 2, 'w')),
+    ('Biased Weighted Cov ddof', metrics.Cov('X', 'Y', True, 2, 'w')),
+    ('Fweighted Cov', metrics.Cov('X', 'Y', False, fweight='w2')),
+    ('Biased Fweighted Cov', metrics.Cov('X', 'Y', True, fweight='w2')),
+    ('Fweighted Cov ddof', metrics.Cov('X', 'Y', False, 2, fweight='w2')),
+    ('Biased Fweighted Cov ddof', metrics.Cov('X', 'Y', True, 2, fweight='w2')),
+    ('Weighted and fweighted Cov', metrics.Cov('X', 'Y', False, None, 'w',
+                                               'w2')),
+    ('Biased Weighted and fweighted Cov',
+     metrics.Cov('X', 'Y', True, None, 'w', 'w2')),
+    ('Weighted and fweighted Cov ddof',
+     metrics.Cov('X', 'Y', False, 2, 'w', 'w2')),
+    ('Biased Weighted and fweighted Cov ddof',
+     metrics.Cov('X', 'Y', True, 2, 'w', 'w2')),
+    ('Correlation', metrics.Correlation('X', 'Y')),
+    ('Weighted Correlation', metrics.Correlation('X', 'Y', 'w'))
 ]
 PRECOMPUTABLE_METRICS_BS = PRECOMPUTABLE_METRICS_JK + [
     ('Max', metrics.Max('X')),

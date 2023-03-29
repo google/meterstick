@@ -950,11 +950,26 @@ class SimpleMetricTest(unittest.TestCase):
         (self.df.X - self.df.X.mean()) * (self.df.Y - self.df.Y.mean()))
     self.assertEqual(output, expected)
 
+  def test_fweighted_cov(self):
+    metric = metrics.Cov('X', 'Y', fweight='Y')
+    output = metric.compute_on(self.df)
+    expected = np.cov(self.df.X, self.df.Y, fweights=self.df.Y)[0, 1]
+    expected = pd.DataFrame({'Y-fweighted cov(X, Y)': [expected]})
+    testing.assert_frame_equal(output, expected)
+
   def test_weighted_cov(self):
     metric = metrics.Cov('X', 'Y', weight='Y')
     output = metric.compute_on(self.df)
     expected = np.cov(self.df.X, self.df.Y, aweights=self.df.Y)[0, 1]
     expected = pd.DataFrame({'Y-weighted cov(X, Y)': [expected]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_weighted_and_fweighted_cov(self):
+    metric = metrics.Cov('X', 'Y', weight='Y', fweight='X')
+    output = metric.compute_on(self.df)
+    expected = np.cov(
+        self.df.X, self.df.Y, aweights=self.df.Y, fweights=self.df.X)[0, 1]
+    expected = pd.DataFrame({'X-fweighted Y-weighted cov(X, Y)': [expected]})
     testing.assert_frame_equal(output, expected)
 
   def test_cov_split_by_not_df(self):
@@ -997,6 +1012,11 @@ class SimpleMetricTest(unittest.TestCase):
     expected = pd.DataFrame({'cov(X, Y)': [cov_a, cov_b]}, index=['A', 'B'])
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
+
+  def test_cov_invalid_ddof(self):
+    df = pd.DataFrame({'X': np.random.rand(3), 'w': np.array([1, 1, 2])})
+    m = metrics.Cov('X', 'X', ddof=5, fweight='w')
+    self.assertEqual(m.compute_on(df, return_dataframe=False), np.inf)
 
 
 class CompositeMetric(unittest.TestCase):
@@ -1509,6 +1529,8 @@ class TestCaching(parameterized.TestCase):
         metrics.Cov('x', 'y', False),
         metrics.Cov('x', 'y', True, 3),
         metrics.Cov('x', 'y', True, weight='w'),
+        metrics.Cov('x', 'y', True, fweight='w'),
+        metrics.Cov('x', 'y', True, weight='w', fweight='w'),
     ]
     fingerprints = set([m.get_fingerprint() for m in distinct_metrics])
     self.assertLen(fingerprints, len(distinct_metrics))

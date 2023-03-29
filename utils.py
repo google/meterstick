@@ -382,5 +382,115 @@ class MaybeBadSqlModeError(Exception):
         'the query being too large/complex, you can try %s') % self.get_msg()
 
 
+def add_auxiliary_cols(auxiliary_cols,
+                       df: Optional[pd.DataFrame] = None,
+                       prefix: str = ''):
+  """Parses auxiliary_cols from Metric.get_auxiliary_cols and adds them to df.
+
+  Some Metrics can be expressed by simpler Metrics. For example, Dot(x, y) is
+  equivalent to Sum(x * y). However, column `x * y` doesn't necessarily exist in
+  df so we need to create it. Here we compute the column `x * y` and add it to
+  df in-place.
+
+  Args:
+    auxiliary_cols: A list of tuples. Each tuple represents an auxiliary column
+      that needs to be added. The tuple must have three elements. The second
+      element stands for the operator while the rest are the inputs. For
+      example, ('x', '*', 'y') means we need to add an auxiliary column that
+      equals to df.x * df.y. The inputs can also be constants. ('x', '/', 2)
+      stands for an auxiliary column that equals to df.x / 2. The inputs can
+      also be another tuple that stands for an auxiliary column. For example,
+      (('x', '+', 'y'), '-', 'z') stands for a column equals df.x + df.y - df.z.
+      The nesting can be indefinite. The operator can be one of ('+', '-', '*' ,
+      '/', '**') or a function that takes two args and returns one column.
+    df: The dataframe we compute on. We adds the auxiliary columns to it
+      in-place. If it's None, then we skip the computation.
+    prefix: The prefix added to the names of auxiliary columns so they won't
+      collide with existing columns.
+
+  Returns:
+    df with auxiliary columns added.
+    The names of the auxiliary columns added.
+  """
+  auxiliary_col_names = []
+  for c in auxiliary_cols or ():
+    name, res = parse_auxiliary_col(c, df)
+    name = prefix + name
+    if df is not None:
+      if name == prefix + 'lambda':
+        while name in df:
+          name += '_'
+      if name not in df:
+        df[name] = res
+    auxiliary_col_names.append(name)
+  return df, auxiliary_col_names
+
+
+def parse_auxiliary_col(auxiliary_col, df: Optional[pd.DataFrame] = None):
+  """Parses an auxiliary_col and computes it.
+
+  Args:
+    auxiliary_col: One element of the auxiliary_cols in add_auxiliary_cols().
+    df: The same df in add_auxiliary_cols().
+
+  Returns:
+    The generated name of the auxiliary column. Note that the name is also a
+    valid SQL expression. When called in compute_on(), the name is used as the
+    column name of the auxiliary column while when called in compute_on_sql(),
+    it's directly used to construct the SQL query.
+    The result of the auxiliary column.
+  """
+  if isinstance(auxiliary_col, str):
+    return auxiliary_col, df[auxiliary_col] if df is not None else None
+  if isinstance(auxiliary_col, (float, int)):
+    return str(auxiliary_col), auxiliary_col
+  if not isinstance(auxiliary_col, tuple):
+    raise ValueError('auxiliary_col must be a tuple/str/number but got %s.' %
+                     auxiliary_col)
+  if len(auxiliary_col) != 3:
+    raise ValueError('auxiliary_col must be length-3 but got %s.' %
+                     auxiliary_col)
+  col0, fn, col1 = auxiliary_col
+  name0, col0 = parse_auxiliary_col(col0, df)
+  name1, col1 = parse_auxiliary_col(col1, df)
+  if fn in ('+', '*'):
+    (name0, col0), (name1, col1) = sorted(((name0, col0), (name1, col1)))
+  if callable(fn):
+    name = 'lambda'
+    res = fn(col0, col1) if df is not None else None
+  elif fn == '+':
+    name = '(%s + %s)' % (name0, name1)
+    res = col0 + col1 if df is not None else None
+  elif fn == '-':
+    name = '(%s - %s)' % (name0, name1)
+    res = col0 - col1 if df is not None else None
+  elif fn == '*':
+    name = '(%s * %s)' % (name0, name1)
+    res = col0 * col1 if df is not None else None
+  elif fn == '/':
+    name = '(%s / %s)' % (name0, name1)
+    res = col0 / col1 if df is not None else None
+  elif fn == '**':
+    name = 'POWER(%s, %s)' % (name0, name1)
+    res = col0**col1 if df is not None else None
+  return name, res
+
+
+def get_unique_prefix(df):
+  prefix = 'meterstick_tmp:'
+  while any(str(c).startswith(prefix) for c in df.columns):
+    prefix += ':'
+  return prefix
+
+
+def get_equivalent_metric(m, df=None, prefix=''):
+  """Gets the equivalent Metric of m and adds auxiliary columns to df."""
+  if df is not None and not prefix:
+    prefix = get_unique_prefix(df)
+  df, auxiliary_cols = add_auxiliary_cols(m.get_auxiliary_cols(), df, prefix)
+  equiv = m.get_equivalent(*auxiliary_cols)
+  return equiv, df
+
+
 def is_metric(m):
   return hasattr(m, 'compute_on')

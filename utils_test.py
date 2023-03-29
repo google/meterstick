@@ -316,6 +316,33 @@ class UtilsTest(unittest.TestCase):
       utils.get_extra_split_by(m)
     self.assertEqual(str(cm.exception), 'Incompatible split_by!')
 
+  def test_get_unique_prefix(self):
+    df = pd.DataFrame([[0, 1]], columns=['meterstick_tmp::', 'b'])
+    self.assertEqual(utils.get_unique_prefix(df), 'meterstick_tmp:::')
+
+  def test_get_equivalent_metric_no_df(self):
+    m = metrics.Mean('x', where='a')
+    output, _ = utils.get_equivalent_metric(m)
+    expected = metrics.Sum('x') / metrics.Count('x')
+    expected.where = 'a'
+    expected.name = 'mean(x)'
+    self.assertEqual(output, expected)
+
+  def test_get_equivalent_metric_with_df(self):
+    m = metrics.Dot('x', 'y', name='foo', where='a')
+    df = pd.DataFrame({'x': [1, 2], 'y': [2, 3]})
+    output, _ = utils.get_equivalent_metric(m, df)
+    expected = metrics.Sum('meterstick_tmp:(x * y)')
+    expected.where = 'a'
+    expected.name = 'foo'
+    expected_df = pd.DataFrame({
+        'x': [1, 2],
+        'y': [2, 3],
+        'meterstick_tmp:(x * y)': [2, 6]
+    })
+    self.assertEqual(output, expected)
+    testing.assert_frame_equal(df, expected_df)
+
 
 if __name__ == '__main__':
   unittest.main()
