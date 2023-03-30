@@ -17,13 +17,26 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import copy
 from typing import Iterable, List, Optional, Text, Union
+
 import pandas as pd
+
+
+CACHE_SIZE_LIMIT = 100
 
 
 def get_name(obj):
   return getattr(obj, 'name', str(obj))
+
+
+class LRU(collections.OrderedDict):
+
+  def __setitem__(self, key, value):
+    super(LRU, self).__setitem__(key, value)
+    while len(self) > CACHE_SIZE_LIMIT:
+      self.popitem(last=False)
 
 
 class CacheKey():

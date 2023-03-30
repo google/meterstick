@@ -184,7 +184,7 @@ class Metric(object):
                compute_slices=None,
                final_compute=None):
     self.name = name
-    self.cache = {}
+    self.cache = utils.LRU()
     self.cache_key = None
     self.children = [children] if isinstance(children,
                                              Metric) else children or []
@@ -364,7 +364,7 @@ class Metric(object):
       Final result returned to user. If split_by, it's a pd.Series or a
       pd.DataFrame, otherwise it could be a base type.
     """
-    self.cache = {} if cache is None else cache
+    self.cache = utils.LRU() if cache is None else cache
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
     try:
       cache_key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
@@ -641,7 +641,7 @@ class Metric(object):
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
-    self.cache = {} if cache is None else cache
+    self.cache = utils.LRU() if cache is None else cache
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
     try:
       cache_key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
