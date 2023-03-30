@@ -1411,6 +1411,7 @@ class TestCaching(parameterized.TestCase):
     self.assertIsNone(m2.cache_key)
     self.assertIsNone(m3.cache_key)
     self.assertIsNone(m.cache_key)
+    self.assertEmpty(m.cache)
 
   def test_custom_compute_caching(self):
     fn = lambda x: x['X'].sum()
@@ -1421,6 +1422,7 @@ class TestCaching(parameterized.TestCase):
         metrics.Metric, 'compute_through', autospec=True) as mock_fn:
       m.compute_on(self.df, return_dataframe=False)
     mock_fn.assert_called_once()
+    self.assertEmpty(m.cache)
 
   def test_cache_in_multiple_runs(self):
     m = metrics.Count('X')
@@ -1445,7 +1447,9 @@ class TestCaching(parameterized.TestCase):
     except KeyError:
       pass
     self.assertIsNone(sum_x.cache_key)
+    self.assertEmpty(sum_x.cache)
     self.assertIsNone(sum_fail.cache_key)
+    self.assertEmpty(sum_fail.cache)
 
   def test_simple_metric_caching_split_by(self):
     m = metrics.Count('X')
@@ -1458,9 +1462,10 @@ class TestCaching(parameterized.TestCase):
     m = metrics.Count('X')
     with mock.patch.object(
         m, 'compute_through', return_value='a', autospec=True) as mock_fn:
-      m.compute_on(self.df, 'grp')
+      m.compute_on(self.df, 'grp', cache_key='a')
       output = m.compute_on(
-          self.df, ['grp'], return_dataframe=False, cache=m.cache)
+          self.df, ['grp'], return_dataframe=False, cache_key='a', cache=m.cache
+      )
 
     mock_fn.assert_called_once_with(self.df, ['grp'])
     self.assertEqual('a', output)
@@ -1476,9 +1481,9 @@ class TestCaching(parameterized.TestCase):
 
   @parameterized.named_parameters(*equivalent_metrics)
   def test_equivalent_metrics(self, m1, m2):
-    expected = m1.compute_on(self.df)
+    expected = m1.compute_on(self.df, cache_key='foo')
     expected.columns = [m2.name]
-    output = m2.compute_on(None, cache=m1.cache)
+    output = m2.compute_on(None, cache_key='foo', cache=m1.cache)
     testing.assert_frame_equal(output, expected)
 
   def test_filter_has_effect(self):

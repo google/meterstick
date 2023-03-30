@@ -177,6 +177,7 @@ class ModelsTest(parameterized.TestCase):
     mock_fn.assert_not_called()
     self.assertEqual(output.shape, expected.shape)
     self.assertTrue((output.values == 0).all())
+    self.assertEmpty(m.cache)
 
 
 class LogisticRegressionTest(absltest.TestCase):

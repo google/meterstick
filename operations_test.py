@@ -2206,6 +2206,7 @@ class CachingTest(parameterized.TestCase):
         op, operations.Bootstrap) else 2
 
     self.assertEqual(actual_call_ct, expected_call_ct)
+    self.assertEmpty(op.cache)
 
   @parameterized.named_parameters(*OPERATIONS)
   def test_filter_at_different_levels(self, op):
@@ -2234,6 +2235,7 @@ class CachingTest(parameterized.TestCase):
 
     self.assertEqual(actual_call_ct, 2)
     testing.assert_frame_equal(output, expected)
+    self.assertEmpty(m.cache)
 
   def test_different_metrics_have_different_fingerprints(self):
     distinct_ops = [

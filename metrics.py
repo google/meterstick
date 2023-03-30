@@ -184,7 +184,7 @@ class Metric(object):
                compute_slices=None,
                final_compute=None):
     self.name = name
-    self.cache = utils.LRU()
+    self.cache = {}
     self.cache_key = None
     self.children = [children] if isinstance(children,
                                              Metric) else children or []
@@ -364,21 +364,22 @@ class Metric(object):
       Final result returned to user. If split_by, it's a pd.Series or a
       pd.DataFrame, otherwise it could be a base type.
     """
-    self.cache = utils.LRU() if cache is None else cache
+    self.cache = {} if cache is None else cache
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
     try:
-      cache_key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
-      if self.in_cache(cache_key):
-        raw_res = self.find_all_in_cache(cache_key)
+      key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
+      if self.in_cache(key):
+        raw_res = self.find_all_in_cache(key)
       else:
-        self.cache_key = cache_key
+        self.cache_key = key
         raw_res = self.compute_through(df, split_by)
-        self.save_to_cache(cache_key, raw_res)
+        self.save_to_cache(key, raw_res)
 
       res = self.manipulate(raw_res, melted, return_dataframe)
       return self.final_compute(res, melted, return_dataframe, split_by, df)
     finally:
-      self.clean_up_cache()
+      if cache_key is None:  # Only root metric can have None as cache_key
+        self.clean_up_cache()
 
   def precompute(self, df, split_by):
     del split_by  # Useful in derived classes.
@@ -442,8 +443,14 @@ class Metric(object):
                              cache_key=None):
     """Computes a util metric with caching and filtering handled correctly."""
     cache_key = self.wrap_cache_key(cache_key, split_by)
-    return metric.compute_on(df, split_by, melted, return_dataframe, cache_key,
-                             self.cache)
+    return metric.compute_on(
+        df,
+        split_by,
+        melted,
+        return_dataframe,
+        cache_key,
+        self.cache,
+    )
 
   def compute_util_metric_on_sql(self,
                                  metric,
@@ -455,8 +462,9 @@ class Metric(object):
                                  cache_key=None):
     """Computes a util metric with caching and filtering handled correctly."""
     cache_key = self.wrap_cache_key(cache_key, split_by)
-    return metric.compute_on_sql(table, split_by, execute, melted, mode,
-                                 cache_key, self.cache)
+    return metric.compute_on_sql(
+        table, split_by, execute, melted, mode, cache_key, self.cache
+    )
 
   @staticmethod
   def group(df, split_by=None):
@@ -550,9 +558,20 @@ class Metric(object):
     return tuple(sorted(fingerprint.items()))
 
   def clean_up_cache(self):
-    # We don't reset self.cache so people can use it in future computation.
-    # If not reused, self.cache is reset at the beginning of every computation.
-    self.cache_key = None
+    """Flushes the cache when a Metric tree has been computed.
+
+    A Metric and all the descendants form a tree. When a computation is started
+    from a MetricList or CompositeMetric, we know the input DataFrame is not
+    going to change in the computation. So even if user doesn't ask for caching,
+    we still enable it, but we need to clean things up when done. As the results
+    need to be cached until all Metrics in the tree have been computed, we
+    should only clean up at the end of the computation of the entry/top Metric.
+    We recognize the top Metric by looking at the cache_key. All descendants
+    will have it assigned as RESERVED_KEY but the entry Metric's will be None.
+    """
+    self.cache.clear()
+    for m in self.traverse():
+      m.cache_key = None
 
   def to_dot(self, strict=True):
     """Represents the Metric in DOT language.
@@ -641,14 +660,14 @@ class Metric(object):
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
-    self.cache = utils.LRU() if cache is None else cache
+    self.cache = {} if cache is None else cache
     split_by = [split_by] if isinstance(split_by, str) else split_by or []
     try:
-      cache_key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
-      if self.in_cache(cache_key):
-        res = self.find_all_in_cache(cache_key)
+      key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
+      if self.in_cache(key):
+        res = self.find_all_in_cache(key)
       else:
-        self.cache_key = cache_key
+        self.cache_key = key
         raw_res = self.compute_through_sql(table, split_by, execute, mode)
         res = raw_res
         # For simple metrics we save a pd.Series to be consistent with
@@ -657,11 +676,12 @@ class Metric(object):
             raw_res,
             pd.DataFrame) and raw_res.shape[1] == 1 and not is_operation(self):
           raw_res = raw_res.iloc[:, 0]
-        self.save_to_cache(cache_key, raw_res)
+        self.save_to_cache(key, raw_res)
       res = self.manipulate(res, melted, apply_name_tmpl=False)
       return self.final_compute(res, melted, True, split_by, table)
     finally:
-      self.clean_up_cache()
+      if cache_key is None:  # Only root metric can have None as cache_key
+        self.clean_up_cache()
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
