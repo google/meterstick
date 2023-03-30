@@ -126,7 +126,7 @@ def apply_algorithm_to_sufficient_stats_elements(sufficient_stats_elements,
     # Special characters in split_by got escaped during SQL execution.
     sufficient_stats_elements.columns = split_by + list(
         sufficient_stats_elements.columns)[len(split_by):]
-    return sufficient_stats_elements.groupby(split_by).apply(fn)
+    return sufficient_stats_elements.groupby(split_by, observed=True).apply(fn)
   return fn(sufficient_stats_elements)
 
 
@@ -1128,7 +1128,9 @@ def fista_for_logistic_regression(
   else:
     sufficient_stats.columns = split_by + list(
         sufficient_stats.columns)[len(split_by):]
-    step_size = sufficient_stats.groupby(split_by).apply(get_step_size)
+    step_size = sufficient_stats.groupby(split_by, observed=True).apply(
+        get_step_size
+    )
     # cond is sorted. We need to make sure step_size and sufficient_stats are in
     # the same order.
     step_size.sort_index(inplace=True)

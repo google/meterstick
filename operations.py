@@ -106,7 +106,7 @@ class Operation(metrics.Metric):
       for i in super(Operation, self).split_data(df, split_by):
         yield i
     else:
-      keys, indices = zip(*df.groupby(split_by).groups.items())
+      keys, indices = zip(*df.groupby(split_by, observed=True).groups.items())
       for k, idx in zip(keys, indices):
         yield df.loc[idx.unique()].droplevel(split_by), k
 
@@ -179,8 +179,11 @@ class Distribution(Operation):
                                        **kwargs)
 
   def compute_on_children(self, children, split_by):
-    total = children.groupby(
-        level=split_by).sum() if split_by else children.sum()
+    total = (
+        children.groupby(level=split_by, observed=True).sum()
+        if split_by
+        else children.sum()
+    )
     return children / total
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
@@ -633,7 +636,9 @@ class PrePostChange(PercentChange):
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
     if split_by:
-      covariates = covariates - covariates.groupby(split_by).mean()
+      covariates = (
+          covariates - covariates.groupby(split_by, observed=True).mean()
+      )
     else:
       covariates = covariates - covariates.mean()
     # Align child with covariates in case there is any missing slices.
@@ -735,7 +740,9 @@ class CUPED(AbsoluteChange):
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
     if split_by:
-      covariates = covariates - covariates.groupby(split_by).mean()
+      covariates = (
+          covariates - covariates.groupby(split_by, observed=True).mean()
+      )
     else:
       covariates = covariates - covariates.mean()
     # Align child with covariates in case there is any missing slices.
@@ -747,7 +754,7 @@ class CUPED(AbsoluteChange):
     def adjust(df_slice):
       child_slice = df_slice.iloc[:, :len_child]
       cov = df_slice.iloc[:, len_child:]
-      adjusted = df_slice.groupby(self.extra_index).mean()
+      adjusted = df_slice.groupby(self.extra_index, observed=True).mean()
       for c in aligned.iloc[:, :len_child]:
         theta = lm.fit(cov, child_slice[c]).coef_
         adjusted[c] = adjusted[c] - adjusted.iloc[:, len_child:].dot(theta)
@@ -865,7 +872,7 @@ class MH(Comparison):
     weights = 1. / (na + nb)
     to_split = [i for i in ka.index.names if i not in self.stratified_by]
     res = ((ka * nb * weights).groupby(to_split).sum() /
-           (kb * na * weights).groupby(to_split).sum() - 1) * 100
+           (kb * na * weights).groupby(to_split, observed=True).sum() - 1) * 100
     res.name = child.name
     to_split = [i for i in to_split if i not in self.extra_index]
     if to_split:
@@ -1787,7 +1794,7 @@ class Jackknife(MetricWithCI):
     split_by_with_unit = list(cache_key.split_by)
     split_by = [i for i in split_by_with_unit if i != self.unit]
     if split_by:
-      total = each_bucket.groupby(level=split_by).sum()
+      total = each_bucket.groupby(level=split_by, observed=True).sum()
     else:
       total = each_bucket.sum()
     key = copy.deepcopy(cache_key)
@@ -1830,7 +1837,7 @@ class Jackknife(MetricWithCI):
     else:
       df = df.set_index(split_by)
       max_slices = len(df.index.unique())
-      for lvl, idx in df.groupby(self.unit).groups.items():
+      for lvl, idx in df.groupby(self.unit, observed=True).groups.items():
         df_rest = df[df[self.unit] != lvl]
         unique_slice_val = idx.unique()
         if len(unique_slice_val) != max_slices:
@@ -2026,7 +2033,7 @@ class Bootstrap(MetricWithCI):
         yield None, to_sample.sample(frac=1, replace=True)
     else:
       grp_by = split_by + [self.unit] if split_by else self.unit
-      grped = df.groupby(grp_by)
+      grped = df.groupby(grp_by, observed=True)
       idx = grped.indices
       units_split_by = df[grp_by].drop_duplicates()
       for _ in range(self.n_replicates):

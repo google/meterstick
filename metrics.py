@@ -324,7 +324,7 @@ class Metric(object):
     if not split_by:
       yield df, None
     else:
-      for k, idx in df.groupby(split_by).indices.items():
+      for k, idx in df.groupby(split_by, observed=True).indices.items():
         yield df.iloc[idx], k
 
   def compute_through(self, df, split_by: Optional[List[Text]] = None):
@@ -460,7 +460,7 @@ class Metric(object):
 
   @staticmethod
   def group(df, split_by=None):
-    return df.groupby(split_by) if split_by else df
+    return df.groupby(split_by, observed=True) if split_by else df
 
   def to_dataframe(self, res):
     if isinstance(res, pd.DataFrame):
@@ -1498,7 +1498,7 @@ class Dot(SimpleMetric):
       return prod.mean(**self.kwargs) if self.normalize else prod.sum(
           **self.kwargs)
     df['_meterstick_dot_helper'] = df[self.var] * df[self.var2]
-    grped = df.groupby(split_by)['_meterstick_dot_helper']
+    grped = df.groupby(split_by, observed=True)['_meterstick_dot_helper']
     res = grped.mean() if self.normalize else grped.sum()
     df.drop('_meterstick_dot_helper', axis=1, inplace=True)
     return res

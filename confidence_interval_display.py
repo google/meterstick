@@ -150,7 +150,11 @@ def _sorted_long_to_wide(df, dims, sort_by):
   # Spread metrics in Metric column to individual columns, i.e., long to wide.
   # pivot_table() doesn't work if there's NA.
   # https://github.com/pandas-dev/pandas/issues/18030#issuecomment-340442023
-  df = df.groupby(existing_index_cols + ['Metric']).agg('mean').unstack(-1)
+  df = (
+      df.groupby(existing_index_cols + ['Metric'], observed=True)
+      .agg('mean')
+      .unstack(-1)
+  )
   if not sort_by:
     sorting_cols = existing_index_cols
     ascending = [s != 'Is_Control' for s in sorting_cols]
@@ -172,7 +176,7 @@ def _sorted_long_to_wide(df, dims, sort_by):
     df = df.sort_values(sorting_cols, ascending=ascending)
   # Collects [Value, Ratio, CI_Lower, CI_Upper] for each Metric * slice. val_col
   # might be dropped during pivot b/c of na, so we make a dict first.
-  df = df.groupby(level=1, axis=1).apply(
+  df = df.groupby(level=1, axis=1, observed=True).apply(
       lambda x: x.droplevel(1, 1).apply(lambda row: row.to_dict(), 1))
   df = df.applymap(lambda x: [x.get(k) for k in val_cols]).reset_index()
   if '_placeholder' == existing_index_cols[0]:
@@ -484,7 +488,9 @@ def add_control_rows(df, dims):
   control_vals = expr_rows.loc[:, [
       'Experiment_Id', 'Control_Id', 'Control_Value', 'Metric'
   ] + dims]
-  grp = control_vals.groupby(['Metric', 'Control_Id'] + dims)['Control_Value']
+  grp = control_vals.groupby(['Metric', 'Control_Id'] + dims, observed=True)[
+      'Control_Value'
+  ]
   control_vals = grp.agg([max, min])
   thresh = 1**-5
   ambiguous_vals = control_vals[control_vals['max'] -
