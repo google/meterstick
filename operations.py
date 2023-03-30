@@ -1804,7 +1804,7 @@ class Jackknife(MetricWithCI):
         loo = loo.reorder_levels(split_by_with_unit)
       self.save_to_cache(key, loo)
 
-  def get_samples(self, df, split_by=None):
+  def get_samples(self, df, split_by=None, return_cache_key=False):
     """Yields leave-one-out (LOO) DataFrame with level value.
 
     If self.can_precompute(), this function will not get triggered because the
@@ -1813,9 +1813,11 @@ class Jackknife(MetricWithCI):
     Args:
       df: The DataFrame to compute on.
       split_by: The columns that we use to split the data.
+      return_cache_key: If to return a cache key.
 
     Yields:
-      ('_RESERVED', 'Jackknife', unit, i) and the leave-i-out DataFrame.
+      ('_RESERVED', 'Jackknife', unit, i) if return_cache_key else None, and the
+      leave-i-out DataFrame.
     """
     levels = df[self.unit].unique()
     if len(levels) < 2:
@@ -1823,9 +1825,8 @@ class Jackknife(MetricWithCI):
 
     if not split_by:
       for lvl in levels:
-        yield ('_RESERVED', 'Jackknife', self.unit, lvl), df[
-            df[self.unit] != lvl
-        ]
+        key = ('_RESERVED', 'Jackknife', self.unit, lvl)
+        yield key if return_cache_key else None, df[df[self.unit] != lvl]
     else:
       df = df.set_index(split_by)
       max_slices = len(df.index.unique())
@@ -1835,7 +1836,8 @@ class Jackknife(MetricWithCI):
         if len(unique_slice_val) != max_slices:
           # Keep only the slices that appeared in the dropped bucket.
           df_rest = df_rest[df_rest.index.isin(unique_slice_val)]
-        yield ('_RESERVED', 'Jackknife', self.unit, lvl), df_rest.reset_index()
+        key = ('_RESERVED', 'Jackknife', self.unit, lvl)
+        yield key if return_cache_key else None, df_rest.reset_index()
 
   def compute_children(self,
                        df: pd.DataFrame,
