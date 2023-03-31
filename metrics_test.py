@@ -27,63 +27,6 @@ from pandas import testing
 import unittest
 
 
-class MetricTest(unittest.TestCase):
-  """Tests general features of Metric."""
-
-  df = pd.DataFrame({'X': [0, 1, 2, 3], 'Y': [0, 1, 1, 2]})
-
-  def test_precompute(self):
-    metric = metrics.Metric(
-        'foo',
-        precompute=lambda df, split_by: df[split_by],
-        compute=lambda x: x.sum().values[0])
-    output = metric.compute_on(self.df, 'Y')
-    expected = pd.DataFrame({'foo': [0, 2, 2]}, index=range(3))
-    expected.index.name = 'Y'
-    testing.assert_frame_equal(output, expected)
-
-  def test_compute(self):
-    metric = metrics.Metric('foo', compute=lambda x: x['X'].sum())
-    output = metric.compute_on(self.df)
-    expected = metrics.Sum('X', 'foo').compute_on(self.df)
-    testing.assert_frame_equal(output, expected)
-
-  def test_postcompute(self):
-
-    def postcompute(values, split_by):
-      del split_by
-      return values / values.sum()
-
-    output = metrics.Sum('X', postcompute=postcompute).compute_on(self.df, 'Y')
-    expected = operations.Distribution('Y',
-                                       metrics.Sum('X')).compute_on(self.df)
-    expected.columns = ['sum(X)']
-    testing.assert_frame_equal(output.astype(float), expected)
-
-  def test_compute_slices(self):
-
-    def _sum(df, split_by):
-      if split_by:
-        df = df.groupby(split_by)
-      return df['X'].sum()
-
-    metric = metrics.Metric('foo', compute_slices=_sum)
-    output = metric.compute_on(self.df)
-    expected = metrics.Sum('X', 'foo').compute_on(self.df)
-    testing.assert_frame_equal(output, expected)
-
-  def test_final_compute(self):
-    metric = metrics.Metric(
-        'foo', compute=lambda x: x, final_compute=lambda *_: 2)
-    output = metric.compute_on(None)
-    self.assertEqual(output, 2)
-
-  def test_pipeline_operator(self):
-    m = metrics.Count('X')
-    testing.assert_frame_equal(
-        m.compute_on(self.df), m | metrics.compute_on(self.df))
-
-
 class SimpleMetricTest(unittest.TestCase):
 
   df = pd.DataFrame({
@@ -91,6 +34,11 @@ class SimpleMetricTest(unittest.TestCase):
       'Y': [3, 1, 1, 4, 4, 3, 5],
       'grp': ['A'] * 3 + ['B'] * 4
   })
+
+  def test_pipeline_operator(self):
+    m = metrics.Count('X')
+    testing.assert_frame_equal(
+        m.compute_on(self.df), m | metrics.compute_on(self.df))
 
   def test_list_where(self):
     metric = metrics.Mean('X', where=['grp == "A"'])
@@ -886,11 +834,6 @@ class SimpleMetricTest(unittest.TestCase):
     output = metric.compute_on(self.df, return_dataframe=False)
     self.assertEqual(output, self.df.X.corr(self.df.Y, method='kendall'))
 
-  def test_correlation_kwargs(self):
-    metric = metrics.Correlation('X', 'Y', min_periods=10)
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertTrue(pd.isnull(output))
-
   def test_correlation_split_by_not_df(self):
     metric = metrics.Correlation('X', 'Y')
     output = metric.compute_on(self.df, 'grp', return_dataframe=False)
@@ -1413,17 +1356,6 @@ class TestCaching(parameterized.TestCase):
     self.assertIsNone(m.cache_key)
     self.assertEmpty(m.cache)
 
-  def test_custom_compute_caching(self):
-    fn = lambda x: x['X'].sum()
-    m1 = metrics.Metric('foo', compute=fn)
-    m2 = metrics.Metric('foo', compute=fn)
-    m = metrics.MetricList((m1, m2))
-    with mock.patch.object(
-        metrics.Metric, 'compute_through', autospec=True) as mock_fn:
-      m.compute_on(self.df, return_dataframe=False)
-    mock_fn.assert_called_once()
-    self.assertEmpty(m.cache)
-
   def test_cache_in_multiple_runs(self):
     m = metrics.Count('X')
     with mock.patch.object(m, 'compute_through', autospec=True) as mock_fn:
@@ -1539,14 +1471,6 @@ class TestCaching(parameterized.TestCase):
     ]
     fingerprints = set([m.get_fingerprint() for m in distinct_metrics])
     self.assertLen(fingerprints, len(distinct_metrics))
-
-  def test_kwargs(self):
-    df = pd.DataFrame({'X': [1, 1]})
-    s1 = metrics.Sum('X')
-    s2 = metrics.Sum('X', min_count=100)
-    output = metrics.MetricList([s1, s2]).compute_on(df)
-    expected = pd.DataFrame([[2, np.nan]], columns=['sum(X)'] * 2)
-    testing.assert_frame_equal(output, expected)
 
 
 if __name__ == '__main__':

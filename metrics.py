@@ -19,7 +19,7 @@ from __future__ import print_function
 
 import copy
 import itertools
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Text, Union
+from typing import Any, Iterable, List, Optional, Sequence, Text, Union
 
 from meterstick import sql
 from meterstick import utils
@@ -152,18 +152,12 @@ class Metric(object):
     additional_fingerprint_attrs: Additional attributes to be encoded into the
       fingerprint. The attribute value must be hashable, or a list/dict of
       hashables. See get_fingerprint() for how it's used.
-    precompute: A function. See the workflow chart above for its behavior.
-    compute: A function. See the workflow chart above for its behavior.
-    postcompute: A function. See the workflow chart above for its behavior.
-    compute_slices: A function. See the workflow chart above for its behavior.
-    final_compute: A function. See the workflow chart above for its behavior.
     extra_split_by: Used by Operation. See the doc there.
     extra_index: Used by Operation. See the doc there.
     computable_in_pure_sql: If the Metric can be completely computed in SQL. For
       example, all Models can't.
     name_tmpl: Used by Metrics that have children. It's applied to children's
       names in the output.
-    custom_fns: Custom functions assigned in the initialization.
     cache: A dict to store the result. It's shared across the Metric tree.
     cache_key: The key currently being used in computation.
   """
@@ -176,13 +170,7 @@ class Metric(object):
                name_tmpl=None,
                extra_split_by: Optional[Union[Text, Iterable[Text]]] = None,
                extra_index: Optional[Union[Text, Iterable[Text]]] = None,
-               additional_fingerprint_attrs: Optional[List[str]] = None,
-               *,
-               precompute=None,
-               compute: Optional[Callable[[pd.DataFrame], Any]] = None,
-               postcompute=None,
-               compute_slices=None,
-               final_compute=None):
+               additional_fingerprint_attrs: Optional[List[str]] = None):
     self.name = name
     self.cache = {}
     self.cache_key = None
@@ -201,22 +189,6 @@ class Metric(object):
     self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
     self.name_tmpl = name_tmpl
     self.cache_key = None
-    self.custom_fns = {}
-    if precompute:
-      self.precompute = precompute
-      self.custom_fns['precompute'] = precompute
-    if compute:
-      self.compute = compute
-      self.custom_fns['compute'] = compute
-    if postcompute:
-      self.postcompute = postcompute
-      self.custom_fns['postcompute'] = postcompute
-    if compute_slices:
-      self.compute_slices = compute_slices
-      self.custom_fns['compute_slices'] = compute_slices
-    if final_compute:
-      self.final_compute = final_compute
-      self.custom_fns['final_compute'] = final_compute
 
   @property
   def where(self):
@@ -296,6 +268,9 @@ class Metric(object):
       return self.compute_with_split_by(df)
 
   def compute_children(self, df, split_by):
+    raise NotImplementedError
+
+  def compute(self, df):
     raise NotImplementedError
 
   def compute_on_children(self, children, split_by):
@@ -550,8 +525,6 @@ class Metric(object):
         fingerprint[k] = val.get_fingerprint()
       elif val is not None:
         fingerprint[k] = val
-    for k, v in self.custom_fns.items():
-      fingerprint[k] = v
     for k, v in fingerprint.items():
       if not isinstance(v, str) and isinstance(v, Iterable):
         fingerprint[k] = tuple(list(v))
@@ -1385,31 +1358,20 @@ class SimpleMetric(Metric):
                name: Optional[Text] = None,
                name_tmpl=None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
-               additional_fingerprint_attrs: Optional[List[str]] = None,
-               **kwargs):
+               additional_fingerprint_attrs: Optional[List[str]] = None):
     name = name or name_tmpl.format(var)
     self.var = var
-    precompute = kwargs.pop('precompute', None)
-    postcompute = kwargs.pop('postcompute', None)
-    final_compute = kwargs.pop('final_compute', None)
-    self.kwargs = kwargs
-    additional_fingerprint_attrs = ['var', 'var2', 'kwargs'] + (
+    additional_fingerprint_attrs = ['var', 'var2'] + (
         additional_fingerprint_attrs or [])
     super(SimpleMetric, self).__init__(
         name,
         None,
         where,
         name_tmpl,
-        additional_fingerprint_attrs=additional_fingerprint_attrs,
-        precompute=precompute,
-        postcompute=postcompute,
-        final_compute=final_compute)
+        additional_fingerprint_attrs=additional_fingerprint_attrs)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
-    if self.kwargs:
-      raise ValueError('Cannot generate SQL for Metric with kwargs: %s.' %
-                       self.name)
     local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
     cols = self.get_sql_columns(local_filter)
     if cols:
@@ -1431,7 +1393,6 @@ class Count(SimpleMetric):
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
     distinct: Whether to count distinct values.
-    kwargs: Other kwargs passed to pd.DataFrame.count() or nunique().
     And all other attributes inherited from Metric.
   """
 
@@ -1439,18 +1400,15 @@ class Count(SimpleMetric):
                var: Text,
                name: Optional[Text] = None,
                where: Optional[Union[Text, Sequence[Text]]] = None,
-               distinct: bool = False,
-               **kwargs):
+               distinct: bool = False):
     self.distinct = distinct
     if distinct:
       name = name or 'count(distinct %s)' % str(var)
-    super(Count, self).__init__(var, name, 'count({})', where, ['distinct'],
-                                **kwargs)
+    super(Count, self).__init__(var, name, 'count({})', where, ['distinct'])
 
   def compute_slices(self, df, split_by=None):
     grped = self.group(df, split_by)[self.var]
-    return grped.nunique(**self.kwargs) if self.distinct else grped.count(
-        **self.kwargs)
+    return grped.nunique() if self.distinct else grped.count()
 
   def get_sql_columns(self, local_filter):
     if self.distinct:
@@ -1467,19 +1425,17 @@ class Sum(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.sum().
     And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
-    super(Sum, self).__init__(var, name, 'sum({})', where, **kwargs)
+               where: Optional[Union[Text, Sequence[Text]]] = None):
+    super(Sum, self).__init__(var, name, 'sum({})', where)
 
   def compute_slices(self, df, split_by=None):
-    return self.group(df, split_by)[self.var].sum(**self.kwargs)
+    return self.group(df, split_by)[self.var].sum()
 
   def get_sql_columns(self, local_filter):
     return sql.Column(self.var, 'SUM({})', self.name, local_filter)
@@ -1495,7 +1451,6 @@ class Dot(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.sum() or .mean().
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1504,19 +1459,16 @@ class Dot(SimpleMetric):
                var2: Text,
                normalize=False,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     self.var2 = var2
     self.normalize = normalize
     name_tmpl = ('mean({} * %s)' if normalize else 'sum({} * %s)') % str(var2)
-    super(Dot, self).__init__(var1, name, name_tmpl, where, ['normalize'],
-                              **kwargs)
+    super(Dot, self).__init__(var1, name, name_tmpl, where, ['normalize'])
 
   def compute_slices(self, df, split_by=None):
     if not split_by:
       prod = (df[self.var] * df[self.var2])
-      return prod.mean(**self.kwargs) if self.normalize else prod.sum(
-          **self.kwargs)
+      return prod.mean() if self.normalize else prod.sum()
     df['_meterstick_dot_helper'] = df[self.var] * df[self.var2]
     grped = df.groupby(split_by, observed=True)['_meterstick_dot_helper']
     res = grped.mean() if self.normalize else grped.sum()
@@ -1553,8 +1505,6 @@ class Mean(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.mean(). Only has effect if no
-      weight is specified.
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1562,11 +1512,9 @@ class Mean(SimpleMetric):
                var: Text,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     name_tmpl = '%s-weighted mean({})' % str(weight) if weight else 'mean({})'
-    super(Mean, self).__init__(var, name, name_tmpl, where, ['weight'],
-                               **kwargs)
+    super(Mean, self).__init__(var, name, name_tmpl, where, ['weight'])
     self.weight = weight
 
   def compute(self, df):
@@ -1578,7 +1526,7 @@ class Mean(SimpleMetric):
     if self.weight:
       # When there is weight, just loop through slices.
       return super(Mean, self).compute_slices(df, split_by)
-    return self.group(df, split_by)[self.var].mean(**self.kwargs)
+    return self.group(df, split_by)[self.var].mean()
 
   def get_sql_columns(self, local_filter):
     if not self.weight:
@@ -1604,19 +1552,17 @@ class Max(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.max().
     And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
-    super(Max, self).__init__(var, name, 'max({})', where, **kwargs)
+               where: Optional[Union[Text, Sequence[Text]]] = None):
+    super(Max, self).__init__(var, name, 'max({})', where)
 
   def compute_slices(self, df, split_by=None):
-    return self.group(df, split_by)[self.var].max(**self.kwargs)
+    return self.group(df, split_by)[self.var].max()
 
   def get_sql_columns(self, local_filter):
     return sql.Column(self.var, 'MAX({})', self.name, local_filter)
@@ -1630,19 +1576,17 @@ class Min(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.min().
     And all other attributes inherited from SimpleMetric.
   """
 
   def __init__(self,
                var: Text,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
-    super(Min, self).__init__(var, name, 'min({})', where, **kwargs)
+               where: Optional[Union[Text, Sequence[Text]]] = None):
+    super(Min, self).__init__(var, name, 'min({})', where)
 
   def compute_slices(self, df, split_by=None):
-    return self.group(df, split_by)[self.var].min(**self.kwargs)
+    return self.group(df, split_by)[self.var].min()
 
   def get_sql_columns(self, local_filter):
     return sql.Column(self.var, 'MIN({})', self.name, local_filter)
@@ -1661,7 +1605,6 @@ class Quantile(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.quantile().
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1671,8 +1614,7 @@ class Quantile(SimpleMetric):
                weight: Optional[Text] = None,
                interpolation='linear',
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     if isinstance(quantile, (int, float)):
       self.one_quantile = True
     else:
@@ -1693,9 +1635,8 @@ class Quantile(SimpleMetric):
     self.quantile = quantile
     self.interpolation = interpolation
     self.weight = weight
-    super(Quantile,
-          self).__init__(var, name, name_tmpl, where,
-                         ['quantile', 'weight', 'interpolation'], **kwargs)
+    super(Quantile, self).__init__(var, name, name_tmpl, where,
+                                   ['quantile', 'weight', 'interpolation'])
 
   def compute(self, df):
     """Adapted from https://stackoverflow.com/a/29677616/12728137."""
@@ -1721,7 +1662,7 @@ class Quantile(SimpleMetric):
       # When there is weight, just loop through slices.
       return super(Quantile, self).compute_slices(df, split_by)
     res = self.group(df, split_by)[self.var].quantile(
-        self.quantile, interpolation=self.interpolation, **self.kwargs)
+        self.quantile, interpolation=self.interpolation)
     if self.one_quantile:
       return res
 
@@ -1765,8 +1706,6 @@ class Variance(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.var(). Only has effect if no
-      weight is specified.
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1775,13 +1714,12 @@ class Variance(SimpleMetric):
                unbiased: bool = True,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
     name_tmpl = '%s-weighted var({})' % str(weight) if weight else 'var({})'
     super(Variance, self).__init__(var, name, name_tmpl, where,
-                                   ['ddof', 'weight'], **kwargs)
+                                   ['ddof', 'weight'])
 
   def compute(self, df):
     if not self.weight:
@@ -1795,7 +1733,7 @@ class Variance(SimpleMetric):
     if self.weight:
       # When there is weight, just loop through slices.
       return super(Variance, self).compute_slices(df, split_by)
-    return self.group(df, split_by)[self.var].var(ddof=self.ddof, **self.kwargs)
+    return self.group(df, split_by)[self.var].var(ddof=self.ddof)
 
   def get_sql_columns(self, local_filter):
     if self.weight:
@@ -1830,8 +1768,6 @@ class StandardDeviation(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.std(). Only has effect if no
-      weight is specified.
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1840,13 +1776,12 @@ class StandardDeviation(SimpleMetric):
                unbiased: bool = True,
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     self.ddof = 1 if unbiased else 0
     self.weight = weight
     name_tmpl = '%s-weighted sd({})' % str(weight) if weight else 'sd({})'
     super(StandardDeviation, self).__init__(var, name, name_tmpl, where,
-                                            ['ddof', 'weight'], **kwargs)
+                                            ['ddof', 'weight'])
 
   def compute(self, df):
     if not self.weight:
@@ -1860,7 +1795,7 @@ class StandardDeviation(SimpleMetric):
     if self.weight:
       # When there is weight, just loop through slices.
       return super(StandardDeviation, self).compute_slices(df, split_by)
-    return self.group(df, split_by)[self.var].std(ddof=self.ddof, **self.kwargs)
+    return self.group(df, split_by)[self.var].std(ddof=self.ddof)
 
   def get_sql_columns(self, local_filter):
     if self.weight:
@@ -1884,8 +1819,6 @@ class CV(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to both pd.DataFrame.std() and
-      pd.DataFrame.mean().
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1893,15 +1826,13 @@ class CV(SimpleMetric):
                var: Text,
                unbiased: bool = True,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     self.ddof = 1 if unbiased else 0
-    super(CV, self).__init__(var, name, 'cv({})', where, ['ddof'], **kwargs)
+    super(CV, self).__init__(var, name, 'cv({})', where, ['ddof'])
 
   def compute_slices(self, df, split_by=None):
     var_grouped = self.group(df, split_by)[self.var]
-    return var_grouped.std(
-        ddof=self.ddof, **self.kwargs) / var_grouped.mean(**self.kwargs)
+    return var_grouped.std(ddof=self.ddof) / var_grouped.mean()
 
   def get_sql_columns(self, local_filter):
     if self.ddof == 1:
@@ -1931,8 +1862,6 @@ class Correlation(SimpleMetric):
       effect if no weight is specified.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to pd.DataFrame.corr(). Only has effect if no
-      weight is specified.
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -1942,8 +1871,7 @@ class Correlation(SimpleMetric):
                weight: Optional[Text] = None,
                name: Optional[Text] = None,
                method='pearson',
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     name_tmpl = 'corr({}, {})'
     if weight:
       name_tmpl = '%s-weighted corr({}, {})' % str(weight)
@@ -1953,7 +1881,7 @@ class Correlation(SimpleMetric):
     self.method = method
     self.weight = weight
     super(Correlation, self).__init__(var1, name, name_tmpl, where,
-                                      ['method', 'weight'], **kwargs)
+                                      ['method', 'weight'])
 
   def compute(self, df):
     if not self.weight:
@@ -1980,7 +1908,7 @@ class Correlation(SimpleMetric):
       # When there is weight, just loop through slices.
       return super(Correlation, self).compute_slices(df, split_by)
     return self.group(df, split_by)[self.var].corr(
-        df[self.var2], method=self.method, **self.kwargs)
+        df[self.var2], method=self.method)
 
   def get_sql_columns(self, local_filter):
     if self.weight:
@@ -2022,7 +1950,6 @@ class Cov(SimpleMetric):
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
-    kwargs: Other kwargs passed to np.cov().
     And all other attributes inherited from SimpleMetric.
   """
 
@@ -2034,8 +1961,7 @@ class Cov(SimpleMetric):
                weight: Optional[Text] = None,
                fweight: Optional[Text] = None,
                name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               **kwargs):
+               where: Optional[Union[Text, Sequence[Text]]] = None):
     name_tmpl = 'cov({}, {})'
     if weight:
       name_tmpl = '%s-weighted %s' % (str(weight), name_tmpl)
@@ -2050,7 +1976,7 @@ class Cov(SimpleMetric):
     self.weight = weight
     self.fweight = fweight
     super(Cov, self).__init__(var1, name, name_tmpl, where,
-                              ['bias', 'ddof', 'weight', 'fweight'], **kwargs)
+                              ['bias', 'ddof', 'weight', 'fweight'])
 
   def compute(self, df):
     return np.cov(
@@ -2059,8 +1985,7 @@ class Cov(SimpleMetric):
         bias=self.bias,
         ddof=self.ddof,
         aweights=df[self.weight] if self.weight else None,
-        fweights=df[self.fweight].astype(int) if self.fweight else None,
-        **self.kwargs)[0, 1]
+        fweights=df[self.fweight].astype(int) if self.fweight else None)[0, 1]
 
   def get_sql_columns(self, local_filter):
     """Get SQL columns."""

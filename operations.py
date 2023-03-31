@@ -647,14 +647,18 @@ class PrePostChange(PercentChange):
     len_child = child.shape[1]
     lm = linear_model.LinearRegression()
 
-    def adjust(df_slice):
-      child_slice = df_slice.iloc[:, :len_child]
-      cov = df_slice.iloc[:, len_child:]
-      adjusted = [lm.fit(cov, child_slice[c]).intercept_ for c in child_slice]
-      return pd.DataFrame([adjusted], columns=child_slice.columns)
+    # Define a custom Metric instead of using df.groupby().apply() because
+    # 1. It's faster. See the comments in Metric.compute_slices().
+    # 2. It ensures that the result is formatted correctly.
+    class Adjust(metrics.Metric):
 
-    adjusted = metrics.Metric('Adjusted', compute=adjust)
-    return adjusted.compute_on(aligned, split_by + self.extra_index)
+      def compute(self, df_slice):
+        child_slice = df_slice.iloc[:, :len_child]
+        cov = df_slice.iloc[:, len_child:]
+        adjusted = [lm.fit(cov, child_slice[c]).intercept_ for c in child_slice]
+        return pd.DataFrame([adjusted], columns=child_slice.columns)
+
+    return Adjust('').compute_on(aligned, split_by + self.extra_index)
 
   def compute_children_sql(self, table, split_by, execute, mode=None):
     child = super(PrePostChange,
@@ -750,18 +754,23 @@ class CUPED(AbsoluteChange):
     aligned = pd.concat([child, covariates], axis=1)
     len_child = child.shape[1]
     lm = linear_model.LinearRegression()
+    extra_index = self.extra_index
 
-    def adjust(df_slice):
-      child_slice = df_slice.iloc[:, :len_child]
-      cov = df_slice.iloc[:, len_child:]
-      adjusted = df_slice.groupby(self.extra_index, observed=True).mean()
-      for c in aligned.iloc[:, :len_child]:
-        theta = lm.fit(cov, child_slice[c]).coef_
-        adjusted[c] = adjusted[c] - adjusted.iloc[:, len_child:].dot(theta)
-      return adjusted.iloc[:, :len_child]
+    # Define a custom Metric instead of using df.groupby().apply() because
+    # 1. It's faster. See the comments in Metric.compute_slices().
+    # 2. It ensures that the result is formatted correctly.
+    class Adjust(metrics.Metric):
 
-    adjusted = metrics.Metric('Adjusted', compute=adjust)
-    return adjusted.compute_on(aligned, split_by)
+      def compute(self, df_slice):
+        child_slice = df_slice.iloc[:, :len_child]
+        cov = df_slice.iloc[:, len_child:]
+        adjusted = df_slice.groupby(extra_index, observed=True).mean()
+        for c in aligned.iloc[:, :len_child]:
+          theta = lm.fit(cov, child_slice[c]).coef_
+          adjusted[c] = adjusted[c] - adjusted.iloc[:, len_child:].dot(theta)
+        return adjusted.iloc[:, :len_child]
+
+    return Adjust('').compute_on(aligned, split_by)
 
   def compute_children_sql(self, table, split_by, execute, mode=None):
     child = super(CUPED, self).compute_children_sql(table, split_by, execute,
@@ -1876,8 +1885,6 @@ class Jackknife(MetricWithCI):
     def precomputable(root):
       for m in root.traverse(include_self=False):
         if isinstance(m, Operation) and not m.precomputable_in_jk:
-          return False
-        if m.custom_fns:
           return False
         if isinstance(m, metrics.Count) and m.distinct:
           return False

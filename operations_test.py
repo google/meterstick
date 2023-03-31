@@ -1331,10 +1331,9 @@ class JackknifeTests(parameterized.TestCase):
 
   count_x0 = metrics.Sum('X') / metrics.Mean('X')
   count_x1 = metrics.Count('X')
-  count_x2 = metrics.Metric('count_ground_truth', compute=lambda x: x.X.count())
   dot1 = metrics.Dot('X', 'X')
   dot2 = metrics.Dot('X', 'X', True)
-  metric = metrics.MetricList((count_x0, count_x1, count_x2, dot1, dot2))
+  metric = metrics.MetricList((count_x0, count_x1, dot1, dot2))
   change = operations.AbsoluteChange('condition', 'foo', metric)
   jk = operations.Jackknife('cookie', metric)
   jk_change = operations.Jackknife('cookie', change)
@@ -1343,12 +1342,11 @@ class JackknifeTests(parameterized.TestCase):
     df = pd.DataFrame({'X': np.arange(0, 3, 0.5), 'cookie': [1, 2, 2, 1, 2, 2]})
     unmelted = self.jk.compute_on(df)
     expected = pd.DataFrame(
-        [[6., 1.] * 3 + [(df.X**2).sum(), 4.625, (df.X**2).mean(), 0.875]],
-        columns=pd.MultiIndex.from_product([[
-            'sum(X) / mean(X)', 'count(X)', 'count_ground_truth', 'sum(X * X)',
-            'mean(X * X)'
-        ], ['Value', 'Jackknife SE']],
-                                           names=['Metric', None]))
+        [[6., 1.] * 2 + [(df.X**2).sum(), 4.625, (df.X**2).mean(), 0.875]],
+        columns=pd.MultiIndex.from_product(
+            [['sum(X) / mean(X)', 'count(X)', 'sum(X * X)', 'mean(X * X)'],
+             ['Value', 'Jackknife SE']],
+            names=['Metric', None]))
     testing.assert_frame_equal(unmelted, expected)
 
     melted = self.jk.compute_on(df, melted=True)
