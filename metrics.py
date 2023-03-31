@@ -344,7 +344,7 @@ class Metric(object):
     try:
       key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
       if self.in_cache(key):
-        raw_res = self.find_all_in_cache(key)
+        raw_res = self.get_cached(key)
       else:
         self.cache_key = key
         raw_res = self.compute_through(df, split_by)
@@ -469,31 +469,13 @@ class Metric(object):
     key = key if isinstance(key, utils.CacheKey) else self.wrap_cache_key(key)
     return key in self.cache
 
-  def find_all_in_cache(
-      self, key=None, split_by=None, metric=None, where=None, slice_val=None
-  ):
-    """Retrieves results from cache that fulfill the conditions."""
-    if isinstance(key, utils.CacheKey):
-      return copy.deepcopy(self.cache.get(key, None))
-    if split_by is not None:
-      split_by = (split_by,) if isinstance(split_by, str) else tuple(split_by)
-    conds = {
-        'key': key,
-        'split_by': split_by,
-        'where': where,
-        'slice_val': slice_val
-    }
-    conds = {k: v for k, v in conds.items() if v is not None}
-    res = {
-        k: copy.copy(v) for k, v in self.cache.items() if all(
-            getattr(k, c) == cv for c, cv in conds.items())
-    }
-    if metric:
-      if isinstance(metric, Metric):
-        res = {k: v for k, v in res.items() if k.metric == metric}
-      else:
-        res = {k: v for k, v in res.items() if k.metric.__class__ == metric}
-    return res
+  def get_cached(self, key):
+    key = key if isinstance(key, utils.CacheKey) else self.wrap_cache_key(key)
+    return self.cache[key]
+
+  def find_all_in_cache_by_metric_type(self, metric):
+    """Retrieves results from a certain type of metric from cache."""
+    return {k: v for k, v in self.cache.items() if k.metric.__class__ == metric}
 
   def get_fingerprint(self):
     """Returns attributes that uniquely identify the Metric.
@@ -638,7 +620,7 @@ class Metric(object):
     try:
       key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
       if self.in_cache(key):
-        res = self.find_all_in_cache(key)
+        res = self.get_cached(key)
       else:
         self.cache_key = key
         raw_res = self.compute_through_sql(table, split_by, execute, mode)

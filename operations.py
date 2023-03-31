@@ -1333,7 +1333,7 @@ class MetricWithCI(Operation):
       else:
         # If res is read from cache, it won't have the attribute, but it must
         # have been computed already so base has been saved in cache.
-        base = self.find_all_in_cache(key)
+        base = self.get_cached(key)
     # Don't add suffix like "Jackknife" because point_est won't have it.
     res = super(MetricWithCI, self).manipulate(res, melted, return_dataframe,
                                                apply_name_tmpl)
@@ -1763,13 +1763,23 @@ class Jackknife(MetricWithCI):
       util_metric = get_stable_equivalent_metric_tree(self, df, prefix)
       return self.compute_util_metric_on(util_metric, df, split_by)
     self.compute_child(df, split_by + [self.unit])
-    precomputed = self.find_all_in_cache(metric=metrics.Sum)
-    precomputed.update(self.find_all_in_cache(metric=metrics.Count))
+    precomputed = self.find_all_in_cache_by_metric_type(metric=metrics.Sum)
+    precomputed.update(
+        self.find_all_in_cache_by_metric_type(metric=metrics.Count)
+    )
     precomputed = {
         k: v for k, v in precomputed.items() if k.key == self.cache_key.key
     }
+    all_split_by = (
+        split_by
+        + [self.unit]
+        + list(utils.get_extra_split_by(self, return_superset=True))
+    )
+    df_slices = df.groupby(all_split_by, observed=True).first().iloc[:, [0]]
     for key, each_bucket in precomputed.items():
-      self.precompute_sum_or_count_for_jackknife(key, each_bucket, split_by, df)
+      self.precompute_sum_or_count_for_jackknife(
+          key, each_bucket, split_by, df_slices
+      )
     return super(Jackknife, self).compute_slices(df, split_by)
 
   def precompute_sum_or_count_for_jackknife(self, cache_key, each_bucket,
@@ -1787,7 +1797,8 @@ class Jackknife(MetricWithCI):
         self.unit.
       each_bucket: The result saved under cache_key.
       original_split_by: The split_by passed to self.compute_on().
-      df: The df Jackknife computes on.
+      df: A dataframe that has the same slices as the df that Jackknife computes
+        on.
 
     Returns:
       None. Two additional results are saved to the cache.
@@ -1806,8 +1817,7 @@ class Jackknife(MetricWithCI):
       total = each_bucket.groupby(level=split_by, observed=True).sum()
     else:
       total = each_bucket.sum()
-    key = copy.deepcopy(cache_key)
-    key.split_by = tuple(split_by)
+    key = cache_key.replace_split_by(split_by)
     self.save_to_cache(key, total)
 
     key = cache_key.replace_key(('_RESERVED', 'Jackknife', self.unit))

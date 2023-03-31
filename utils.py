@@ -65,6 +65,7 @@ class CacheKey():
     all_filters: The merge of all 'where' conditions that can be passed to
       df.query().
     extra_info: Extra information to distinguish CacheKeys.
+    fingerprint: The unique identifier of CacheKey. Used to hash.
   """
 
   def __init__(self,
@@ -109,27 +110,51 @@ class CacheKey():
       self.slice_val = slice_val or {}
       self.extra_info = extra_info
     self.slice_val = tuple(sorted(self.slice_val.items()))
+    self.fingerprint = {
+        'metric': self.metric.get_fingerprint(),
+        'key': self.key,
+        'split_by': self.split_by,
+        'slice_val': self.slice_val,
+        'extra_info': self.extra_info,
+        'where': tuple(sorted(tuple(self.where))),
+    }
 
   def add_extra_info(self, extra_info: str):
     self.extra_info = tuple(list(self.extra_info) + [extra_info])
+    self.fingerprint[-2] = self.extra_info
 
   def replace_key(self, key):
     new_key = copy.deepcopy(self)
     new_key.key = key
+    new_key.fingerprint['key'] = key
     return new_key
 
   def replace_metric(self, new_metric):
     new_key = copy.deepcopy(self)
     new_key.metric = new_metric
+    new_key.fingerprint['metric'] = new_metric.get_fingerprint()
+    return new_key
+
+  def replace_split_by(self, split_by):
+    split_by = split_by or ()
+    split_by = (split_by,) if isinstance(split_by, str) else tuple(split_by)
+    new_key = copy.deepcopy(self)
+    new_key.split_by = split_by
+    new_key.fingerprint['split_by'] = split_by
     return new_key
 
   def __eq__(self, other):
     return isinstance(other, CacheKey) and hash(self) == hash(other)
 
   def __hash__(self):
-    return hash(
-        (self.metric.get_fingerprint(), self.key, self.split_by, self.slice_val,
-         self.extra_info, tuple(sorted(tuple(self.where)))))
+    return hash((
+        self.fingerprint['metric'],
+        self.fingerprint['key'],
+        self.fingerprint['split_by'],
+        self.fingerprint['slice_val'],
+        self.fingerprint['where'],
+        self.fingerprint['extra_info'],
+    ))
 
   def __repr__(self):
     return ('metric: %s, key: %s, split_by: %s, slice: %s, where: %s, '
@@ -180,7 +205,8 @@ def adjust_slices_for_loo(bucket_res: pd.Series,
     bucket_res: The first level of its indexes is the unit to Jackknife on,
       followed by split_by, then levels added by Operations, if any.
     split_by: The list of column(s) from Jackknife().compute_on(df, split_by).
-    df: The df to jackknife.
+    df: A dataframe that has the same slices as the df that Jackknife computes
+      on.
 
   Returns:
     A pd.Series that has the same index names as bucket_res, but with some
@@ -191,7 +217,9 @@ def adjust_slices_for_loo(bucket_res: pd.Series,
   operation_lvl = unit_and_operation_lvl[1:]
   split_by_and_unit = indexes[:len(split_by) + 1]
   unit = split_by_and_unit[-1]
-  expected_units = df.groupby(split_by_and_unit).first().iloc[:, [0]]
+  expected_units = (
+      df.groupby(split_by_and_unit, observed=True).first().iloc[:, [0]]
+  )
   if not operation_lvl:
     return bucket_res.reindex(expected_units.index, fill_value=0)
 
@@ -340,21 +368,29 @@ def get_extra_idx(metric):
   return tuple(extra_idx)
 
 
-def get_extra_split_by(metric):
+def get_extra_split_by(metric, return_superset=False):
   """Collects the extra split_by added by Operations for the metric tree.
 
   Args:
     metric: A Metric instance.
+    return_superset: If to return the superset of extra split_by if metric has
+      incompatible split_by.
 
   Returns:
     A tuple of all columns used to split the df in metric.compute_on(df).
   """
   extra_split_by = metric.extra_split_by[:]
   children_idx = [
-      get_extra_split_by(c) for c in metric.children if is_metric(c)
+      get_extra_split_by(c, return_superset)
+      for c in metric.children
+      if is_metric(c)
   ]
   if len(set(children_idx)) > 1:
-    raise ValueError('Incompatible split_by!')
+    if not return_superset:
+      raise ValueError('Incompatible split_by!')
+    children_idx_superset = set()
+    children_idx_superset.update(*children_idx)
+    children_idx = [list(children_idx_superset)]
   if children_idx:
     extra_split_by += list(children_idx[0])
   return tuple(extra_split_by)
