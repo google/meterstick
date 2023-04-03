@@ -121,7 +121,7 @@ class CacheKey():
 
   def add_extra_info(self, extra_info: str):
     self.extra_info = tuple(list(self.extra_info) + [extra_info])
-    self.fingerprint[-2] = self.extra_info
+    self.fingerprint['extra_info'] = self.extra_info
 
   def replace_key(self, key):
     new_key = copy.deepcopy(self)
