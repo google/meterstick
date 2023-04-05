@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import absltest
 from meterstick import metrics
 from meterstick import operations
 from meterstick import utils
@@ -24,10 +25,8 @@ import numpy as np
 import pandas as pd
 from pandas import testing
 
-import unittest
 
-
-class UtilsTest(unittest.TestCase):
+class UtilsTest(absltest.TestCase):
 
   def test_adjust_slices_for_loo_no_splitby_no_operation_unit_filled(self):
     df = pd.DataFrame({'unit': list('abc'), 'x': range(1, 4)})
@@ -295,6 +294,15 @@ class UtilsTest(unittest.TestCase):
     m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
     self.assertEqual(utils.get_extra_idx(m), ('foo',))
 
+  def test_get_extra_idx_return_superset(self):
+    s = metrics.Sum('x')
+    m = metrics.MetricList((
+        operations.AbsoluteChange('g', 0, s),
+        operations.AbsoluteChange('g2', 1, s),
+    ))
+    actual = utils.get_extra_idx(m, True)
+    self.assertEqual(set(actual), set(('g', 'g2')))
+
   def test_get_extra_idx_raises(self):
     mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
     ab = operations.AbsoluteChange('baz', 'f', metrics.Sum('c'))
@@ -352,6 +360,59 @@ class UtilsTest(unittest.TestCase):
     self.assertEqual(output, expected)
     testing.assert_frame_equal(df, expected_df)
 
+  def test_get_stable_equivalent_metric_tree(self):
+    m1 = metrics.Mean('x', where='a')
+    m2 = metrics.Dot('x', 'y', where='b')
+    m = 2 * (m1 - m2)
+    output, _ = utils.get_stable_equivalent_metric_tree(m)
+    expected = 2 * (
+        utils.get_equivalent_metric(m1)[0] - utils.get_equivalent_metric(m2)[0]
+    )
+    self.assertEqual(output, expected)
+
+  def test_push_filters_to_leaf(self):
+    s = metrics.Sum('x', where='a')
+    m = s / metrics.Count('y')
+    m.where = 'c'
+    m = metrics.MetricList([s + 1, m], where='b')
+    output = utils.push_filters_to_leaf(m)
+    expected = metrics.MetricList([
+        metrics.Sum('x', where=('a', 'b')) + 1,
+        metrics.Sum('x', where=('a', 'b', 'c'))
+        / metrics.Count('y', where=('b', 'c')),
+    ])
+    self.assertEqual(output, expected)
+
+  def test_push_filters_to_leaf_with_cache_key_where(self):
+    s = metrics.Sum('x', where='a')
+    m = s / metrics.Count('y')
+    m.where = 'c'
+    m = metrics.MetricList([s + 1, m], where='b')
+    m.cache_key = utils.CacheKey(m, 'key', 'd')
+    output = utils.push_filters_to_leaf(m)
+    expected = metrics.MetricList([
+        metrics.Sum('x', where=('a', 'b', 'd')) + 1,
+        metrics.Sum('x', where=('a', 'b', 'c', 'd'))
+        / metrics.Count('y', where=('b', 'c', 'd')),
+    ])
+    self.assertEqual(output, expected)
+
+  def test_get_leaf_metrics(self):
+    m = metrics.MetricList(
+        (metrics.Ratio('x', 'y'), metrics.Sum('c', where='f') + 1)
+    )
+    output = utils.get_leaf_metrics(m)
+    expected = [metrics.Sum('x'), metrics.Sum('y'), metrics.Sum('c', where='f')]
+    self.assertEqual(output, expected)
+
+  def test_get_leaf_metrics_include_constants(self):
+    m = metrics.MetricList(
+        (metrics.Ratio('x', 'y', where='f'), metrics.Sum('c') + 1)
+    )
+    output = utils.get_leaf_metrics(m, True)
+    expected = [metrics.Sum('x'), metrics.Sum('y'), metrics.Sum('c'), 1]
+    self.assertEqual(output, expected)
+
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()

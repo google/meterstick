@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,346 +17,273 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
+
+from absl.testing import absltest
 from absl.testing import parameterized
 from meterstick import metrics
 from meterstick import operations
+from meterstick import utils
 import mock
 import numpy as np
 import pandas as pd
 from pandas import testing
-import unittest
+
+# pylint: disable=g-long-lambda
+METRICS_TO_TEST = metrics_to_test = [
+    ('Ratio', metrics.Ratio('X', 'Y'), lambda d: d.X.sum() / d.Y.sum()),
+    ('Sum', metrics.Sum('X'), lambda d: d.X.sum()),
+    ('Count', metrics.Count('X'), lambda d: d.X.size),
+    (
+        'Count distinct',
+        metrics.Count('X', distinct=True),
+        lambda d: d.X.nunique(),
+    ),
+    ('Mean', metrics.Mean('X'), lambda d: d.X.mean()),
+    (
+        'Weighted Mean',
+        metrics.Mean('X', 'Y'),
+        lambda d: np.average(d.X, weights=d.Y),
+    ),
+    ('Dot', metrics.Dot('X', 'Y'), lambda d: (d.X * d.Y).sum()),
+    (
+        'Normalized Dot',
+        metrics.Dot('X', 'Y', True),
+        lambda d: (d.X * d.Y).mean(),
+    ),
+    ('Max', metrics.Max('X'), lambda d: d.X.max()),
+    ('Min', metrics.Min('X'), lambda d: d.X.min()),
+    ('Quantile', metrics.Quantile('X', 0.2), lambda d: d.X.quantile(0.2)),
+    ('Variance', metrics.Variance('X', True), lambda d: d.X.var()),
+    (
+        'Biased Variance',
+        metrics.Variance('X', False),
+        lambda d: d.X.var(ddof=0),
+    ),
+    (
+        'Weighted Variance',
+        metrics.Variance('X', True, 'Y'),
+        lambda d: np.dot(d.Y, (d.X - np.average(d.X, weights=d.Y)) ** 2)
+        / (d.Y.sum() - 1),
+    ),
+    (
+        'Biased Weighted Variance',
+        metrics.Variance('X', False, 'Y'),
+        lambda d: float(np.cov(d.X, bias=True, aweights=d.Y)),
+    ),
+    (
+        'StandardDeviation',
+        metrics.StandardDeviation('X', True),
+        lambda d: d.X.std(),
+    ),
+    (
+        'Biased StandardDeviation',
+        metrics.StandardDeviation('X', False),
+        lambda d: d.X.std(ddof=0),
+    ),
+    (
+        'Weighted StandardDeviation',
+        metrics.StandardDeviation('X', True, 'Y'),
+        lambda d: metrics.Variance('X', True, 'Y').compute_on(d).iloc[0, 0]
+        ** 0.5,
+    ),
+    (
+        'Biased Weighted StandardDeviation',
+        metrics.StandardDeviation('X', False, 'Y'),
+        lambda d: metrics.Variance('X', False, 'Y').compute_on(d).iloc[0, 0]
+        ** 0.5,
+    ),
+    ('CV', metrics.CV('X', True), lambda d: d.X.std() / d.X.mean()),
+    (
+        'Biased CV',
+        metrics.CV('X', False),
+        lambda d: d.X.std(ddof=0) / d.X.mean(),
+    ),
+    ('Cov', metrics.Cov('X', 'Y', False), lambda d: np.cov(d.X, d.Y)[0, 1]),
+    (
+        'Biased Cov',
+        metrics.Cov('X', 'Y', True),
+        lambda d: np.cov(d.X, d.Y, bias=True)[0, 1],
+    ),
+    (
+        'Cov ddof',
+        metrics.Cov('X', 'Y', False, 2),
+        lambda d: np.cov(d.X, d.Y, bias=False, ddof=2)[0, 1],
+    ),
+    (
+        'Biased Cov ddof',
+        metrics.Cov('X', 'Y', True, 2),
+        lambda d: np.cov(d.X, d.Y, bias=True, ddof=2)[0, 1],
+    ),
+    (
+        'Weighted Cov',
+        metrics.Cov('X', 'Y', False, weight='w'),
+        lambda d: np.cov(d.X, d.Y, bias=False, aweights=d.w)[0, 1],
+    ),
+    (
+        'Biased Weighted Cov',
+        metrics.Cov('X', 'Y', True, weight='w'),
+        lambda d: np.cov(d.X, d.Y, bias=True, aweights=d.w)[0, 1],
+    ),
+    (
+        'Weighted Cov ddof',
+        metrics.Cov('X', 'Y', False, 2, 'w'),
+        lambda d: np.cov(d.X, d.Y, bias=False, ddof=2, aweights=d.w)[0, 1],
+    ),
+    (
+        'Biased Weighted Cov ddof',
+        metrics.Cov('X', 'Y', True, 2, 'w'),
+        lambda d: np.cov(d.X, d.Y, bias=True, ddof=2, aweights=d.w)[0, 1],
+    ),
+    (
+        'Fweighted Cov',
+        metrics.Cov('X', 'Y', False, fweight='w2'),
+        lambda d: np.cov(d.X, d.Y, bias=False, fweights=d.w2)[0, 1],
+    ),
+    (
+        'Biased Fweighted Cov',
+        metrics.Cov('X', 'Y', True, fweight='w2'),
+        lambda d: np.cov(d.X, d.Y, bias=True, fweights=d.w2)[0, 1],
+    ),
+    (
+        'Fweighted Cov ddof',
+        metrics.Cov('X', 'Y', False, 2, fweight='w2'),
+        lambda d: np.cov(d.X, d.Y, bias=False, ddof=2, fweights=d.w2)[0, 1],
+    ),
+    (
+        'Biased Fweighted Cov ddof',
+        metrics.Cov('X', 'Y', True, 2, fweight='w2'),
+        lambda d: np.cov(d.X, d.Y, bias=True, ddof=2, fweights=d.w2)[0, 1],
+    ),
+    (
+        'Weighted and fweighted Cov',
+        metrics.Cov('X', 'Y', False, None, 'w', 'w2'),
+        lambda d: np.cov(d.X, d.Y, bias=False, aweights=d.w, fweights=d.w2)[
+            0, 1
+        ],
+    ),
+    (
+        'Biased Weighted and fweighted Cov',
+        metrics.Cov('X', 'Y', True, None, 'w', 'w2'),
+        lambda d: np.cov(d.X, d.Y, bias=True, aweights=d.w, fweights=d.w2)[
+            0, 1
+        ],
+    ),
+    (
+        'Weighted and fweighted Cov ddof',
+        metrics.Cov('X', 'Y', False, 2, 'w', 'w2'),
+        lambda d: np.cov(
+            d.X, d.Y, bias=False, ddof=2, aweights=d.w, fweights=d.w2
+        )[0, 1],
+    ),
+    (
+        'Biased Weighted and fweighted Cov ddof',
+        metrics.Cov('X', 'Y', True, 2, 'w', 'w2'),
+        lambda d: np.cov(
+            d.X, d.Y, bias=True, ddof=2, aweights=d.w, fweights=d.w2
+        )[0, 1],
+    ),
+    (
+        'Correlation',
+        metrics.Correlation('X', 'Y'),
+        lambda d: np.corrcoef(d.X, d.Y)[0, 1],
+    ),
+    (
+        'Correlation kendall method',
+        metrics.Correlation('X', 'Y', method='kendall'),
+        lambda d: d[['X', 'Y']].corr(method='kendall').iloc[0, 1],
+    ),
+    (
+        'Correlation spearman method',
+        metrics.Correlation('X', 'Y', method='spearman'),
+        lambda d: d[['X', 'Y']].corr(method='spearman').iloc[0, 1],
+    ),
+    (
+        'Weighted Correlation',
+        metrics.Correlation('X', 'Y', 'w'),
+        lambda d: np.cov(d.X, d.Y, bias=True, aweights=d.w)[0, 1]
+        / metrics.StandardDeviation('X', False, 'w').compute_on(d).iloc[0, 0]
+        / metrics.StandardDeviation('Y', False, 'w').compute_on(d).iloc[0, 0],
+    ),
+]
+# pylint: enable=g-long-lambda
 
 
-class SimpleMetricTest(unittest.TestCase):
-
+@parameterized.named_parameters(*METRICS_TO_TEST)
+class TestSimpleMetric(parameterized.TestCase):
   df = pd.DataFrame({
-      'X': [1, 1, 1, 2, 2, 3, 4],
-      'Y': [3, 1, 1, 4, 4, 3, 5],
-      'grp': ['A'] * 3 + ['B'] * 4
+      'X': np.random.rand(100) + 5,
+      'Y': np.random.rand(100) + 5,
+      'w': np.random.rand(100) + 5,
+      'w2': np.random.randint(100, size=100) + 5,
+      'g1': np.random.randint(3, size=100),
+      'g2': np.random.choice(list('ab'), size=100),
   })
 
-  def test_pipeline_operator(self):
-    m = metrics.Count('X')
-    testing.assert_frame_equal(
-        m.compute_on(self.df), m | metrics.compute_on(self.df))
+  def test_return_number(self, m, fn):
+    output = m.compute_on(self.df, return_dataframe=False)
+    expected = fn(self.df)
+    self.assertEqual(round(output, 10), round(expected, 10))
 
-  def test_list_where(self):
-    metric = metrics.Mean('X', where=['grp == "A"'])
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = self.df.query('grp == "A"')['X'].mean()
-    self.assertEqual(output, expected)
+  def test_return_dataframe(self, m, fn):
+    output = m.compute_on(self.df)
+    expected = pd.DataFrame([[fn(self.df)]], columns=[m.name])
+    testing.assert_frame_equal(output, expected)
 
-  def test_split_data(self):
-    df = pd.DataFrame({'X': [1, 2], 'grp': ['a', 'b']}, index=[1, 1])
-    output = sorted(metrics.Metric.split_data(df, 'grp'), key=lambda x: x[1])
-    testing.assert_frame_equal(output[0][0], df[:1])
-    self.assertEqual(output[0][1], 'a')
-    testing.assert_frame_equal(output[1][0], df[1:])
-    self.assertEqual(output[1][1], 'b')
+  def test_return_dataframe_melted(self, m, fn):
+    output = m.compute_on(self.df, melted=True)
+    expected = pd.DataFrame({'Value': [fn(self.df)]}, index=[m.name])
+    expected.index.name = 'Metric'
+    testing.assert_frame_equal(output, expected)
 
-  def test_single_list_where(self):
-    metric = metrics.Mean('X', where=['grp == "A"', 'Y < 2'])
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = self.df.query('grp == "A" and Y < 2')['X'].mean()
-    self.assertEqual(output, expected)
-
-  def test_count_not_df(self):
-    metric = metrics.Count('X')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, 7)
-
-  def test_count_split_by_not_df(self):
-    metric = metrics.Count('X')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    expected = self.df.groupby('grp')['X'].count()
-    expected.name = 'count(X)'
+  def test_split_by_return_series(self, m, fn):
+    output = m.compute_on(self.df, 'g1', return_dataframe=False)
+    expected = self.df.groupby('g1').apply(fn)
+    expected.name = m.name
     testing.assert_series_equal(output, expected)
 
-  def test_count_where(self):
-    metric = metrics.Count('X', where='grp == "A"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, 3)
-
-  def test_count_with_nan(self):
-    df = pd.DataFrame({'X': [1, 1, np.nan, 2, 2, 3, 4]})
-    metric = metrics.Count('X')
-    output = metric.compute_on(df, return_dataframe=False)
-    self.assertEqual(output, 6)
-
-  def test_count_unmelted(self):
-    metric = metrics.Count('X')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'count(X)': [7]})
+  def test_split_by_return_dataframe(self, m, fn):
+    output = m.compute_on(self.df, 'g1')
+    expected = pd.DataFrame(self.df.groupby('g1').apply(fn))
+    expected.columns = [m.name]
     testing.assert_frame_equal(output, expected)
 
-  def test_count_melted(self):
-    metric = metrics.Count('X')
-    output = metric.compute_on(self.df, melted=True)
-    expected = pd.DataFrame({'Value': [7]}, index=['count(X)'])
-    expected.index.name = 'Metric'
+  def test_split_by_melted(self, m, _):
+    output = m.compute_on(self.df, 'g1', melted=True)
+    expected = utils.melt(m.compute_on(self.df, 'g1'))
     testing.assert_frame_equal(output, expected)
 
-  def test_count_split_by_unmelted(self):
-    metric = metrics.Count('X')
-    output = metric.compute_on(self.df, 'grp')
-    expected = pd.DataFrame({'count(X)': [3, 4]}, index=['A', 'B'])
-    expected.index.name = 'grp'
+  def test_split_by_multiple(self, m, fn):
+    output = m.compute_on(self.df, ['g1', 'g2'])
+    expected = pd.DataFrame(self.df.groupby(['g1', 'g2']).apply(fn))
+    expected.columns = [m.name]
     testing.assert_frame_equal(output, expected)
 
-  def test_count_split_by_melted(self):
-    metric = metrics.Count('X')
-    output = metric.compute_on(self.df, 'grp', melted=True)
-    expected = pd.DataFrame({
-        'Value': [3, 4],
-        'grp': ['A', 'B']
-    },
-                            index=['count(X)', 'count(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
+  def test_split_by_multiple_melted(self, m, _):
+    output = m.compute_on(self.df, ['g1', 'g2'], melted=True)
+    expected = utils.melt(m.compute_on(self.df, ['g1', 'g2']))
     testing.assert_frame_equal(output, expected)
 
-  def test_count_distinct(self):
-    df = pd.DataFrame({'X': [1, 1, np.nan, 2, 2, 3]})
-    metric = metrics.Count('X', distinct=True)
-    output = metric.compute_on(df, return_dataframe=False)
-    self.assertEqual(output, 3)
-
-  def test_sum_not_df(self):
-    metric = metrics.Sum('X')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, 14)
-
-  def test_sum_split_by_not_df(self):
-    metric = metrics.Sum('X')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    expected = self.df.groupby('grp')['X'].sum()
-    expected.name = 'sum(X)'
-    testing.assert_series_equal(output, expected)
-
-  def test_sum_where(self):
-    metric = metrics.Sum('X', where='grp == "A"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = self.df.query('grp == "A"')['X'].sum()
-    self.assertEqual(output, expected)
-
-  def test_sum_unmelted(self):
-    metric = metrics.Sum('X')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'sum(X)': [14]})
+  def test_where(self, m, fn):
+    m = copy.deepcopy(m)
+    m.where = 'X > 0.2'
+    output = m.compute_on(self.df)
+    expected = pd.DataFrame([[fn(self.df[self.df.X > 0.2])]], columns=[m.name])
     testing.assert_frame_equal(output, expected)
 
-  def test_sum_melted(self):
-    metric = metrics.Sum('X')
-    output = metric.compute_on(self.df, melted=True)
-    expected = pd.DataFrame({'Value': [14]}, index=['sum(X)'])
-    expected.index.name = 'Metric'
+  def test_pipeline_operator(self, m, _):
+    output = m | metrics.compute_on(self.df)
+    expected = m.compute_on(self.df)
     testing.assert_frame_equal(output, expected)
 
-  def test_sum_split_by_unmelted(self):
-    metric = metrics.Sum('X')
-    output = metric.compute_on(self.df, 'grp')
-    expected = pd.DataFrame({'sum(X)': [3, 11]}, index=['A', 'B'])
-    expected.index.name = 'grp'
+  def test_metriclist(self, m, fn):
+    output = metrics.MetricList([m], where='g1 == 1').compute_on(self.df)
+    expected = pd.DataFrame([[fn(self.df[self.df.g1 == 1])]], columns=[m.name])
     testing.assert_frame_equal(output, expected)
 
-  def test_sum_split_by_melted(self):
-    metric = metrics.Sum('X')
-    output = metric.compute_on(self.df, 'grp', melted=True)
-    expected = pd.DataFrame({
-        'Value': [3, 11],
-        'grp': ['A', 'B']
-    },
-                            index=['sum(X)', 'sum(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
 
-  def test_dot_not_df(self):
-    metric = metrics.Dot('X', 'Y')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, sum(self.df.X * self.df.Y))
-
-  def test_dot_split_by_not_df(self):
-    metric = metrics.Dot('X', 'Y')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    self.df['X * Y'] = self.df.X * self.df.Y
-    expected = self.df.groupby('grp')['X * Y'].sum()
-    expected.name = 'sum(X * Y)'
-    testing.assert_series_equal(output, expected)
-
-  def test_dot_where(self):
-    metric = metrics.Dot('X', 'Y', where='grp == "A"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    d = self.df.query('grp == "A"')
-    self.assertEqual(output, sum(d.X * d.Y))
-
-  def test_dot_unmelted(self):
-    metric = metrics.Dot('X', 'Y')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'sum(X * Y)': [sum(self.df.X * self.df.Y)]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_dot_normalized(self):
-    metric = metrics.Dot('X', 'Y', True)
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'mean(X * Y)': [(self.df.X * self.df.Y).mean()]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_dot_melted(self):
-    metric = metrics.Dot('X', 'Y')
-    output = metric.compute_on(self.df, melted=True)
-    expected = pd.DataFrame({'Value': [sum(self.df.X * self.df.Y)]},
-                            index=['sum(X * Y)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_dot_split_by_unmelted(self):
-    metric = metrics.Dot('X', 'Y')
-    output = metric.compute_on(self.df, 'grp')
-    expected = pd.DataFrame({'sum(X * Y)': [5, 45]}, index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_dot_split_by_melted(self):
-    metric = metrics.Dot('X', 'Y')
-    output = metric.compute_on(self.df, 'grp', melted=True)
-    expected = pd.DataFrame({
-        'Value': [5, 45],
-        'grp': ['A', 'B']
-    },
-                            index=['sum(X * Y)', 'sum(X * Y)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
-
-  def test_mean_not_df(self):
-    metric = metrics.Mean('X')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, 2)
-
-  def test_mean_split_by_not_df(self):
-    metric = metrics.Mean('X')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    expected = self.df.groupby('grp')['X'].mean()
-    expected.name = 'mean(X)'
-    testing.assert_series_equal(output, expected)
-
-  def test_mean_where(self):
-    metric = metrics.Mean('X', where='grp == "A"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = self.df.query('grp == "A"')['X'].mean()
-    self.assertEqual(output, expected)
-
-  def test_mean_unmelted(self):
-    metric = metrics.Mean('X')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'mean(X)': [2.]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_mean_melted(self):
-    metric = metrics.Mean('X')
-    output = metric.compute_on(self.df, melted=True)
-    expected = pd.DataFrame({'Value': [2.]}, index=['mean(X)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_mean_split_by_unmelted(self):
-    metric = metrics.Mean('X')
-    output = metric.compute_on(self.df, 'grp')
-    expected = pd.DataFrame({'mean(X)': [1, 2.75]}, index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_mean_split_by_melted(self):
-    metric = metrics.Mean('X')
-    output = metric.compute_on(self.df, 'grp', melted=True)
-    expected = pd.DataFrame({
-        'Value': [1, 2.75],
-        'grp': ['A', 'B']
-    },
-                            index=['mean(X)', 'mean(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
-
-  def test_max(self):
-    metric = metrics.Max('X')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'max(X)': [4]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_min(self):
-    metric = metrics.Min('X')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'min(X)': [1]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_mean_not_df(self):
-    df = pd.DataFrame({'X': [1, 2], 'Y': [3, 1]})
-    metric = metrics.Mean('X', 'Y')
-    output = metric.compute_on(df, return_dataframe=False)
-    self.assertEqual(output, 1.25)
-
-  def test_weighted_mean_split_by_not_df(self):
-    df = pd.DataFrame({
-        'X': [1, 2, 1, 3],
-        'Y': [3, 1, 0, 1],
-        'grp': ['A', 'A', 'B', 'B']
-    })
-    metric = metrics.Mean('X', 'Y')
-    output = metric.compute_on(df, 'grp', return_dataframe=False)
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.Series((1.25, 3.), index=['A', 'B'])
-    expected.index.name = 'grp'
-    expected.name = 'Y-weighted mean(X)'
-    testing.assert_series_equal(output, expected)
-
-  def test_weighted_mean_unmelted(self):
-    df = pd.DataFrame({'X': [1, 2], 'Y': [3, 1]})
-    metric = metrics.Mean('X', 'Y')
-    output = metric.compute_on(df)
-    expected = pd.DataFrame({'Y-weighted mean(X)': [1.25]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_mean_melted(self):
-    df = pd.DataFrame({'X': [1, 2], 'Y': [3, 1]})
-    metric = metrics.Mean('X', 'Y')
-    output = metric.compute_on(df, melted=True)
-    expected = pd.DataFrame({'Value': [1.25]}, index=['Y-weighted mean(X)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_mean_split_by_unmelted(self):
-    df = pd.DataFrame({
-        'X': [1, 2, 1, 3],
-        'Y': [3, 1, 0, 1],
-        'grp': ['A', 'A', 'B', 'B']
-    })
-    metric = metrics.Mean('X', 'Y')
-    output = metric.compute_on(df, 'grp')
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.DataFrame({'Y-weighted mean(X)': [1.25, 3.]},
-                            index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_mean_split_by_melted(self):
-    df = pd.DataFrame({
-        'X': [1, 2, 1, 3],
-        'Y': [3, 1, 0, 1],
-        'grp': ['A', 'A', 'B', 'B']
-    })
-    metric = metrics.Mean('X', 'Y')
-    output = metric.compute_on(df, 'grp', melted=True)
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.DataFrame({
-        'Value': [1.25, 3.],
-        'grp': ['A', 'B']
-    },
-                            index=['Y-weighted mean(X)', 'Y-weighted mean(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
+class TestMetricsMiscellaneous(absltest.TestCase):
+  df = pd.DataFrame({'X': [0, 1, 2, 3], 'Y': [0, 1, 1, 2]})
 
   def test_quantile_raise(self):
     with self.assertRaises(ValueError) as cm:
@@ -368,60 +295,11 @@ class SimpleMetricTest(unittest.TestCase):
       metrics.Quantile('X', [0.1, 2])
     self.assertEqual(str(cm.exception), 'quantiles must be in [0, 1].')
 
-  def test_quantile_not_df(self):
-    metric = metrics.Quantile('X', 0.5)
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, 2)
-
-  def test_quantile_where(self):
-    metric = metrics.Quantile('X', where='grp == "B"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, 2.5)
-
   def test_quantile_interpolation(self):
     metric = metrics.Quantile('X', 0.5, interpolation='lower')
     output = metric.compute_on(
         pd.DataFrame({'X': [1, 2]}), return_dataframe=False)
     self.assertEqual(output, 1)
-
-  def test_quantile_split_by_not_df(self):
-    metric = metrics.Quantile('X', 0.5)
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    expected = self.df.groupby('grp')['X'].quantile(0.5)
-    expected.name = 'quantile(X, 0.5)'
-    testing.assert_series_equal(output, expected)
-
-  def test_quantile_unmelted(self):
-    metric = metrics.Quantile('X', 0.5)
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'quantile(X, 0.5)': [2.]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_quantile_melted(self):
-    metric = metrics.Quantile('X', 0.5)
-    output = metric.compute_on(self.df, melted=True)
-    expected = pd.DataFrame({'Value': [2.]}, index=['quantile(X, 0.5)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_quantile_split_by_unmelted(self):
-    metric = metrics.Quantile('X', 0.5)
-    output = metric.compute_on(self.df, 'grp')
-    expected = pd.DataFrame({'quantile(X, 0.5)': [1, 2.5]}, index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_quantile_split_by_melted(self):
-    metric = metrics.Quantile('X', 0.5)
-    output = metric.compute_on(self.df, 'grp', melted=True)
-    expected = pd.DataFrame({
-        'Value': [1, 2.5],
-        'grp': ['A', 'B']
-    },
-                            index=['quantile(X, 0.5)'] * 2)
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
 
   def test_quantile_multiple_quantiles(self):
     df = pd.DataFrame({'X': [0, 1]})
@@ -500,469 +378,13 @@ class SimpleMetricTest(unittest.TestCase):
                                 names=['Metric', 'grp']))
     testing.assert_frame_equal(output, expected)
 
-  def test_variance_not_df(self):
-    metric = metrics.Variance('X')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, self.df.X.var())
-
-  def test_variance_biased(self):
-    metric = metrics.Variance('X', False)
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, self.df.X.var(ddof=0))
-
-  def test_variance_split_by_not_df(self):
-    metric = metrics.Variance('X')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    expected = self.df.groupby('grp')['X'].var()
-    expected.name = 'var(X)'
-    testing.assert_series_equal(output, expected)
-
-  def test_variance_where(self):
-    metric = metrics.Variance('X', where='grp == "B"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = self.df.query('grp == "B"')['X'].var()
-    self.assertEqual(output, expected)
-
-  def test_variance_unmelted(self):
-    metric = metrics.Variance('X')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'var(X)': [self.df.X.var()]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_variance_melted(self):
-    metric = metrics.Variance('X')
-    output = metric.compute_on(self.df, melted=True)
-    expected = pd.DataFrame({'Value': [self.df.X.var()]}, index=['var(X)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_variance_split_by_unmelted(self):
-    metric = metrics.Variance('X')
-    output = metric.compute_on(self.df, 'grp')
-    expected = pd.DataFrame({'var(X)': self.df.groupby('grp')['X'].var()},
-                            index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_variance_split_by_melted(self):
-    metric = metrics.Variance('X')
-    output = metric.compute_on(self.df, 'grp', melted=True)
-    expected = pd.DataFrame(
-        {
-            'Value': self.df.groupby('grp')['X'].var().values,
-            'grp': ['A', 'B']
-        },
-        index=['var(X)', 'var(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_variance_not_df(self):
-    df = pd.DataFrame({'X': [0, 2], 'Y': [1, 3]})
-    metric = metrics.Variance('X', weight='Y')
-    output = metric.compute_on(df, return_dataframe=False)
-    self.assertEqual(output, 1)
-
-  def test_weighted_variance_not_df_biased(self):
-    df = pd.DataFrame({'X': [0, 2], 'Y': [1, 3]})
-    metric = metrics.Variance('X', False, 'Y')
-    output = metric.compute_on(df, return_dataframe=False)
-    self.assertEqual(output, 0.75)
-
-  def test_weighted_variance_split_by_not_df(self):
-    df = pd.DataFrame({
-        'X': [0, 2, 1, 3],
-        'Y': [1, 3, 1, 1],
-        'grp': ['B', 'B', 'A', 'A']
-    })
-    metric = metrics.Variance('X', weight='Y')
-    output = metric.compute_on(df, 'grp', return_dataframe=False)
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.Series((2., 1), index=['A', 'B'])
-    expected.index.name = 'grp'
-    expected.name = 'Y-weighted var(X)'
-    testing.assert_series_equal(output, expected)
-
-  def test_weighted_variance_unmelted(self):
-    df = pd.DataFrame({'X': [0, 2], 'Y': [1, 3]})
-    metric = metrics.Variance('X', weight='Y')
-    output = metric.compute_on(df)
-    expected = pd.DataFrame({'Y-weighted var(X)': [1.]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_variance_melted(self):
-    df = pd.DataFrame({'X': [0, 2], 'Y': [1, 3]})
-    metric = metrics.Variance('X', weight='Y')
-    output = metric.compute_on(df, melted=True)
-    expected = pd.DataFrame({'Value': [1.]}, index=['Y-weighted var(X)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_variance_split_by_unmelted(self):
-    df = pd.DataFrame({
-        'X': [0, 2, 1, 3],
-        'Y': [1, 3, 1, 1],
-        'grp': ['B', 'B', 'A', 'A']
-    })
-    metric = metrics.Variance('X', weight='Y')
-    output = metric.compute_on(df, 'grp')
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.DataFrame({'Y-weighted var(X)': [2., 1]}, index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_variance_split_by_melted(self):
-    df = pd.DataFrame({
-        'X': [0, 2, 1, 3],
-        'Y': [1, 3, 1, 1],
-        'grp': ['B', 'B', 'A', 'A']
-    })
-    metric = metrics.Variance('X', weight='Y')
-    output = metric.compute_on(df, 'grp', melted=True)
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.DataFrame({
-        'Value': [2., 1],
-        'grp': ['A', 'B']
-    },
-                            index=['Y-weighted var(X)', 'Y-weighted var(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
-
-  def test_standard_deviation_not_df(self):
-    metric = metrics.StandardDeviation('X')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, self.df.X.std())
-
-  def test_standard_deviation_biased(self):
-    metric = metrics.StandardDeviation('X', False)
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, self.df.X.std(ddof=0))
-
-  def test_standard_deviation_split_by_not_df(self):
-    metric = metrics.StandardDeviation('X')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    expected = self.df.groupby('grp')['X'].std()
-    expected.name = 'sd(X)'
-    testing.assert_series_equal(output, expected)
-
-  def test_standard_deviation_where(self):
-    metric = metrics.StandardDeviation('X', where='grp == "B"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = self.df.query('grp == "B"')['X'].std()
-    self.assertEqual(output, expected)
-
-  def test_standard_deviation_unmelted(self):
-    metric = metrics.StandardDeviation('X')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'sd(X)': [self.df.X.std()]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_standard_deviation_melted(self):
-    metric = metrics.StandardDeviation('X')
-    output = metric.compute_on(self.df, melted=True)
-    expected = pd.DataFrame({'Value': [self.df.X.std()]}, index=['sd(X)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_standard_deviation_split_by_unmelted(self):
-    metric = metrics.StandardDeviation('X')
-    output = metric.compute_on(self.df, 'grp')
-    expected = pd.DataFrame({'sd(X)': self.df.groupby('grp')['X'].std()},
-                            index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_standard_deviation_split_by_melted(self):
-    metric = metrics.StandardDeviation('X')
-    output = metric.compute_on(self.df, 'grp', melted=True)
-    expected = pd.DataFrame(
-        {
-            'Value': self.df.groupby('grp')['X'].std().values,
-            'grp': ['A', 'B']
-        },
-        index=['sd(X)', 'sd(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_standard_deviation_not_df(self):
-    df = pd.DataFrame({'X': [0, 2], 'Y': [1, 3]})
-    metric = metrics.StandardDeviation('X', weight='Y')
-    output = metric.compute_on(df, return_dataframe=False)
-    self.assertEqual(output, 1)
-
-  def test_weighted_standard_deviation_not_df_biased(self):
-    df = pd.DataFrame({'X': [0, 2], 'Y': [1, 3]})
-    metric = metrics.StandardDeviation('X', False, 'Y')
-    output = metric.compute_on(df, return_dataframe=False)
-    self.assertEqual(output, np.sqrt(0.75))
-
-  def test_weighted_standard_deviation_split_by_not_df(self):
-    df = pd.DataFrame({
-        'X': [0, 2, 1, 3],
-        'Y': [1, 3, 1, 1],
-        'grp': ['B', 'B', 'A', 'A']
-    })
-    metric = metrics.StandardDeviation('X', weight='Y')
-    output = metric.compute_on(df, 'grp', return_dataframe=False)
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.Series((np.sqrt(2), 1), index=['A', 'B'])
-    expected.index.name = 'grp'
-    expected.name = 'Y-weighted sd(X)'
-    testing.assert_series_equal(output, expected)
-
-  def test_weighted_standard_deviation_unmelted(self):
-    df = pd.DataFrame({'X': [0, 2], 'Y': [1, 3]})
-    metric = metrics.StandardDeviation('X', weight='Y')
-    output = metric.compute_on(df)
-    expected = pd.DataFrame({'Y-weighted sd(X)': [1.]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_standard_deviation_melted(self):
-    df = pd.DataFrame({'X': [0, 2], 'Y': [1, 3]})
-    metric = metrics.StandardDeviation('X', weight='Y')
-    output = metric.compute_on(df, melted=True)
-    expected = pd.DataFrame({'Value': [1.]}, index=['Y-weighted sd(X)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_standard_deviation_split_by_unmelted(self):
-    df = pd.DataFrame({
-        'X': [0, 2, 1, 3],
-        'Y': [1, 3, 1, 1],
-        'grp': ['B', 'B', 'A', 'A']
-    })
-    metric = metrics.StandardDeviation('X', weight='Y')
-    output = metric.compute_on(df, 'grp')
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.DataFrame({'Y-weighted sd(X)': [np.sqrt(2), 1]},
-                            index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_standard_deviation_split_by_melted(self):
-    df = pd.DataFrame({
-        'X': [0, 2, 1, 3],
-        'Y': [1, 3, 1, 1],
-        'grp': ['B', 'B', 'A', 'A']
-    })
-    metric = metrics.StandardDeviation('X', weight='Y')
-    output = metric.compute_on(df, 'grp', melted=True)
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    expected = pd.DataFrame({
-        'Value': [np.sqrt(2), 1],
-        'grp': ['A', 'B']
-    },
-                            index=['Y-weighted sd(X)', 'Y-weighted sd(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
-
-  def test_cv_not_df(self):
-    metric = metrics.CV('X')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, np.sqrt(1 / 3.))
-
-  def test_cv_biased(self):
-    metric = metrics.CV('X', False)
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, self.df.X.std(ddof=0) / np.mean(self.df.X))
-
-  def test_cv_split_by_not_df(self):
-    metric = metrics.CV('X')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    expected = self.df.groupby('grp')['X'].std() / [1, 2.75]
-    expected.name = 'cv(X)'
-    testing.assert_series_equal(output, expected)
-
-  def test_cv_where(self):
-    metric = metrics.CV('X', where='grp == "B"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = self.df.query('grp == "B"')['X'].std() / 2.75
-    self.assertEqual(output, expected)
-
-  def test_cv_unmelted(self):
-    metric = metrics.CV('X')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'cv(X)': [np.sqrt(1 / 3.)]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_cv_melted(self):
-    metric = metrics.CV('X')
-    output = metric.compute_on(self.df, melted=True)
-    expected = pd.DataFrame({'Value': [np.sqrt(1 / 3.)]}, index=['cv(X)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(output, expected)
-
-  def test_cv_split_by_unmelted(self):
-    metric = metrics.CV('X')
-    output = metric.compute_on(self.df, 'grp')
-    expected = pd.DataFrame({'cv(X)': [0, np.sqrt(1 / 8.25)]}, index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_cv_split_by_melted(self):
-    metric = metrics.CV('X')
-    output = metric.compute_on(self.df, 'grp', melted=True)
-    expected = pd.DataFrame(
-        data={
-            'Value': [0, np.sqrt(1 / 8.25)],
-            'grp': ['A', 'B']
-        },
-        index=['cv(X)', 'cv(X)'])
-    expected.index.name = 'Metric'
-    expected.set_index('grp', append=True, inplace=True)
-    testing.assert_frame_equal(output, expected)
-
-  def test_correlation(self):
-    metric = metrics.Correlation('X', 'Y')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, np.corrcoef(self.df.X, self.df.Y)[0, 1])
-    self.assertEqual(output, self.df.X.corr(self.df.Y))
-
-  def test_weighted_correlation(self):
-    metric = metrics.Correlation('X', 'Y', weight='Y')
-    output = metric.compute_on(self.df)
-    cov = np.cov(self.df.X, self.df.Y, aweights=self.df.Y)
-    expected = pd.DataFrame(
-        {'Y-weighted corr(X, Y)': [cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1])]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_correlation_method(self):
-    metric = metrics.Correlation('X', 'Y', method='kendall')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, self.df.X.corr(self.df.Y, method='kendall'))
-
-  def test_correlation_split_by_not_df(self):
-    metric = metrics.Correlation('X', 'Y')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    corr_a = metric.compute_on(
-        self.df[self.df.grp == 'A'], return_dataframe=False)
-    corr_b = metric.compute_on(
-        self.df[self.df.grp == 'B'], return_dataframe=False)
-    expected = pd.Series([corr_a, corr_b], index=['A', 'B'])
-    expected.index.name = 'grp'
-    expected.name = 'corr(X, Y)'
-    testing.assert_series_equal(output, expected)
-
-  def test_correlation_where(self):
-    metric = metrics.Correlation('X', 'Y', where='grp == "B"')
-    metric_no_filter = metrics.Correlation('X', 'Y')
-    output = metric.compute_on(self.df)
-    expected = metric_no_filter.compute_on(self.df[self.df.grp == 'B'])
-    testing.assert_frame_equal(output, expected)
-
-  def test_correlation_df(self):
-    metric = metrics.Correlation('X', 'Y')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'corr(X, Y)': [self.df.X.corr(self.df.Y)]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_correlation_split_by_df(self):
-    df = pd.DataFrame({
-        'X': [1, 1, 1, 2, 2, 2, 3, 4],
-        'Y': [3, 1, 1, 3, 4, 4, 3, 5],
-        'grp': ['A'] * 4 + ['B'] * 4
-    })
-    metric = metrics.Correlation('X', 'Y')
-    output = metric.compute_on(df, 'grp')
-    corr_a = metric.compute_on(df[df.grp == 'A'], return_dataframe=False)
-    corr_b = metric.compute_on(df[df.grp == 'B'], return_dataframe=False)
-    expected = pd.DataFrame({'corr(X, Y)': [corr_a, corr_b]}, index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
-  def test_cov(self):
-    metric = metrics.Cov('X', 'Y')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, np.cov(self.df.X, self.df.Y)[0, 1])
-    self.assertEqual(output, self.df.X.cov(self.df.Y))
-
-  def test_cov_bias(self):
-    metric = metrics.Cov('X', 'Y', bias=True)
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = np.mean(
-        (self.df.X - self.df.X.mean()) * (self.df.Y - self.df.Y.mean()))
-    self.assertEqual(output, expected)
-
-  def test_cov_ddof(self):
-    metric = metrics.Cov('X', 'Y', ddof=0)
-    output = metric.compute_on(self.df, return_dataframe=False)
-    expected = np.mean(
-        (self.df.X - self.df.X.mean()) * (self.df.Y - self.df.Y.mean()))
-    self.assertEqual(output, expected)
-
-  def test_fweighted_cov(self):
-    metric = metrics.Cov('X', 'Y', fweight='Y')
-    output = metric.compute_on(self.df)
-    expected = np.cov(self.df.X, self.df.Y, fweights=self.df.Y)[0, 1]
-    expected = pd.DataFrame({'Y-fweighted cov(X, Y)': [expected]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_cov(self):
-    metric = metrics.Cov('X', 'Y', weight='Y')
-    output = metric.compute_on(self.df)
-    expected = np.cov(self.df.X, self.df.Y, aweights=self.df.Y)[0, 1]
-    expected = pd.DataFrame({'Y-weighted cov(X, Y)': [expected]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_weighted_and_fweighted_cov(self):
-    metric = metrics.Cov('X', 'Y', weight='Y', fweight='X')
-    output = metric.compute_on(self.df)
-    expected = np.cov(
-        self.df.X, self.df.Y, aweights=self.df.Y, fweights=self.df.X)[0, 1]
-    expected = pd.DataFrame({'X-fweighted Y-weighted cov(X, Y)': [expected]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_cov_split_by_not_df(self):
-    metric = metrics.Cov('X', 'Y')
-    output = metric.compute_on(self.df, 'grp', return_dataframe=False)
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    cov_a = metric.compute_on(
-        self.df[self.df.grp == 'A'], return_dataframe=False)
-    cov_b = metric.compute_on(
-        self.df[self.df.grp == 'B'], return_dataframe=False)
-    expected = pd.Series([cov_a, cov_b], index=['A', 'B'])
-    expected.index.name = 'grp'
-    expected.name = 'cov(X, Y)'
-    testing.assert_series_equal(output, expected)
-
-  def test_cov_where(self):
-    metric = metrics.Cov('X', 'Y', where='grp == "B"')
-    metric_no_filter = metrics.Cov('X', 'Y')
-    output = metric.compute_on(self.df)
-    expected = metric_no_filter.compute_on(self.df[self.df.grp == 'B'])
-    testing.assert_frame_equal(output, expected)
-
-  def test_cov_df(self):
-    metric = metrics.Cov('X', 'Y')
-    output = metric.compute_on(self.df)
-    expected = pd.DataFrame({'cov(X, Y)': [self.df.X.cov(self.df.Y)]})
-    testing.assert_frame_equal(output, expected)
-
-  def test_cov_split_by_df(self):
-    df = pd.DataFrame({
-        'X': [1, 1, 1, 2, 2, 2, 3, 4],
-        'Y': [3, 1, 1, 3, 4, 4, 3, 5],
-        'grp': ['A'] * 4 + ['B'] * 4
-    })
-    metric = metrics.Cov('X', 'Y')
-    output = metric.compute_on(df, 'grp')
-    output.sort_index(level='grp', inplace=True)  # For Py2
-    cov_a = metric.compute_on(df[df.grp == 'A'], return_dataframe=False)
-    cov_b = metric.compute_on(df[df.grp == 'B'], return_dataframe=False)
-    expected = pd.DataFrame({'cov(X, Y)': [cov_a, cov_b]}, index=['A', 'B'])
-    expected.index.name = 'grp'
-    testing.assert_frame_equal(output, expected)
-
   def test_cov_invalid_ddof(self):
     df = pd.DataFrame({'X': np.random.rand(3), 'w': np.array([1, 1, 2])})
     m = metrics.Cov('X', 'X', ddof=5, fweight='w')
-    self.assertEqual(m.compute_on(df, return_dataframe=False), np.inf)
+    self.assertTrue(pd.isnull(m.compute_on(df, return_dataframe=False)))
 
 
-class CompositeMetric(unittest.TestCase):
+class TestCompositeMetric(absltest.TestCase):
   """Tests for composition of two metrics."""
 
   df = pd.DataFrame({'X': [0, 1, 2, 3], 'Y': [0, 1, 1, 2]})
@@ -1143,43 +565,7 @@ class CompositeMetric(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class TestRatio(unittest.TestCase):
-  df = pd.DataFrame({
-      'X': [1, 1, 2],
-      'Y': [-1, 2, 0],
-      'grp0': ['A', 'A', 'B'],
-      'grp': ['A', 'A', 'B']
-  })
-  metric = metrics.Ratio('X', 'Y', 'foo')
-
-  def test_ratio_not_df(self):
-    output = self.metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(4., output)
-
-  def test_ratio_split_by_not_df(self):
-    output = self.metric.compute_on(self.df, 'grp', return_dataframe=False)
-    expected = pd.Series((2.0, float('inf')),
-                         index=pd.Index(('A', 'B'), name='grp'))
-    expected.name = 'foo'
-    testing.assert_series_equal(output, expected)
-
-  def test_ratio_split_by_muliple(self):
-    output = self.metric.compute_on(self.df, ['grp0', 'grp'])
-    expected = pd.DataFrame({
-        'foo': (2.0, float('inf')),
-        'grp0': ('A', 'B'),
-        'grp': ('A', 'B')
-    })
-    expected.set_index(['grp0', 'grp'], inplace=True)
-    testing.assert_frame_equal(output, expected)
-
-  def test_ratio_where(self):
-    metric = metrics.Ratio('X', 'Y', where='grp == "A"')
-    output = metric.compute_on(self.df, return_dataframe=False)
-    self.assertEqual(output, 2.0)
-
-
-class TestMetricList(unittest.TestCase):
+class TestMetricList(absltest.TestCase):
 
   def test_return_list(self):
     df = pd.DataFrame({'X': [0, 1, 2, 3]})
@@ -1474,4 +860,4 @@ class TestCaching(parameterized.TestCase):
 
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()
