@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -211,13 +211,23 @@ class LogisticRegressionTest(absltest.TestCase):
         [[
             model.intercept_[0],
             model.coef_.flatten()[0],
-            model.coef_.flatten()[1]
+            model.coef_.flatten()[1],
         ]],
         columns=[
-            'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient: intercept',
-            'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient: sum(X1)',
-            'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient: sum(X2)'
-        ])
+            (
+                'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient:'
+                ' intercept'
+            ),
+            (
+                'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient:'
+                ' sum(X1)'
+            ),
+            (
+                'LogisticRegression(sum(grp2) ~ sum(X1) + sum(X2)) Coefficient:'
+                ' sum(X2)'
+            ),
+        ],
+    )
     pd.testing.assert_frame_equal(output, expected)
 
   def test_split_by(self):

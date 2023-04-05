@@ -276,7 +276,7 @@ It can help you to sanity check complex Metrics.
 ## SQL
 
 You can get the SQL query for all built-in Metrics and Operations (except
-weighted Quantile/CV/Correlation/Cov) by calling `to_sql(sql_data_source,
+weighted Quantile) by calling `to_sql(sql_data_source,
 split_by)` on the Metric. `sql_data_source` could be a table or a subquery. The
 dialect it uses is the [standard SQL](https://cloud.google.com/bigquery/docs/reference/standard-sql)
 in Google Cloud's BigQuery. For example,
@@ -290,24 +290,47 @@ gives
 ```sql
 SELECT
   grp,
-  SUM(IF(Y > 0, X, NULL)) AS `sum(X)`,
-  SUM(X) AS `sum(X)_1`
+  SUM(IF(Y > 0, X, NULL)) AS sum_X,
+  SUM(X) AS sum_X_1
 FROM table
 GROUP BY grp
 ```
 
 Very often what you need is the execution of the SQL query, then you can call
 
-```
-compute_on_sql(sql_data_source, split_by=None, execute=None, melted=False)
+```python
+compute_on_sql(sql_data_source, split_by=None, execute=None, melted=False, mode=None)
 ```
 
 directly, which will give you a output similar to `compute_on()`. `execute` is a
-function that can execute SQL query.
+function that can execute SQL query. The `mode` can be `None` or
+`'mixed'`. The former is recommended and computes things in SQL whenever
+possible while the latter only computes the leaf Metrics in SQL.
+
+## Apache Beam
+
+There is also a
+
+```python
+compute_on_pcollection(pcol, split_by=None, execute=None, melted=False, mode=None)
+```
+
+method which takes an [`PCollection`](https://beam.apache.org/documentation/programming-guide/#pcollections)
+with a [schema](https://s.apache.org/beam-python-schemas)
+as input. The args are similar to those of `compute_on_sql` except that
+`execute` now should evaluate a `PCollection`.
+Under the hood, we generate SQL queries and pass them to [`SqlTransform`](https://beam.apache.org/releases/pydoc/2.30.0/apache_beam.transforms.sql.html#apache_beam.transforms.sql.SqlTransform).
+As a result,
+
+-   You need to choose a Beam runner that supports `SqlTransform`. For example,
+    the [InteractiveRunner](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/runners/interactive/README.md)
+    does [NOT](https://issues.apache.org/jira/browse/BEAM-10708).
+-   The config of the pipeline that carries the `PCollection` is set up by you.
+    For example, your setup decides if the pipeline will be ran in process or in Cloud.
 
 ## Custom Metric
 
-You can write your own Metric and Operartion. Below is a Metric taken from the demo [colab](https://colab.sandbox.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb#scrollTo=QFjhj96EdK-r).
+You can write your own Metric and Operation. Below is a Metric taken from the demo [colab](https://colab.sandbox.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb#scrollTo=QFjhj96EdK-r).
 The Metric fits a LOWESS model.
 
 ```python

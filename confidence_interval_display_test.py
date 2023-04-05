@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,12 +16,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import absltest
 from meterstick import confidence_interval_display
 import numpy as np
 import pandas as pd
 from pandas import testing
-import unittest
-
 
 DF_WITH_DIMENSIONS = pd.DataFrame({
     'CI_Lower': [None, None, -5.035, 0.73],
@@ -50,7 +49,7 @@ DF_NO_DIMENSION = pd.DataFrame({
 LINE_BREAK = confidence_interval_display.LINE_BREAK
 
 
-class DisplayMetricsTest(unittest.TestCase):
+class DisplayMetricsTest(absltest.TestCase):
 
   def test_normal(self):
     expected = pd.DataFrame(
@@ -72,18 +71,27 @@ class DisplayMetricsTest(unittest.TestCase):
                 LINE_BREAK.join((
                     '<div class="ci-display-cell"><div>0.7700',
                     '<span class="ci-display-ratio">-1.4000</span>',
-                    '<span class="ci-display-ci-range">[-5.0350, 2.2350]</span>'
-                    '</div></div>')),
+                    (
+                        '<span class="ci-display-ci-range">[-5.0350,'
+                        ' 2.2350]</span></div></div>'
+                    ),
+                )),
                 '<div class="ci-display-cell">0.2160</div>',
-                LINE_BREAK.join(
-                    ('<div class="ci-display-good-change ci-display-cell">'
-                     '<div>0.2220',
-                     '<span class="ci-display-ratio">2.7900</span>',
-                     '<span class="ci-display-ci-range">[0.7300, 4.8500]</span>'
-                     '</div></div>')),
+                LINE_BREAK.join((
+                    (
+                        '<div class="ci-display-good-change'
+                        ' ci-display-cell"><div>0.2220'
+                    ),
+                    '<span class="ci-display-ratio">2.7900</span>',
+                    (
+                        '<span class="ci-display-ci-range">[0.7300,'
+                        ' 4.8500]</span></div></div>'
+                    ),
+                )),
             ],
         },
-        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'])
+        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'],
+    )
     actual = confidence_interval_display.get_formatted_df(
         DF_WITH_DIMENSIONS,
         dims=['Country'],
@@ -194,20 +202,30 @@ class DisplayMetricsTest(unittest.TestCase):
             ],
             'PLA_CONV_CVR': [
                 '<div class="ci-display-cell">0.7870</div>',
-                LINE_BREAK.join(
-                    ('<div class="ci-display-cell"><div>0.7700',
-                     '<span class="ci-display-ratio">-1.4000</span>',
-                     '<span class="ci-display-ci-range">[-5.0350, 2.2350]'
-                     '</span></div></div>')),
+                LINE_BREAK.join((
+                    '<div class="ci-display-cell"><div>0.7700',
+                    '<span class="ci-display-ratio">-1.4000</span>',
+                    (
+                        '<span class="ci-display-ci-range">[-5.0350,'
+                        ' 2.2350]</span></div></div>'
+                    ),
+                )),
                 '<div class="ci-display-cell">0.2160</div>',
-                LINE_BREAK.join(
-                    ('<div class="ci-display-bad-change ci-display-cell"><div>'
-                     '0.2220', '<span class="ci-display-ratio">2.7900</span>',
-                     '<span class="ci-display-ci-range">[0.7300, 4.8500]</span>'
-                     '</div></div>')),
+                LINE_BREAK.join((
+                    (
+                        '<div class="ci-display-bad-change'
+                        ' ci-display-cell"><div>0.2220'
+                    ),
+                    '<span class="ci-display-ratio">2.7900</span>',
+                    (
+                        '<span class="ci-display-ci-range">[0.7300,'
+                        ' 4.8500]</span></div></div>'
+                    ),
+                )),
             ],
         },
-        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'])
+        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'],
+    )
     actual = confidence_interval_display.get_formatted_df(
         DF_WITH_DIMENSIONS,
         dims=['Country'],
@@ -316,6 +334,33 @@ class DisplayMetricsTest(unittest.TestCase):
         return_pre_agg_df=True)
     testing.assert_frame_equal(expected, actual, check_names=False)
 
+  def test_display_df_with_dimensions_show_control_false_show_metric_value(
+      self,
+  ):
+    expected = pd.DataFrame(
+        {
+            'PLA_CONV_CVR': [
+                (0.77, -1.4, -5.035, 2.235),
+                (0.222026, 2.79, 0.73, 4.85),
+            ],
+            'Country': ['GB', 'US'],
+            'Experiment_Id': [42, 42],
+            'Type': ['WEB', 'WEB'],
+        },
+        columns=['Country', 'Type', 'Experiment_Id', 'PLA_CONV_CVR'],
+    )
+    actual = confidence_interval_display.get_formatted_df(
+        DF_WITH_DIMENSIONS,
+        dims=['Country', 'Type'],
+        aggregate_dimensions=False,
+        show_control=False,
+        ctrl_id='expr_foo',
+        auto_add_description=False,
+        show_metric_value_when_control_hidden=True,
+        return_pre_agg_df=True,
+    )
+    testing.assert_frame_equal(expected, actual, check_names=False)
+
   def test_display_df_no_dimension(self):
     expected = pd.DataFrame(
         {
@@ -395,6 +440,23 @@ class DisplayMetricsTest(unittest.TestCase):
         return_pre_agg_df=True)
     testing.assert_frame_equal(expected, actual, check_names=False)
 
+  def test_display_df_no_dimension_show_control_false_show_metric_value(self):
+    expected = pd.DataFrame(
+        {'Experiment_Id': ['expr_bar'], 'metric_foo': [(1.1, 10.0, 5.0, 15.0)]},
+        columns=['Experiment_Id', 'metric_foo'],
+    )
+    actual = confidence_interval_display.get_formatted_df(
+        DF_NO_DIMENSION,
+        dims=['Country', 'Type'],
+        aggregate_dimensions=False,
+        show_control=False,
+        ctrl_id=2,
+        auto_add_description=False,
+        show_metric_value_when_control_hidden=True,
+        return_pre_agg_df=True,
+    )
+    testing.assert_frame_equal(expected, actual, check_names=False)
+
   def test_metric_formatter_with_no_ratio(self):
     expected = '<div class="ci-display-cell">1.2000</div>'
     actual = confidence_interval_display.MetricFormatter()(
@@ -402,12 +464,11 @@ class DisplayMetricsTest(unittest.TestCase):
     self.assertEqual(expected, actual)
 
   def test_metric_formatter_with_no_value(self):
-    expected = LINE_BREAK.join(
-        ('<div class="ci-display-good-change ci-display-cell"><div>'
-         '<div>-</div>', '<span class="ci-display-ratio">1.2000</span>',
-         '<span class="ci-display-ci-range">[1.0000, 1.4000]</span></div>'
-         '</div>'
-        ))
+    expected = LINE_BREAK.join((
+        '<div class="ci-display-good-change ci-display-cell"><div><div>-</div>',
+        '<span class="ci-display-ratio">1.2000</span>',
+        '<span class="ci-display-ci-range">[1.0000, 1.4000]</span></div></div>',
+    ))
     actual = confidence_interval_display.MetricFormatter()((None, 1.2, 1, 1.4))
     self.assertEqual(expected, actual)
 
@@ -456,8 +517,10 @@ class DisplayMetricsTest(unittest.TestCase):
     expected = LINE_BREAK.join((
         '<div class="ci-display-bad-change ci-display-cell"><div>1.2000',
         '<span class="ci-display-ratio">-1.1000</span>',
-        '<span class="ci-display-ci-range">[-1.0200, -1.1800]</span></div>'
-        '</div>'
+        (
+            '<span class="ci-display-ci-range">[-1.0200,'
+            ' -1.1800]</span></div></div>'
+        ),
     ))
     actual = confidence_interval_display.MetricFormatter()(
         (1.2, -1.1, -1.02, -1.18))
@@ -487,8 +550,10 @@ class DisplayMetricsTest(unittest.TestCase):
     expected = LINE_BREAK.join((
         '<div class="ci-display-good-change ci-display-cell"><div>1.2000',
         '<span class="ci-display-ratio">-1.1000</span>',
-        '<span class="ci-display-ci-range">[-1.0200, -1.1800]</span></div>'
-        '</div>'
+        (
+            '<span class="ci-display-ci-range">[-1.0200,'
+            ' -1.1800]</span></div></div>'
+        ),
     ))
     actual = confidence_interval_display.MetricFormatter(if_flip_color=True)(
         (1.2, -1.1, -1.02, -1.18))
@@ -522,4 +587,4 @@ class DisplayMetricsTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()
