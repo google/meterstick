@@ -1704,7 +1704,9 @@ class MetricWithCI(Operation):
     expanded = utils.push_filters_to_leaf(expanded)
     split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
     all_split_by = (
-        split_by + list(utils.get_extra_split_by(expanded)) + [expanded.unit]
+        split_by
+        + list(utils.get_extra_split_by(expanded, return_superset=True))
+        + [expanded.unit]
     )
     leaf = utils.get_leaf_metrics(expanded)
     cols = [
@@ -1721,7 +1723,7 @@ class MetricWithCI(Operation):
         m.extra_split_by = sql.Columns(m.extra_split_by).aliases
     if isinstance(equiv, Bootstrap):
       # When each unit only has one row after preaggregation, we sample by rows.
-      if not utils.get_extra_split_by(equiv):
+      if not utils.get_extra_split_by(equiv, return_superset=True):
         equiv.unit = None
     else:
       equiv.has_local_filter = any([l.where for l in leaf])
@@ -2622,7 +2624,9 @@ def get_jackknife_data_fast(
     The alias of the table in the WITH clause that has all resampled result.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  all_indexes = sql.Columns(indexes).add(utils.get_extra_split_by(metric))
+  all_indexes = sql.Columns(indexes).add(
+      utils.get_extra_split_by(metric, return_superset=True)
+  )
   indexes_and_unit = sql.Columns(all_indexes).add(metric.unit)
   where = sql.Filters(global_filter).add(local_filter)
 

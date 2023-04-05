@@ -294,6 +294,15 @@ class UtilsTest(absltest.TestCase):
     m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
     self.assertEqual(utils.get_extra_idx(m), ('foo',))
 
+  def test_get_extra_idx_return_superset(self):
+    s = metrics.Sum('x')
+    m = metrics.MetricList((
+        operations.AbsoluteChange('g', 0, s),
+        operations.AbsoluteChange('g2', 1, s),
+    ))
+    actual = utils.get_extra_idx(m, True)
+    self.assertEqual(set(actual), set(('g', 'g2')))
+
   def test_get_extra_idx_raises(self):
     mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
     ab = operations.AbsoluteChange('baz', 'f', metrics.Sum('c'))

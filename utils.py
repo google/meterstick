@@ -145,19 +145,27 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
   return res
 
 
-def get_extra_idx(metric):
+def get_extra_idx(metric, return_superset=False):
   """Collects the extra indexes added by Operations for the metric tree.
 
   Args:
     metric: A Metric instance.
+    return_superset: If to return the superset of extra indexes if metric has
+      incompatible indexes.
 
   Returns:
     A tuple of column names which are just the index of metric.compute_on(df).
   """
   extra_idx = metric.extra_index[:]
-  children_idx = [get_extra_idx(c) for c in metric.children if is_metric(c)]
+  children_idx = [
+      get_extra_idx(c, return_superset) for c in metric.children if is_metric(c)
+  ]
   if len(set(children_idx)) > 1:
-    raise ValueError('Incompatible indexes!')
+    if not return_superset:
+      raise ValueError('Incompatible indexes!')
+    children_idx_superset = set()
+    children_idx_superset.update(*children_idx)
+    children_idx = [list(children_idx_superset)]
   if children_idx:
     extra_idx += list(children_idx[0])
   return tuple(extra_idx)
