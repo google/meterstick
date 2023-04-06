@@ -1099,18 +1099,21 @@ def get_display_fn(name,
     A funtion that takes a DataFrame and displays confidence intervals.
   """
 
-  def display(res,
-              aggregate_dimensions=True,
-              show_control=None,
-              metric_formats=None,
-              sort_by=None,
-              metric_order=None,
-              flip_color=None,
-              hide_null_ctrl=True,
-              display_expr_info=False,
-              auto_add_description=False,
-              return_pre_agg_df=False,
-              return_formatted_df=False):
+  def display(
+      res,
+      aggregate_dimensions=True,
+      show_control=None,
+      metric_formats=None,
+      sort_by=None,
+      metric_order=None,
+      flip_color=None,
+      hide_null_ctrl=True,
+      display_expr_info=False,
+      auto_add_description=False,
+      show_metric_value_when_control_hidden=False,
+      return_pre_agg_df=False,
+      return_formatted_df=False,
+  ):
     """Displays confidence interval nicely in Colab/Jupyter notebook.
 
     Args:
@@ -1122,15 +1125,14 @@ def get_display_fn(name,
       metric_formats: A dict specifying how to display metric values. Keys can
         be 'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp' or a
         formatting string. For example, '{:.2%}' would have the same effect as
-          'percent'. By default, Value is in absolute form and Ratio in percent.
-      sort_by: In the form of
-        [{'column': ('CI_Lower', 'Metric Foo'), 'ascending': False},
-         {'column': 'Dim Bar': 'order': ['Logged-in', 'Logged-out']}]. 'column'
-           is the column to sort by. If you want to sort by a metric, use
-           (field, metric name) where field could be 'Ratio', 'Value',
-           'CI_Lower' and 'CI_Upper'. 'order' is optional and for categorical
-           column. 'ascending' is optional and default True. The result will be
-           displayed in the order specified by sort_by from top to bottom.
+        'percent'. By default, Value is in absolute form and Ratio in percent.
+      sort_by: In the form of [{'column': ('CI_Lower', 'Metric Foo'),
+        'ascending': False}, {'column': 'Dim Bar': 'order': ['Logged-in',
+        'Logged-out']}]. 'column' is the column to sort by. If you want to sort
+        by a metric, use (field, metric name) where field could be 'Ratio',
+        'Value', 'CI_Lower' and 'CI_Upper'. 'order' is optional and for
+        categorical column. 'ascending' is optional and default True. The result
+        will be displayed in the order specified by sort_by from top to bottom.
       metric_order: An iterable. The metric will be displayed by the order from
         left to right.
       flip_color: A iterable of metric names that positive changes will be
@@ -1141,6 +1143,9 @@ def get_display_fn(name,
         'Description' columns. Only has effect when aggregate_dimensions is
         False.
       auto_add_description: If add Control/Not Control as descriptions.
+      show_metric_value_when_control_hidden: Only has effect when show_control
+        is False. If True, we also display the raw metric value, otherwise only
+        the change and confidence interval are displayed.
       return_pre_agg_df: If to return the pre-aggregated df.
       return_formatted_df: If to return raw HTML df to be rendered.
 
@@ -1196,7 +1201,9 @@ def get_display_fn(name,
         hide_null_ctrl=hide_null_ctrl,
         display_expr_info=display_expr_info,
         auto_add_description=auto_add_description,
-        return_pre_agg_df=return_pre_agg_df)
+        show_metric_value_when_control_hidden=show_metric_value_when_control_hidden,
+        return_pre_agg_df=return_pre_agg_df,
+    )
     if return_pre_agg_df or return_formatted_df:
       return formatted_df
     display_formatted_df = confidence_interval_display.display_formatted_df

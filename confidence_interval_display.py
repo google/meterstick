@@ -202,14 +202,17 @@ def _merge_dimensions(df, dims):
   return df
 
 
-def _pre_aggregate_df(df,
-                      dims,
-                      aggregate_dimensions,
-                      show_control,
-                      ctrl_id,
-                      sort_by=None,
-                      auto_decide_control_vals=False,
-                      auto_add_description=True):
+def _pre_aggregate_df(
+    df,
+    dims,
+    aggregate_dimensions,
+    show_control,
+    ctrl_id,
+    sort_by=None,
+    auto_decide_control_vals=False,
+    auto_add_description=True,
+    show_metric_value_when_control_hidden=False,
+):
   """Process a long-format df to an appropriate format for display.
 
   Args:
@@ -228,14 +231,17 @@ def _pre_aggregate_df(df,
       and 'ascending' is optional and default True. The result will be displayed
       in the order specified by sort_by from top to bottom.
     auto_decide_control_vals: By default, if users want to see control
-      experiments, df needs to have rows for control, but the 'Value' there
-      is supposed to be equal to the 'Control_Value' column in experiment rows.
-      So if control rows are missing, we can use 'Control_Value' column to fill
+      experiments, df needs to have rows for control, but the 'Value' there is
+      supposed to be equal to the 'Control_Value' column in experiment rows. So
+      if control rows are missing, we can use 'Control_Value' column to fill
       them. The problem is when there are multiple experiments their
       Control_Values might be different (though they shouldn't be). In that case
       we raise a warning and skip. Also if user arleady provide control rows for
       certain slices, we won't fill those slices.
     auto_add_description: If add Control/Not Control as descriptions.
+    show_metric_value_when_control_hidden: Only has effect when show_control is
+      False. If True, we also display the raw metric value, otherwise only the
+      change and confidence interval are displayed.
 
   Returns:
     A pandas dataframe with stylized content for display. The display effect is
@@ -265,7 +271,8 @@ def _pre_aggregate_df(df,
       # When Ratio is None, CI won't be displayed. This is intended for control.
       df.loc[df['Is_Control'], 'Ratio'] = None
   else:
-    df['Value'] = None
+    if not show_metric_value_when_control_hidden:
+      df['Value'] = None
     if 'Is_Control' in df:
       # Make a copy to avoid "A value is trying to be set on a copy of a slice
       # from a DataFrame." warning.
@@ -551,29 +558,32 @@ def _add_is_control_and_control_id(df, ctrl_id):
   return df
 
 
-def get_formatted_df(df,
-                     dims=None,
-                     aggregate_dimensions=True,
-                     show_control=True,
-                     metric_formats=None,
-                     metric='Metric',
-                     ratio='Ratio',
-                     value='Value',
-                     ci_upper='CI_Upper',
-                     ci_lower='CI_Lower',
-                     ci_range='CI_Range',
-                     control_value='Control_Value',
-                     expr_id='Experiment_Id',
-                     ctrl_id=None,
-                     description='Description',
-                     sort_by=None,
-                     metric_order=None,
-                     flip_color=None,
-                     hide_null_ctrl=False,
-                     display_expr_info=False,
-                     auto_decide_control_vals=False,
-                     auto_add_description=True,
-                     return_pre_agg_df=False):
+def get_formatted_df(
+    df,
+    dims=None,
+    aggregate_dimensions=True,
+    show_control=True,
+    metric_formats=None,
+    metric='Metric',
+    ratio='Ratio',
+    value='Value',
+    ci_upper='CI_Upper',
+    ci_lower='CI_Lower',
+    ci_range='CI_Range',
+    control_value='Control_Value',
+    expr_id='Experiment_Id',
+    ctrl_id=None,
+    description='Description',
+    sort_by=None,
+    metric_order=None,
+    flip_color=None,
+    hide_null_ctrl=False,
+    display_expr_info=False,
+    auto_decide_control_vals=False,
+    auto_add_description=True,
+    show_metric_value_when_control_hidden=False,
+    return_pre_agg_df=False,
+):
   """Gets the formatted df with raw HTML as values in every cell.
 
   When rendered, if aggregate_dimensions=True, the first column is for dimension
@@ -596,26 +606,21 @@ def get_formatted_df(df,
   Args:
     df: A long-format dataframe with columns for (all optional unless specified)
       dimensions - if dims is None, we look for columns 'Dim_1', 'Dim_2'... in
-        df.
-      experiment id (Required). We check ctrl_id against this column to decide
-        control rows.
-      metric - A column with all metric names, hence df is in long format.
-      value (Required) - The value of the metric, displayed in the first row in
-        an experiment metric cell.
-      control value - The value of the metric in the control experiment,
-        displayed in cells for control rows.
+      df. experiment id (Required). We check ctrl_id against this column to
+      decide control rows. metric - A column with all metric names, hence df is
+      in long format. value (Required) - The value of the metric, displayed in
+      the first row in an experiment metric cell. control value - The value of
+      the metric in the control experiment, displayed in cells for control rows.
       ratio (Required) - value / control valu, displayed in the 2nd row in an
-        experiment metric cell.
-        NOTE We don't check if ratio really equals value / control value and we
-        don't try to calculate it if it's missing. We just render it in the 2nd
-        row, so it's possible you provide a wrong ratio column and the numbers
-        displayed don't make sense.
-      ci lower - The lower bound of the confidence interval of ratio.
-      ci upper - The upper bound of the confidence interval of ratio.
-      ci range - ci upper - ci lower. You need to provide either ci range or
-        (ci lower and upper).
-      description - The description of the experiment, when provided, will be
-        rendered as the first row in a dimension cell.
+      experiment metric cell. NOTE We don't check if ratio really equals value /
+      control value and we don't try to calculate it if it's missing. We just
+      render it in the 2nd row, so it's possible you provide a wrong ratio
+      column and the numbers displayed don't make sense. ci lower - The lower
+      bound of the confidence interval of ratio. ci upper - The upper bound of
+      the confidence interval of ratio. ci range - ci upper - ci lower. You need
+      to provide either ci range or (ci lower and upper). description - The
+      description of the experiment, when provided, will be rendered as the
+      first row in a dimension cell.
     dims: The column names of slicing dimesions, can be a list or a string.
     aggregate_dimensions: Whether to aggregate all dimensions in to one column.
     show_control: If False, only ratio values in non-control rows are shown.
@@ -637,10 +642,9 @@ def get_formatted_df(df,
       values being list of corresponding experiment id(s).
     description: The column name for the optional description of each row. It'll
       be rendered together with experiment id for a more meaningful display.
-    sort_by: In the form of
-      [{'column': ('CI_Lower', 'Metric Foo'), 'ascending': False}},
-       {'column': 'Dim Bar': 'order': ['Logged-in', 'Logged-out']}]. 'column'
-      is the column to sort by. If you want to sort by a metric, use
+    sort_by: In the form of [{'column': ('CI_Lower', 'Metric Foo'), 'ascending':
+      False}}, {'column': 'Dim Bar': 'order': ['Logged-in', 'Logged-out']}].
+      'column' is the column to sort by. If you want to sort by a metric, use
       (field, metric name) where field could be 'Ratio', 'Value', 'CI_Lower' and
       'CI_Upper'. 'order' is optional and for categorical column. 'ascending' is
       optional and default True. The result will be displayed in the order
@@ -654,14 +658,17 @@ def get_formatted_df(df,
     display_expr_info: If to display 'Control_id', 'Is_Control' and
       'Description' columns. Only has effect when aggregate_dimensions = False.
     auto_decide_control_vals: By default, if users want to see control
-      experiments, df needs to have rows for control, but the 'Value' there
-      is supposed to be equal to the 'Control_Value' column in experiment rows.
-      So if control rows are missing, we can use 'Control_Value' column to fill
+      experiments, df needs to have rows for control, but the 'Value' there is
+      supposed to be equal to the 'Control_Value' column in experiment rows. So
+      if control rows are missing, we can use 'Control_Value' column to fill
       them. The problem is when there are multiple experiments their
       Control_Values might be different (though they shouldn't be). In that case
       we raise a warning and skip. Also if user arleady provide control rows for
       certain slices, we won't fill those slices.
     auto_add_description: If add Control/Not Control as descriptions.
+    show_metric_value_when_control_hidden: Only has effect when show_control is
+      False. If True, we also display the raw metric value, otherwise only the
+      change and confidence interval are displayed.
     return_pre_agg_df: If to return the pre-aggregated df.
 
   Returns:
@@ -693,10 +700,17 @@ def get_formatted_df(df,
   for s in sort_by:
     s['column'] = col_rename.get(s['column'], s['column'])
   df_renamed = df.rename(columns=col_rename)
-  formatted_df = _pre_aggregate_df(df_renamed, dims, aggregate_dimensions,
-                                   show_control, ctrl_id, sort_by,
-                                   auto_decide_control_vals,
-                                   auto_add_description)
+  formatted_df = _pre_aggregate_df(
+      df_renamed,
+      dims,
+      aggregate_dimensions,
+      show_control,
+      ctrl_id,
+      sort_by,
+      auto_decide_control_vals,
+      auto_add_description,
+      show_metric_value_when_control_hidden,
+  )
 
   if metric_order:
     # Sort metric order based on the given argument or default metric order.
@@ -753,30 +767,33 @@ def display_formatted_df(formatted_df, extra_css=''):
   pd.set_option('display.max_colwidth', curr_max_colwidth)
 
 
-def render(df,
-           dims=None,
-           aggregate_dimensions=True,
-           show_control=True,
-           metric_formats=None,
-           metric='Metric',
-           ratio='Ratio',
-           value='Value',
-           ci_upper='CI_Upper',
-           ci_lower='CI_Lower',
-           ci_range='CI_Range',
-           control_value='Control_Value',
-           expr_id='Experiment_Id',
-           ctrl_id=None,
-           description='Description',
-           sort_by=None,
-           metric_order=None,
-           flip_color=None,
-           hide_null_ctrl=False,
-           display_expr_info=False,
-           auto_decide_control_vals=False,
-           auto_add_description=True,
-           return_pre_agg_df=False,
-           return_formatted_df=False):
+def render(
+    df,
+    dims=None,
+    aggregate_dimensions=True,
+    show_control=True,
+    metric_formats=None,
+    metric='Metric',
+    ratio='Ratio',
+    value='Value',
+    ci_upper='CI_Upper',
+    ci_lower='CI_Lower',
+    ci_range='CI_Range',
+    control_value='Control_Value',
+    expr_id='Experiment_Id',
+    ctrl_id=None,
+    description='Description',
+    sort_by=None,
+    metric_order=None,
+    flip_color=None,
+    hide_null_ctrl=False,
+    display_expr_info=False,
+    auto_decide_control_vals=False,
+    auto_add_description=True,
+    show_metric_value_when_control_hidden=False,
+    return_pre_agg_df=False,
+    return_formatted_df=False,
+):
   """Gets the formatted df with raw HTML as values in every cell.
 
   When rendered, if aggregate_dimensions=True, the first column is for dimension
@@ -799,26 +816,21 @@ def render(df,
   Args:
     df: A long-format dataframe with columns for (all optional unless specified)
       dimensions - if dims is None, we look for columns 'Dim_1', 'Dim_2'... in
-        df.
-      experiment id (Required). We check ctrl_id against this column to decide
-        control rows.
-      metric - A column with all metric names, hence df is in long format.
-      value (Required) - The value of the metric, displayed in the first row in
-        an experiment metric cell.
-      control value - The value of the metric in the control experiment,
-        displayed in cells for control rows.
+      df. experiment id (Required). We check ctrl_id against this column to
+      decide control rows. metric - A column with all metric names, hence df is
+      in long format. value (Required) - The value of the metric, displayed in
+      the first row in an experiment metric cell. control value - The value of
+      the metric in the control experiment, displayed in cells for control rows.
       ratio (Required) - value / control valu, displayed in the 2nd row in an
-        experiment metric cell.
-        NOTE We don't check if ratio really equals value / control value and we
-        don't try to calculate it if it's missing. We just render it in the 2nd
-        row, so it's possible you provide a wrong ratio column and the numbers
-        displayed don't make sense.
-      ci lower - The lower bound of the confidence interval of ratio.
-      ci upper - The upper bound of the confidence interval of ratio.
-      ci range - ci upper - ci lower. You need to provide either ci range or
-        (ci lower and upper).
-      description - The description of the experiment, when provided, will be
-        rendered as the first row in a dimension cell.
+      experiment metric cell. NOTE We don't check if ratio really equals value /
+      control value and we don't try to calculate it if it's missing. We just
+      render it in the 2nd row, so it's possible you provide a wrong ratio
+      column and the numbers displayed don't make sense. ci lower - The lower
+      bound of the confidence interval of ratio. ci upper - The upper bound of
+      the confidence interval of ratio. ci range - ci upper - ci lower. You need
+      to provide either ci range or (ci lower and upper). description - The
+      description of the experiment, when provided, will be rendered as the
+      first row in a dimension cell.
     dims: The column names of slicing dimesions, can be a list or a string.
     aggregate_dimensions: Whether to aggregate all dimensions in to one column.
     show_control: If False, only ratio values in non-control rows are shown.
@@ -840,10 +852,9 @@ def render(df,
       values being list of corresponding experiment id(s).
     description: The column name for the optional description of each row. It'll
       be rendered together with experiment id for a more meaningful display.
-    sort_by: In the form of
-      [{'column': ('CI_Lower', 'Metric Foo'), 'ascending': False}},
-       {'column': 'Dim Bar': 'order': ['Logged-in', 'Logged-out']}]. 'column'
-      is the column to sort by. If you want to sort by a metric, use
+    sort_by: In the form of [{'column': ('CI_Lower', 'Metric Foo'), 'ascending':
+      False}}, {'column': 'Dim Bar': 'order': ['Logged-in', 'Logged-out']}].
+      'column' is the column to sort by. If you want to sort by a metric, use
       (field, metric name) where field could be 'Ratio', 'Value', 'CI_Lower' and
       'CI_Upper'. 'order' is optional and for categorical column. 'ascending' is
       optional and default True. The result will be displayed in the order
@@ -857,14 +868,17 @@ def render(df,
     display_expr_info: If to display 'Control_id', 'Is_Control' and
       'Description' columns. Only has effect when aggregate_dimensions = False.
     auto_decide_control_vals: By default, if users want to see control
-      experiments, df needs to have rows for control, but the 'Value' there
-      is supposed to be equal to the 'Control_Value' column in experiment rows.
-      So if control rows are missing, we can use 'Control_Value' column to fill
+      experiments, df needs to have rows for control, but the 'Value' there is
+      supposed to be equal to the 'Control_Value' column in experiment rows. So
+      if control rows are missing, we can use 'Control_Value' column to fill
       them. The problem is when there are multiple experiments their
       Control_Values might be different (though they shouldn't be). In that case
       we raise a warning and skip. Also if user arleady provide control rows for
       certain slices, we won't fill those slices.
     auto_add_description: If add Control/Not Control as descriptions.
+    show_metric_value_when_control_hidden: Only has effect when show_control is
+      False. If True, we also display the raw metric value, otherwise only the
+      change and confidence interval are displayed.
     return_pre_agg_df: If to return the pre-aggregated df.
     return_formatted_df: If to return raw HTML df to be rendered.
 
@@ -872,13 +886,32 @@ def render(df,
     Displays confidence interval nicely for df, or aggregated/formatted if
     return_pre_agg_df/return_formatted_df is True
   """
-  formatted_df = get_formatted_df(df, dims, aggregate_dimensions, show_control,
-                                  metric_formats, metric, ratio, value,
-                                  ci_upper, ci_lower, ci_range, control_value,
-                                  expr_id, ctrl_id, description, sort_by,
-                                  metric_order, flip_color, hide_null_ctrl,
-                                  display_expr_info, auto_decide_control_vals,
-                                  auto_add_description, return_pre_agg_df)
+  formatted_df = get_formatted_df(
+      df,
+      dims,
+      aggregate_dimensions,
+      show_control,
+      metric_formats,
+      metric,
+      ratio,
+      value,
+      ci_upper,
+      ci_lower,
+      ci_range,
+      control_value,
+      expr_id,
+      ctrl_id,
+      description,
+      sort_by,
+      metric_order,
+      flip_color,
+      hide_null_ctrl,
+      display_expr_info,
+      auto_decide_control_vals,
+      auto_add_description,
+      show_metric_value_when_control_hidden,
+      return_pre_agg_df,
+  )
   if return_pre_agg_df or return_formatted_df:
     return formatted_df
   return display_formatted_df(formatted_df)

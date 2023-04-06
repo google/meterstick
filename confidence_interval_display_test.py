@@ -316,6 +316,33 @@ class DisplayMetricsTest(unittest.TestCase):
         return_pre_agg_df=True)
     testing.assert_frame_equal(expected, actual, check_names=False)
 
+  def test_display_df_with_dimensions_show_control_false_show_metric_value(
+      self,
+  ):
+    expected = pd.DataFrame(
+        {
+            'PLA_CONV_CVR': [
+                (0.77, -1.4, -5.035, 2.235),
+                (0.222026, 2.79, 0.73, 4.85),
+            ],
+            'Country': ['GB', 'US'],
+            'Experiment_Id': [42, 42],
+            'Type': ['WEB', 'WEB'],
+        },
+        columns=['Country', 'Type', 'Experiment_Id', 'PLA_CONV_CVR'],
+    )
+    actual = confidence_interval_display.get_formatted_df(
+        DF_WITH_DIMENSIONS,
+        dims=['Country', 'Type'],
+        aggregate_dimensions=False,
+        show_control=False,
+        ctrl_id='expr_foo',
+        auto_add_description=False,
+        show_metric_value_when_control_hidden=True,
+        return_pre_agg_df=True,
+    )
+    testing.assert_frame_equal(expected, actual, check_names=False)
+
   def test_display_df_no_dimension(self):
     expected = pd.DataFrame(
         {
@@ -393,6 +420,23 @@ class DisplayMetricsTest(unittest.TestCase):
         ctrl_id=2,
         auto_add_description=False,
         return_pre_agg_df=True)
+    testing.assert_frame_equal(expected, actual, check_names=False)
+
+  def test_display_df_no_dimension_show_control_false_show_metric_value(self):
+    expected = pd.DataFrame(
+        {'Experiment_Id': ['expr_bar'], 'metric_foo': [(1.1, 10.0, 5.0, 15.0)]},
+        columns=['Experiment_Id', 'metric_foo'],
+    )
+    actual = confidence_interval_display.get_formatted_df(
+        DF_NO_DIMENSION,
+        dims=['Country', 'Type'],
+        aggregate_dimensions=False,
+        show_control=False,
+        ctrl_id=2,
+        auto_add_description=False,
+        show_metric_value_when_control_hidden=True,
+        return_pre_agg_df=True,
+    )
     testing.assert_frame_equal(expected, actual, check_names=False)
 
   def test_metric_formatter_with_no_ratio(self):
