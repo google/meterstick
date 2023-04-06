@@ -742,6 +742,12 @@ class Metric(object):
                              False, mode, self.cache_key, self.cache))
     return children[0] if len(self.children) == 1 else children
 
+  def compute_equivalent(self, df, split_by=None):
+    equiv, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)
+    return self.compute_util_metric_on(
+        equiv, df, split_by, return_dataframe=False
+    )
+
   def get_equivalent(self, *auxiliary_cols):
     """Gets a Metric that is equivalent to self."""
     res = self.get_equivalent_without_filter(*auxiliary_cols)
@@ -1344,7 +1350,7 @@ class SimpleMetric(Metric):
     cols = self.get_sql_columns(local_filter)
     if cols:
       return sql.Sql(cols, table, global_filter, split_by), with_data
-    equiv, _ = utils.get_equivalent_metric(self)
+    equiv, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
     return equiv.get_sql_and_with_clause(table, split_by, global_filter,
                                          indexes, local_filter, with_data)
 
@@ -1437,11 +1443,11 @@ class Dot(SimpleMetric):
     if not split_by:
       prod = (df[self.var] * df[self.var2])
       return prod.mean() if self.normalize else prod.sum()
-    df['_meterstick_dot_helper'] = df[self.var] * df[self.var2]
-    grped = df.groupby(split_by, observed=True)['_meterstick_dot_helper']
-    res = grped.mean() if self.normalize else grped.sum()
-    df.drop('_meterstick_dot_helper', axis=1, inplace=True)
-    return res
+    if self.normalize:
+      fn = lambda df: (df[self.var] * df[self.var2]).mean()
+    else:
+      fn = lambda df: (df[self.var] * df[self.var2]).sum()
+    return df.groupby(split_by, observed=True).apply(fn)
 
   def get_sql_columns(self, local_filter):
     tmpl = 'AVG({} * {})' if self.normalize else 'SUM({} * {})'
@@ -1485,15 +1491,9 @@ class Mean(SimpleMetric):
     super(Mean, self).__init__(var, name, name_tmpl, where, ['weight'])
     self.weight = weight
 
-  def compute(self, df):
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-    return np.average(df[self.var], weights=df[self.weight])
-
   def compute_slices(self, df, split_by=None):
     if self.weight:
-      # When there is weight, just loop through slices.
-      return super(Mean, self).compute_slices(df, split_by)
+      return self.compute_equivalent(df, split_by)
     return self.group(df, split_by)[self.var].mean()
 
   def get_sql_columns(self, local_filter):
@@ -1669,12 +1669,13 @@ class Variance(SimpleMetric):
 
   Attributes:
     var: Column to compute on.
-    ddof: Degree of freedom to use in pd.DataFrame.var().
+    ddof: Degree of freedom to use in pd.DataFrame.var(). If ddof is larger than
+      the degree of freedom in the data, we return NA.
     weight: The column of weights.
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
-      df.query() as a prefilter.
-    And all other attributes inherited from SimpleMetric.
+      df.query() as a prefilter. And all other attributes inherited from
+      SimpleMetric.
   """
 
   def __init__(self,
@@ -1689,18 +1690,9 @@ class Variance(SimpleMetric):
     super(Variance, self).__init__(var, name, name_tmpl, where,
                                    ['ddof', 'weight'])
 
-  def compute(self, df):
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-    avg = np.average(df[self.var], weights=df[self.weight])
-    total = (df[self.weight] * (df[self.var] - avg)**2).sum()
-    total_weights = df[self.weight].sum()
-    return total / (total_weights - self.ddof)
-
   def compute_slices(self, df, split_by=None):
     if self.weight:
-      # When there is weight, just loop through slices.
-      return super(Variance, self).compute_slices(df, split_by)
+      return self.compute_equivalent(df, split_by)
     return self.group(df, split_by)[self.var].var(ddof=self.ddof)
 
   def get_sql_columns(self, local_filter):
@@ -1731,12 +1723,13 @@ class StandardDeviation(SimpleMetric):
 
   Attributes:
     var: Column to compute on.
-    ddof: Degree of freedom to use in pd.DataFrame.std().
+    ddof: Degree of freedom to use in pd.DataFrame.std(). If ddof is larger than
+      the degree of freedom in the data, we return NA.
     weight: The column of weights.
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
-      df.query() as a prefilter.
-    And all other attributes inherited from SimpleMetric.
+      df.query() as a prefilter. And all other attributes inherited from
+      SimpleMetric.
   """
 
   def __init__(self,
@@ -1751,18 +1744,9 @@ class StandardDeviation(SimpleMetric):
     super(StandardDeviation, self).__init__(var, name, name_tmpl, where,
                                             ['ddof', 'weight'])
 
-  def compute(self, df):
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-    avg = np.average(df[self.var], weights=df[self.weight])
-    total = (df[self.weight] * (df[self.var] - avg)**2).sum()
-    total_weights = df[self.weight].sum()
-    return np.sqrt(total / (total_weights - self.ddof))
-
   def compute_slices(self, df, split_by=None):
     if self.weight:
-      # When there is weight, just loop through slices.
-      return super(StandardDeviation, self).compute_slices(df, split_by)
+      return self.compute_equivalent(df, split_by)
     return self.group(df, split_by)[self.var].std(ddof=self.ddof)
 
   def get_sql_columns(self, local_filter):
@@ -1783,11 +1767,12 @@ class CV(SimpleMetric):
 
   Attributes:
     var: Column to compute on.
-    ddof: Degree of freedom to use.
+    ddof: Degree of freedom to use. If ddof is larger than the degree of freedom
+      in the data, we return NA.
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
-      df.query() as a prefilter.
-    And all other attributes inherited from SimpleMetric.
+      df.query() as a prefilter. And all other attributes inherited from
+      SimpleMetric.
   """
 
   def __init__(self,
@@ -1851,17 +1836,13 @@ class Correlation(SimpleMetric):
     super(Correlation, self).__init__(var1, name, name_tmpl, where,
                                       ['method', 'weight'])
 
-  def compute(self, df):
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-    cov = np.cov(
-        df[[self.var, self.var2]],
-        rowvar=False,
-        bias=True,
-        aweights=df[self.weight])
-    return cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1])
-
   def compute_slices(self, df, split_by=None):
+    if self.weight and self.method != 'pearson':
+      raise NotImplementedError(
+          'Only Pearson correlation is supported in weighted Correlation!'
+      )
+    if self.weight:
+      return self.compute_equivalent(df, split_by)
     # If there are duplicated index values and split_by is not None, the result
     # will be wrong. For example,
     # df = pd.DataFrame(
@@ -1872,9 +1853,6 @@ class Correlation(SimpleMetric):
     # indexes the series from the grouped by part gets duplicated.
     if isinstance(df, pd.DataFrame):
       df = df.reset_index(drop=True)
-    if self.weight:
-      # When there is weight, just loop through slices.
-      return super(Correlation, self).compute_slices(df, split_by)
     return self.group(df, split_by)[self.var].corr(
         df[self.var2], method=self.method)
 
@@ -1910,15 +1888,16 @@ class Cov(SimpleMetric):
     var: Column of first variable.
     var2: Column of second variable.
     bias: The same arg passed to np.cov().
-    ddof: The same arg passed to np.cov().
+    ddof: The same arg passed to np.cov().  If ddof is larger than the degree of
+      freedom in the data, we return NA.
     weight: Column name of aweights.
     fweight: Column name of fweights. We will convert the values to integer
       because that's required by definition. For the definitions of aweights and
       fweight, see the cod of numpy.cov().
     name: Name of the Metric.
     where: A string or list of strings to be concatenated that will be passed to
-      df.query() as a prefilter.
-    And all other attributes inherited from SimpleMetric.
+      df.query() as a prefilter. And all other attributes inherited from
+      SimpleMetric.
   """
 
   def __init__(self,
@@ -1946,14 +1925,8 @@ class Cov(SimpleMetric):
     super(Cov, self).__init__(var1, name, name_tmpl, where,
                               ['bias', 'ddof', 'weight', 'fweight'])
 
-  def compute(self, df):
-    return np.cov(
-        df[[self.var, self.var2]],
-        rowvar=False,
-        bias=self.bias,
-        ddof=self.ddof,
-        aweights=df[self.weight] if self.weight else None,
-        fweights=df[self.fweight].astype(int) if self.fweight else None)[0, 1]
+  def compute_slices(self, df, split_by=None):
+    return self.compute_equivalent(df, split_by)
 
   def get_sql_columns(self, local_filter):
     """Get SQL columns."""

@@ -490,11 +490,62 @@ def parse_auxiliary_col(auxiliary_col, df: Optional[pd.DataFrame] = None):
   return name, res
 
 
+def get_fully_expanded_equivalent_metric_tree(m, df=None, prefix=''):
+  """Gets a Metric that is equivalent to m, and cannot be further expanded.
+
+  Some Metrics can be expressed by simpler Metrics like Sum and Count. Sum and
+  Count are easy to compute and Jackknife knows how to cut the corner to compute
+  the leave-one-out estimates for them. If we can replace complex Metrics with
+  Sum and Count then Jackknife can cut the corner for them too. For example,
+  Dot(x, y) is equivalent to Sum(x * y) so instead of computing
+  Jackknife(Dot(x, y)), we can compute Jackknife(Sum(x * y)). However, column
+  `x * y` doesn't necessarily exist in df so we need to create it. A Metric's
+  direct equivalent form could still not be simple enough. For example, weighted
+  Mean(x, y) is equivalent to Dot(x, y) / Sum(y) where the Dot can be further
+  simplified. Here we returns the equivalent Metric that cannot be simplified
+  anymore and add the intermediate columns, `x * y` in the Dot example, to a
+  copy of df.
+
+  Args:
+    m: A Metric.
+    df: The dataframe we compute on. If None, we skip the computation part.
+    prefix: A prefix that doesn't exist in df. We'll prefix it to all columns
+      added so the new columns won't collide with the existing ones.
+
+  Returns:
+    A Metric equivalent to m with leaf Metrics replaced by Sum and Count. df is
+    modified in-place.
+    A copy of the original dataframe with auxiliary columns added.
+  """
+  df = copy.copy(df)
+  prev = m
+  curr = get_equivalent_metric_tree(m, df, prefix)
+  while prev != curr:
+    prev, curr = curr, get_equivalent_metric_tree(curr, df, prefix)
+  return curr, df
+
+
 def get_unique_prefix(df):
   prefix = 'meterstick_tmp:'
   while any(str(c).startswith(prefix) for c in df.columns):
     prefix += ':'
   return prefix
+
+
+def get_equivalent_metric_tree(m, df=None, prefix=''):
+  """Replaces Metrics in the tree of m with equivalent Metrics."""
+  if not is_metric(m):
+    return m
+  if m.children:
+    res = copy.deepcopy(m)
+    res.children = [
+        get_equivalent_metric_tree(c, df, prefix) for c in res.children
+    ]
+    return res
+  if not m.get_equivalent(*m.get_auxiliary_cols()):
+    return m
+  equiv, df = get_equivalent_metric(m, df, prefix)
+  return equiv
 
 
 def get_equivalent_metric(m, df=None, prefix=''):

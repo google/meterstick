@@ -1784,11 +1784,12 @@ class Jackknife(MetricWithCI):
     """
     if not self.can_precompute():
       return super(Jackknife, self).compute_slices(df, split_by)
-    if self != get_stable_equivalent_metric_tree(self):
-      df = copy.copy(df)
+    if self != utils.get_fully_expanded_equivalent_metric_tree(self)[0]:
       prefix = utils.get_unique_prefix(df)
-      util_metric = get_stable_equivalent_metric_tree(self, df, prefix)
-      return self.compute_util_metric_on(util_metric, df, split_by)
+      util, df = utils.get_fully_expanded_equivalent_metric_tree(
+          self, df, prefix
+      )
+      return self.compute_util_metric_on(util, df, split_by)
     self.compute_child(df, split_by + [self.unit])
     precomputed = self.find_all_in_cache_by_metric_type(metric=metrics.Sum)
     precomputed.update(
@@ -1987,55 +1988,6 @@ class Jackknife(MetricWithCI):
     return replicates
 
 
-def get_stable_equivalent_metric_tree(m, df=None, prefix=''):
-  """Gets a Metric that is equivalent to m, and cannot be further simplified.
-
-  Some Metrics can be expressed by simpler Metrics like Sum and Count. Sum and
-  Count are easy to compute and Jackknife knows how to cut the corner to compute
-  the leave-one-out estimates for them. If we can replace complex Metrics with
-  Sum and Count then Jackknife can cut the corner for them too. For example,
-  Dot(x, y) is equivalent to Sum(x * y) so instead of computing
-  Jackknife(Dot(x, y)), we can compute Jackknife(Sum(x * y)). However, column
-  `x * y` doesn't necessarily exist in df so we need to create it. A Metric's
-  direct equivalent form could still not be simple enough. For example, weighted
-  Mean(x, y) is equivalent to Dot(x, y) / Sum(y) where the Dot can be further
-  simplified. Here we returns the equivalent Metric that cannot be simplified
-  anymore and add the intermediate columns, `x * y` in the Dot example, to df
-  in-place.
-
-  Args:
-    m: A Metric, usually a Jackknife.
-    df: The dataframe we compute on. If None, we skip the computation part.
-    prefix: A prefix that doesn't exist in df. We'll prefix it to all columns
-      added so the new columns won't collide with the existing ones.
-
-  Returns:
-    A Metric equivalent to m with leaf Metrics replaced by Sum and Count. df is
-    modified in-place.
-  """
-  prev = m
-  curr = get_equivalent_metric_tree(m, df, prefix)
-  while prev != curr:
-    prev, curr = curr, get_equivalent_metric_tree(curr, df, prefix)
-  return curr
-
-
-def get_equivalent_metric_tree(m, df=None, prefix=''):
-  """Replaces Metrics in the tree of m with equivalent Metrics."""
-  if not isinstance(m, metrics.Metric):
-    return m
-  if isinstance(m, (metrics.Sum, metrics.Count)):
-    return m
-  if m.children:
-    res = copy.deepcopy(m)
-    res.children = [
-        get_equivalent_metric_tree(c, df, prefix) for c in res.children
-    ]
-    return res
-  equiv, df = utils.get_equivalent_metric(m, df, prefix)
-  return equiv
-
-
 class Bootstrap(MetricWithCI):
   """Class for Bootstrap estimates of standard errors.
 
@@ -2128,7 +2080,7 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
            with_data):
   """Gets the SQL query that computes the standard error and dof if needed."""
   if isinstance(metric, Jackknife) and metric.can_precompute():
-    util = get_stable_equivalent_metric_tree(metric)
+    util, _ = utils.get_fully_expanded_equivalent_metric_tree(metric)
     if util != metric:
       return get_se(util, table, split_by, global_filter, indexes, local_filter,
                     with_data)

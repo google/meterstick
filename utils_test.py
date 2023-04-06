@@ -352,6 +352,16 @@ class UtilsTest(unittest.TestCase):
     self.assertEqual(output, expected)
     testing.assert_frame_equal(df, expected_df)
 
+  def test_get_fully_expanded_equivalent_metric_tree(self):
+    m1 = metrics.Mean('x', where='a')
+    m2 = metrics.Dot('x', 'y', where='b')
+    m = 2 * (m1 - m2)
+    output, _ = utils.get_fully_expanded_equivalent_metric_tree(m)
+    expected = 2 * (
+        utils.get_equivalent_metric(m1)[0] - utils.get_equivalent_metric(m2)[0]
+    )
+    self.assertEqual(output, expected)
+
 
 if __name__ == '__main__':
   unittest.main()
