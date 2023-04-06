@@ -154,8 +154,6 @@ class Metric(object):
       hashables. See get_fingerprint() for how it's used.
     extra_split_by: Used by Operation. See the doc there.
     extra_index: Used by Operation. See the doc there.
-    computable_in_pure_sql: If the Metric can be completely computed in SQL. For
-      example, all Models can't.
     name_tmpl: Used by Metrics that have children. It's applied to children's
       names in the output.
     cache: A dict to store the result. It's shared across the Metric tree.
@@ -185,7 +183,6 @@ class Metric(object):
     else:
       self.extra_index = [extra_index] if isinstance(extra_index,
                                                      str) else extra_index
-    self.computable_in_pure_sql = True
     self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
     self.name_tmpl = name_tmpl
     self.cache_key = None
@@ -593,22 +590,21 @@ class Metric(object):
       split_by: The columns that we use to split the data.
       execute: A function that can executes a SQL query and returns a DataFrame.
       melted: Whether to transform the result to long format.
-      mode: For Operations, there are two ways to compute the result in SQL, one
-        is computing everything in SQL, the other is computing the children
-        in SQL then the rest in Python. We call them 'sql' and 'mixed' modes. If
-        self has grandchildren, then we can compute the chilren in two modes
-        too. We can call them light `mixed` mode and recursive `mixed` mode.
-        If `mode` is 'sql', it computes everything in SQL.
-        If `mode` is 'mixed', it computes everything recursively in the `mixed`
-        mode.
-        We recommend `mode` to be None. This mode tries the `sql` mode first, if
-        not implemented, switch to light `mixed` mode. The logic is applied
-        recursively from the root to leaf Metrics, so a Metric tree could have
-        top 3 layeres computed in Python and the bottom in SQL. In summary,
-        everything can be computed in SQL is computed in SQL.
+      mode: For Metrics with children, there are different ways to split the
+        computation into SQL and Python. For example, we can compute everything
+        in SQL, or the children in SQL and the parent in Python, or
+        grandchildren in SQL and the rest in Python. Here we support two modes.
+        The default mode where `mode` is None is recommend. This mode computes
+        maximizes the SQL usage, namely, everything can be computed in SQL is
+        computed in SQL. The opposite mode is called `mixed` where the SQL usage
+        is minimized, namely, only leaf Metrics are computed in SQL. There is
+        another `magic` mode which only applies to Models. The mode computes
+        sufficient statistics in SQL then use them to solve the coefficients in
+        Python. It's faster then the regular mode when fitting Models on large
+        data.
       cache_key: What key to use to cache the result. You can use anything that
-        can be a key of a dict except '_RESERVED' and tuples like
-        ('_RESERVED', ..).
+        can be a key of a dict except '_RESERVED' and tuples like ('_RESERVED',
+        ..).
       cache: The cache the whole Metric tree shares during one round of
         computation. If it's None, we initiate an empty dict.
 
@@ -640,30 +636,18 @@ class Metric(object):
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
-    if mode not in (None, 'sql', 'mixed', 'magic'):
+    if mode not in (None, 'mixed', 'magic'):
       raise ValueError('Mode %s is not supported!' % mode)
-    if not self.children and not self.computable_in_pure_sql:
-      raise ValueError('%s is not computable in SQL.' % self.name)
-    if mode in (None, 'sql') or not self.children:
-      if self.all_computable_in_pure_sql():
-        try:
-          return self.compute_on_sql_sql_mode(table, split_by, execute)
-        except Exception as e:  # pylint: disable=broad-except
-          if not self.children:
-            raise
-          raise utils.MaybeBadSqlModeError('mixed') from e
-      elif mode == 'sql':
-        raise ValueError('%s is not computable in pure SQL.' % self.name)
+    if not self.children:
+      return self.compute_on_sql_sql_mode(table, split_by, execute)
+    if not mode:
+      try:
+        return self.compute_on_sql_sql_mode(table, split_by, execute)
+      except Exception:  # pylint: disable=broad-except
+        pass
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
     return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
-
-  def all_computable_in_pure_sql(self, include_self=True):
-    """If the whole Metric tree is computable in SQL."""
-    for m in self.traverse(include_self):
-      if not m.computable_in_pure_sql:
-        return False
-    return True
 
   def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
     """Executes the query from to_sql() and process the result."""
@@ -1032,6 +1016,8 @@ class MetricList(Metric):
     return res
 
   def to_dataframe(self, res):
+    if not isinstance(res, (list, tuple)):
+      return super(MetricList, self).to_dataframe(res)
     res_all = pd.concat(res, axis=1, sort=False)
     # In PY2, if index order are different, the names might get dropped.
     res_all.index.names = res[0].index.names

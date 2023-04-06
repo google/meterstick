@@ -319,7 +319,6 @@ class Model(operations.Operation):
         name=name,
         where=where,
         additional_fingerprint_attrs=['fit_intercept', 'normalize'])
-    self.computable_in_pure_sql = False
     self.fit_intercept = fit_intercept
     self.normalize = normalize
 
@@ -344,31 +343,26 @@ class Model(operations.Operation):
     return pd.DataFrame([coef], columns=names)
 
   def compute_through_sql(self, table, split_by, execute, mode):
-    if mode not in (None, 'sql', 'mixed', 'magic'):
-      raise ValueError(f'Mode {mode} is not supported!')
-    if mode == 'sql':
-      raise ValueError(f'{self.name} is not computable in pure SQL!')
-    if mode == 'magic' and not self.all_computable_in_pure_sql(False):
-      raise ValueError(
-          f'The "magic" mode of {self.name} requires all descendants to be computable in SQL!'
-      )
-
-    if self.where:
-      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
-    if mode == 'mixed' or not mode:
-      try:
-        return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
-      except utils.MaybeBadSqlModeError as e:
-        e.better_mode = 'magic'
-        raise e
-      except Exception as e:  # pylint: disable=broad-except
-        raise utils.MaybeBadSqlModeError('magic') from e
-    if self.all_computable_in_pure_sql(False):
-      try:
+    try:
+      if mode == 'magic':
+        if self.where:
+          table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
         res = self.compute_on_sql_magic_mode(table, split_by, execute)
         return utils.apply_name_tmpl(self.name_tmpl, res)
-      except Exception as e:  # pylint: disable=broad-except
-        raise utils.MaybeBadSqlModeError('mixed') from e
+      return super(Model, self).compute_through_sql(
+          table, split_by, execute, mode
+      )
+    except NotImplementedError:
+      raise
+    except Exception as e:  # pylint: disable=broad-except
+      msg = (
+          "Please see the root cause of the failure above. If it's caused by"
+          ' the query being too large/complex, you can try '
+          "compute_on_sql(..., mode='%s')."
+      )
+      if mode == 'magic':
+        raise ValueError(msg % 'mixed') from e
+      raise ValueError(msg % 'magic') from e
 
   def compute_on_sql_magic_mode(self, table, split_by, execute):
     raise NotImplementedError

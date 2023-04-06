@@ -396,29 +396,6 @@ def get_extra_split_by(metric, return_superset=False):
   return tuple(extra_split_by)
 
 
-class MaybeBadSqlModeError(Exception):
-  """An Error used in compute_on_sql(), when a better mode might exist."""
-
-  def __init__(self, better_mode=None, use_batch_size=False, batch_size=None):
-    self.better_mode = better_mode
-    self.use_batch_size = use_batch_size
-    self.batch_size = batch_size
-    super(MaybeBadSqlModeError, self).__init__()
-
-  def get_msg(self):
-    if self.batch_size:
-      return 'reducing the batch_size. Current batch_size is %s.' % self.batch_size
-    elif self.use_batch_size:
-      return "compute_on_sql(..., mode='mixed', batch_size=an integer)."
-    else:
-      return "compute_on_sql(..., mode='%s')." % (self.better_mode or 'mixed')
-
-  def __str__(self):
-    return (
-        "Please see the root cause of the failure above. If it's caused by "
-        'the query being too large/complex, you can try %s') % self.get_msg()
-
-
 def add_auxiliary_cols(auxiliary_cols,
                        df: Optional[pd.DataFrame] = None,
                        prefix: str = ''):
