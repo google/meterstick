@@ -297,6 +297,7 @@ class Metric(object):
       yield df, None
     else:
       for k, idx in df.groupby(split_by, observed=True).indices.items():
+        # Use iloc rather than loc because indexes can have duplicates.
         yield df.iloc[idx], k
 
   def compute_through(self, df, split_by: Optional[List[Text]] = None):

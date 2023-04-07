@@ -70,11 +70,6 @@ class Operation(metrics.Metric):
       1. ensure that your computation doesn't break when df is None.
       2. set attribute 'precomputable_in_jk' to False (which will force the
          jackknife to be computed the manual way, which is slower).
-    precompute_child: Many Operations first compute the child Metric with extra
-      split_by columns, then perform computation on the child Metric' result. If
-      precompute_child is True, in the precompute(), we return
-      self.children[0].compute_on(df, split_by + self.extra_index). Otherwise
-      the original input data is returned.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
     cache_key: What key to use to cache the df. You can use anything that can be
@@ -97,18 +92,14 @@ class Operation(metrics.Metric):
           self).__init__(name, child or (), where, name_tmpl, extra_split_by,
                          extra_index, additional_fingerprint_attrs, **kwargs)
     self.precomputable_in_jk = True
-    self.precompute_child = True
     self.apply_name_tmpl = True
 
   def split_data(self, df, split_by=None):
-    """Splits the DataFrame returned by the children if it's computed."""
-    if not self.precompute_child or not split_by:
-      for i in super(Operation, self).split_data(df, split_by):
-        yield i
-    else:
-      keys, indices = zip(*df.groupby(split_by, observed=True).groups.items())
-      for k, idx in zip(keys, indices):
-        yield df.loc[idx.unique()].droplevel(split_by), k
+    """Splits the DataFrame returned by the children."""
+    for k, idx in df.groupby(split_by, observed=True).indices.items():
+      # split_by will be added back later during the concatenation.
+      # Use iloc rather than loc because indexes can have duplicates.
+      yield df.iloc[idx].droplevel(split_by), k
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     try:
@@ -840,8 +831,9 @@ class MH(Comparison):
           metric,
           (metrics.CompositeMetric, metrics.Ratio)) or metric.op(2.0, 2) != 1:
         raise ValueError(
-            'MH only makes sense on ratio Metrics or a MetricList of ratios. Got %s.'
-            % metric)
+            'MH only makes sense on ratio Metrics or a MetricList of ratios.'
+            ' Got %s.' % metric
+        )
 
   def compute_children(self,
                        df: pd.DataFrame,
