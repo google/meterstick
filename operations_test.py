@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import copy
 
+from absl.testing import absltest
 from absl.testing import parameterized
 from meterstick import metrics
 from meterstick import models
@@ -31,10 +32,8 @@ from pandas import testing
 from scipy import stats
 from sklearn import linear_model
 
-import unittest
 
-
-class DistributionTests(unittest.TestCase):
+class DistributionTests(absltest.TestCase):
 
   df = pd.DataFrame({
       'X': [1, 1, 1, 5],
@@ -145,7 +144,7 @@ class DistributionTests(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class CumulativeDistributionTests(unittest.TestCase):
+class CumulativeDistributionTests(absltest.TestCase):
 
   df = pd.DataFrame({
       'X': [1, 1, 1, 5],
@@ -282,7 +281,7 @@ class CumulativeDistributionTests(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class PercentChangeTests(unittest.TestCase):
+class PercentChangeTests(absltest.TestCase):
 
   df = pd.DataFrame({
       'X': [1, 2, 3, 4, 5, 6],
@@ -455,7 +454,7 @@ class PercentChangeTests(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class AbsoluteChangeTests(unittest.TestCase):
+class AbsoluteChangeTests(absltest.TestCase):
 
   df = pd.DataFrame({
       'X': [1, 2, 3, 4, 5, 6],
@@ -628,7 +627,7 @@ class AbsoluteChangeTests(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class PrePostChangeTests(unittest.TestCase):
+class PrePostChangeTests(absltest.TestCase):
 
   n = 40
   df = pd.DataFrame({
@@ -836,7 +835,7 @@ class PrePostChangeTests(unittest.TestCase):
     self.assertEqual(output.shape, expected.shape)
 
 
-class CUPEDTests(unittest.TestCase):
+class CUPEDTests(absltest.TestCase):
 
   n = 40
   df = pd.DataFrame({
@@ -1035,7 +1034,7 @@ class CUPEDTests(unittest.TestCase):
     self.assertEqual(output.shape, expected.shape)
 
 
-class MHTests(unittest.TestCase):
+class MHTests(absltest.TestCase):
 
   df = pd.DataFrame({
       'X': [1, 3, 2, 3, 1, 2],
@@ -1883,7 +1882,7 @@ class JackknifeTests(parameterized.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class BootstrapTests(unittest.TestCase):
+class BootstrapTests(absltest.TestCase):
 
   n = 100
   x = np.arange(0, 3, 0.5)
@@ -2283,4 +2282,4 @@ class CachingTest(parameterized.TestCase):
 
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()

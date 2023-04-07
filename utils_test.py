@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import absltest
 from meterstick import metrics
 from meterstick import operations
 from meterstick import utils
@@ -24,10 +25,8 @@ import numpy as np
 import pandas as pd
 from pandas import testing
 
-import unittest
 
-
-class UtilsTest(unittest.TestCase):
+class UtilsTest(absltest.TestCase):
 
   def test_adjust_slices_for_loo_no_splitby_no_operation_unit_filled(self):
     df = pd.DataFrame({'unit': list('abc'), 'x': range(1, 4)})
@@ -364,4 +363,4 @@ class UtilsTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()

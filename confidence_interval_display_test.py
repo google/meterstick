@@ -16,12 +16,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import absltest
 from meterstick import confidence_interval_display
 import numpy as np
 import pandas as pd
 from pandas import testing
-import unittest
-
 
 DF_WITH_DIMENSIONS = pd.DataFrame({
     'CI_Lower': [None, None, -5.035, 0.73],
@@ -50,7 +49,7 @@ DF_NO_DIMENSION = pd.DataFrame({
 LINE_BREAK = confidence_interval_display.LINE_BREAK
 
 
-class DisplayMetricsTest(unittest.TestCase):
+class DisplayMetricsTest(absltest.TestCase):
 
   def test_normal(self):
     expected = pd.DataFrame(
@@ -446,12 +445,11 @@ class DisplayMetricsTest(unittest.TestCase):
     self.assertEqual(expected, actual)
 
   def test_metric_formatter_with_no_value(self):
-    expected = LINE_BREAK.join(
-        ('<div class="ci-display-good-change ci-display-cell"><div>'
-         '<div>-</div>', '<span class="ci-display-ratio">1.2000</span>',
-         '<span class="ci-display-ci-range">[1.0000, 1.4000]</span></div>'
-         '</div>'
-        ))
+    expected = LINE_BREAK.join((
+        '<div class="ci-display-good-change ci-display-cell"><div><div>-</div>',
+        '<span class="ci-display-ratio">1.2000</span>',
+        '<span class="ci-display-ci-range">[1.0000, 1.4000]</span></div></div>',
+    ))
     actual = confidence_interval_display.MetricFormatter()((None, 1.2, 1, 1.4))
     self.assertEqual(expected, actual)
 
@@ -500,8 +498,10 @@ class DisplayMetricsTest(unittest.TestCase):
     expected = LINE_BREAK.join((
         '<div class="ci-display-bad-change ci-display-cell"><div>1.2000',
         '<span class="ci-display-ratio">-1.1000</span>',
-        '<span class="ci-display-ci-range">[-1.0200, -1.1800]</span></div>'
-        '</div>'
+        (
+            '<span class="ci-display-ci-range">[-1.0200,'
+            ' -1.1800]</span></div></div>'
+        ),
     ))
     actual = confidence_interval_display.MetricFormatter()(
         (1.2, -1.1, -1.02, -1.18))
@@ -531,8 +531,10 @@ class DisplayMetricsTest(unittest.TestCase):
     expected = LINE_BREAK.join((
         '<div class="ci-display-good-change ci-display-cell"><div>1.2000',
         '<span class="ci-display-ratio">-1.1000</span>',
-        '<span class="ci-display-ci-range">[-1.0200, -1.1800]</span></div>'
-        '</div>'
+        (
+            '<span class="ci-display-ci-range">[-1.0200,'
+            ' -1.1800]</span></div></div>'
+        ),
     ))
     actual = confidence_interval_display.MetricFormatter(if_flip_color=True)(
         (1.2, -1.1, -1.02, -1.18))
@@ -566,4 +568,4 @@ class DisplayMetricsTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()

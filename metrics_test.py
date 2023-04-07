@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import copy
 
+from absl.testing import absltest
 from absl.testing import parameterized
 from meterstick import metrics
 from meterstick import operations
@@ -27,8 +28,6 @@ import mock
 import numpy as np
 import pandas as pd
 from pandas import testing
-
-import unittest
 
 # pylint: disable=g-long-lambda
 METRICS_TO_TEST = metrics_to_test = [
@@ -283,7 +282,7 @@ class TestSimpleMetric(parameterized.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class TestMetricsMiscellaneous(unittest.TestCase):
+class TestMetricsMiscellaneous(absltest.TestCase):
   df = pd.DataFrame({'X': [0, 1, 2, 3], 'Y': [0, 1, 1, 2]})
 
   def test_quantile_raise(self):
@@ -385,7 +384,7 @@ class TestMetricsMiscellaneous(unittest.TestCase):
     self.assertTrue(pd.isnull(m.compute_on(df, return_dataframe=False)))
 
 
-class TestCompositeMetric(unittest.TestCase):
+class TestCompositeMetric(absltest.TestCase):
   """Tests for composition of two metrics."""
 
   df = pd.DataFrame({'X': [0, 1, 2, 3], 'Y': [0, 1, 1, 2]})
@@ -566,7 +565,7 @@ class TestCompositeMetric(unittest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class TestMetricList(unittest.TestCase):
+class TestMetricList(absltest.TestCase):
 
   def test_return_list(self):
     df = pd.DataFrame({'X': [0, 1, 2, 3]})
@@ -861,4 +860,4 @@ class TestCaching(parameterized.TestCase):
 
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()
