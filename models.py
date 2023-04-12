@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,105 +29,260 @@ import pandas as pd
 from sklearn import linear_model
 
 
-def get_data(m, table, split_by, execute, normalize=False):
-  """Retrieves the data that the model will be fit on.
+class Model(operations.Operation):
+  """Base class for model fitting."""
 
-  We compute a Model by first computing its children, and then fitting
-  the model on it. This function retrieves the necessary variables to compute
-  the children.
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      model=None,
+      model_name=None,
+      where=None,
+      name=None,
+      fit_intercept=True,
+      normalize=False,
+      additional_fingerprint_attrs: Optional[List[str]] = None,
+  ):
+    """Initialize the model.
 
-  Args:
-    m: A Model instance.
-    table: The table we want to query from.
-    split_by: The columns that we use to split the data.
-    execute: A function that can executes a SQL query and returns a DataFrame.
-    normalize: If the Model normalizes x.
+    Args:
+      y: The Metric whose result will be used as the response variable.
+      x: The Metrics whose results will be used as the explanatory variables.
+      group_by: The column(s) to aggregate and compute x and y. The model will
+        be fit on MetricList([y, x]).compute_on(df, group_by).
+      model: The model to fit. It's either a sklearn.linear_model or obeys the
+        API convention, namely, has a method fit(X, y) and attributes
+        model.coef_ and model.intercept_.
+      model_name: The name of the model, will be used to auto-generate a name if
+        name is not given.
+      where: A string or list of strings to be concatenated that will be passed
+        to df.query() as a prefilter.
+      name: The name to use for the model.
+      fit_intercept: If to include intercept in the model.
+      normalize: This parameter is ignored when fit_intercept is False. If True,
+        the regressors X will be normalized before regression by subtracting the
+        mean and dividing by the l2-norm.
+      additional_fingerprint_attrs: Additioinal attributes to be encoded into
+        the fingerprint. See get_fingerprint() for how it's used.
+    """
+    if y and not isinstance(y, metrics.Metric):
+      raise ValueError('y must be a Metric!')
+    if y and count_features(y) != 1:
+      raise ValueError('y must be a 1D array but is %iD!' % count_features(y))
+    self.group_by = [group_by] if isinstance(group_by, str) else group_by or []
+    if isinstance(x, Sequence):
+      x = metrics.MetricList(x)
+    child = None
+    if x and y:
+      self.x = x
+      self.y = y
+      child = metrics.MetricList((y, x))
+    self.model = model
+    self.k = count_features(x)
+    self.model_name = model_name
+    if not name and x and y:
+      x_names = (
+          [m.name for m in x] if isinstance(x, metrics.MetricList) else [x.name]
+      )
+      name = '%s(%s ~ %s)' % (model_name, y.name, ' + '.join(x_names))
+    name_tmpl = '%s Coefficient: {}' % name
+    additional_fingerprint_attrs = (
+        [additional_fingerprint_attrs]
+        if isinstance(additional_fingerprint_attrs, str)
+        else list(additional_fingerprint_attrs or [])
+    )
+    super(Model, self).__init__(
+        child,
+        name_tmpl,
+        group_by,
+        [],
+        name=name,
+        where=where,
+        additional_fingerprint_attrs=['fit_intercept', 'normalize']
+        + additional_fingerprint_attrs,
+    )
+    self.fit_intercept = fit_intercept
+    self.normalize = normalize
 
-  Returns:
-    table: A string representing the table name which we can query from. The
-      table has columns `split_by`, y, x1, x2, .... If normalize is True, x
-      columns are centered then normalized.
-    with_data: The WITH clause that holds all necessary subqueries so we can
-      query the `table`.
-    xs: A list of the column names of x1, x2, ...
-    y: The column name of the y column.
-    avgs: Nonempty only when normalize is True. A pd.DataFrame which holds the
-      average of all x and y columns.
-    norms: Nonempty only when normalize is True. A pd.DataFrame which holds the
-      l2-norm values of all centered-x columns.
-  """
-  data = m.children[0].to_sql(table, split_by + m.group_by)
-  with_data = data.with_data
-  data.with_data = None
-  table, _ = with_data.merge(sql.Datasource(data, 'DataToFit'))
-  y = data.columns[-m.k - 1].alias
-  xs = data.columns.aliases[-m.k:]
-  if not normalize:
-    return table, with_data, xs, y, pd.DataFrame(), pd.DataFrame()
+  def compute(self, df):
+    x, y = df.iloc[:, 1:], df.iloc[:, 0]
+    if self.normalize and self.fit_intercept:
+      x_scaled = x - x.mean()
+      norms = np.sqrt((x_scaled**2).sum())
+      x = x_scaled / norms
+    self.model.fit(x, y)
+    coef = self.model.coef_
+    if self.normalize and self.fit_intercept:
+      coef = coef / norms.values
+    names = list(df.columns[1:])
+    if self.fit_intercept:
+      if self.normalize:
+        intercept = y.mean() - df.iloc[:, 1:].mean().dot(coef)
+      else:
+        intercept = self.model.intercept_
+      coef = [intercept] + list(coef)
+      names = ['intercept'] + names
+    return pd.DataFrame([coef], columns=names)
 
-  split_by = sql.Columns(split_by).aliases
-  avgs = [sql.Column(f'AVG({x})', alias=x) for x in xs]
-  avgs.append(sql.Column(f'AVG({y})', alias=y))
-  avgs = execute(
-      str(
-          sql.Sql(
-              sql.Columns(split_by).add(avgs),
-              table,
-              groupby=split_by,
-              with_data=with_data)))
-  table_with_centered_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
-  for x in xs:
-    centered = sql.Column(x) - sql.Column(x, 'AVG({})', partition=split_by)
-    centered.alias = x
-    table_with_centered_x.add(centered)
-  table, rename = with_data.merge(
-      sql.Datasource(sql.Sql(table_with_centered_x, table), 'DataCentered'))
+  def compute_through_sql(self, table, split_by, execute, mode):
+    try:
+      if mode == 'magic':
+        if self.where:
+          table = sql.Sql(None, table, self.where)
+        res = self.compute_on_sql_magic_mode(table, split_by, execute)
+        return utils.apply_name_tmpl(self.name_tmpl, res)
+      return super(Model, self).compute_through_sql(
+          table, split_by, execute, mode
+      )
+    except NotImplementedError:
+      raise
+    except Exception as e:  # pylint: disable=broad-except
+      msg = (
+          "Please see the root cause of the failure above. If it's caused by"
+          ' the query being too large/complex, you can try '
+          "compute_on_sql(..., mode='%s')."
+      )
+      if mode == 'magic':
+        raise ValueError(msg % 'mixed') from e
+      raise ValueError(msg % 'magic') from e
 
-  norms = [
-      sql.Column('SQRT(SUM(POWER(%s, 2)))' % rename.get(x, x), alias=x)
-      for x in xs
-  ]
-  norms = sql.Sql(
-      sql.Columns(split_by).add(norms),
-      table,
-      groupby=split_by,
-      with_data=with_data)
-  norms = execute(str(norms))
-  table_with_normalized_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
-  for x in xs:
-    normalized = sql.Column(x) / sql.Column(
-        x, 'SUM(POWER({}, 2))', partition=split_by)**0.5
-    normalized.alias = x
-    table_with_normalized_x.add(normalized)
-  table = with_data.add(
-      sql.Datasource(sql.Sql(table_with_normalized_x, table), 'DataNormalized'))
-  return table, with_data, xs, y, avgs, norms
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
+    raise NotImplementedError
+
+  def __call__(self, child):
+    if not isinstance(child, metrics.MetricList):
+      raise ValueError(f'Model can only take a MetricList but got {child}!')
+    model = super(Model, self).__call__(child)
+    model.y = child[0]
+    model.x = metrics.MetricList(child[1:])
+    model.k = count_features(model.x)
+    x_names = [m.name for m in model.x]
+    model.name = '%s(%s ~ %s)' % (
+        model.model_name,
+        model.y.name,
+        ' + '.join(x_names),
+    )
+    model.name_tmpl = model.name + ' Coefficient: {}'
+    return model
 
 
-def apply_algorithm_to_sufficient_stats_elements(sufficient_stats_elements,
-                                                 split_by, algorithm, *args,
-                                                 **kwargs):
-  """Applies algorithm to sufficient stats to get the coefficients of Models.
+def count_features(m: metrics.Metric):
+  """Gets the width of the result of m.compute_on()."""
+  if not m:
+    return 0
+  if isinstance(m, Model):
+    return m.k
+  if isinstance(m, metrics.MetricList):
+    return sum([count_features(i) for i in m])
+  if isinstance(m, operations.MetricWithCI):
+    return (
+        count_features(m.children[0]) * 3
+        if m.confidence
+        else count_features(m.children[0]) * 2
+    )
+  if isinstance(m, operations.Operation):
+    return count_features(m.children[0])
+  if isinstance(m, metrics.CompositeMetric):
+    return max([count_features(i) for i in m.children])
+  if isinstance(m, metrics.Quantile):
+    if m.one_quantile:
+      return 1
+    return len(m.quantile)
+  return 1
 
-  Args:
-    sufficient_stats_elements: Contains the elements to construct sufficient
-      stats. It's one of the return of get_sufficient_stats_elements().
-    split_by: The columns that we use to split the data.
-    algorithm: A function that can take the sufficient_stats_elements of a slice
-      of data and computes the coefficients of the Model.
-    *args: Additional args passed to the algorithm.
-    **kwargs: Additional kwargs passed to the algorithm.
 
-  Returns:
-    The coefficients of the Model.
-  """
-  fn = lambda row: algorithm(row, *args, **kwargs)
-  if split_by:
-    # Special characters in split_by got escaped during SQL execution.
-    sufficient_stats_elements.columns = split_by + list(
-        sufficient_stats_elements.columns)[len(split_by):]
-    return sufficient_stats_elements.groupby(split_by, observed=True).apply(fn)
-  return fn(sufficient_stats_elements)
+class LinearRegression(Model):
+  """A class that can fit a linear regression."""
+
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      fit_intercept: bool = True,
+      normalize: bool = False,
+      where: Optional[str] = None,
+      name: Optional[str] = None,
+  ):
+    """Initialize a sklearn.LinearRegression model."""
+    model = linear_model.LinearRegression(fit_intercept=fit_intercept)
+    super(LinearRegression, self).__init__(
+        y, x, group_by, model, 'OLS', where, name, fit_intercept, normalize
+    )
+
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
+    return Ridge(
+        self.y,
+        self.x,
+        self.group_by,
+        0,
+        self.fit_intercept,
+        self.normalize,
+        self.where_raw,
+        self.name,
+    ).compute_on_sql_magic_mode(table, split_by, execute)
+
+
+class Ridge(Model):
+  """A class that can fit a ridge regression."""
+
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      alpha=1,
+      fit_intercept: bool = True,
+      normalize: bool = False,
+      where: Optional[str] = None,
+      name: Optional[str] = None,
+      copy_X=True,
+      max_iter=None,
+      tol=0.001,
+      solver='auto',
+      random_state=None,
+  ):
+    """Initialize a sklearn.Ridge model."""
+    model = linear_model.Ridge(
+        alpha=alpha,
+        fit_intercept=fit_intercept,
+        copy_X=copy_X,
+        max_iter=max_iter,
+        tol=tol,
+        solver=solver,
+        random_state=random_state,
+    )
+    super(Ridge, self).__init__(
+        y,
+        x,
+        group_by,
+        model,
+        'Ridge',
+        where,
+        name,
+        fit_intercept,
+        normalize,
+        ['alpha'],
+    )
+    self.alpha = alpha
+
+  def compute_on_sql_magic_mode(self, table, split_by, execute):
+    # Never normalize for the sufficient_stats. Normalization is handled in
+    # compute_ridge_coefs() instead.
+    xs, sufficient_stats, _, _ = get_sufficient_stats_elements(
+        self, table, split_by, execute, normalize=False, include_n_obs=True
+    )
+    return apply_algorithm_to_sufficient_stats_elements(
+        sufficient_stats, split_by, compute_ridge_coefs, xs, self
+    )
 
 
 def get_sufficient_stats_elements(m,
@@ -172,8 +327,10 @@ def get_sufficient_stats_elements(m,
   fit_intercept = m.fit_intercept if fit_intercept is None else fit_intercept
   if normalize is None:
     normalize = m.normalize and m.fit_intercept
-  table, with_data, xs, y, avg_x, norms = get_data(m, table, split_by, execute,
-                                                   normalize)
+  table, with_data, xs_cols, y, avg_x, norms = get_data(
+      m, table, split_by, execute, normalize
+  )
+  xs = xs_cols.aliases
   x_t_x = []
   x_t_y = []
   if m.fit_intercept:
@@ -198,7 +355,198 @@ def get_sufficient_stats_elements(m,
     sufficient_stats_elements[avg_x_names] = 0
     sufficient_stats_elements = sufficient_stats_elements[
         col_names[:len(split_by)] + avg_x_names + col_names[len(split_by):]]
-  return xs, sufficient_stats_elements, avg_x, norms
+  return xs_cols, sufficient_stats_elements, avg_x, norms
+
+
+def get_data(m, table, split_by, execute, normalize=False):
+  """Retrieves the data that the model will be fit on.
+
+  We compute a Model by first computing its children, and then fitting
+  the model on it. This function retrieves the necessary variables to compute
+  the children.
+
+  Args:
+    m: A Model instance.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    execute: A function that can executes a SQL query and returns a DataFrame.
+    normalize: If the Model normalizes x.
+
+  Returns:
+    table: A string representing the table name which we can query from. The
+      table has columns `split_by`, y, x1, x2, .... If normalize is True, x
+      columns are centered then normalized.
+    with_data: The WITH clause that holds all necessary subqueries so we can
+      query the `table`.
+    xs_cols: A list of the sql.Columns of x1, x2, ...
+    y: The column name of the y column.
+    avgs: Nonempty only when normalize is True. A pd.DataFrame which holds the
+      average of all x and y columns.
+    norms: Nonempty only when normalize is True. A pd.DataFrame which holds the
+      l2-norm values of all centered-x columns.
+  """
+  data = m.children[0].to_sql(table, split_by + m.group_by)
+  with_data = data.with_data
+  data.with_data = None
+  table = with_data.merge(sql.Datasource(data, 'DataToFit'))
+  y = data.columns[-m.k - 1].alias
+  xs_cols = sql.Columns(data.columns[-m.k :])
+  if not normalize:
+    return table, with_data, xs_cols, y, pd.DataFrame(), pd.DataFrame()
+
+  xs = xs_cols.aliases
+  split_by = sql.Columns(split_by).aliases
+  avgs = [sql.Column(f'AVG({x})', alias=x) for x in xs]
+  avgs.append(sql.Column(f'AVG({y})', alias=y))
+  avgs = execute(
+      str(
+          sql.Sql(
+              sql.Columns(split_by).add(avgs),
+              table,
+              groupby=split_by,
+              with_data=with_data,
+          )
+      )
+  )
+  table_with_centered_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
+  for x in xs:
+    centered = sql.Column(x) - sql.Column(x, 'AVG({})', partition=split_by)
+    centered.alias = x
+    table_with_centered_x.add(centered)
+  table = with_data.merge(
+      sql.Datasource(sql.Sql(table_with_centered_x, table), 'DataCentered')
+  )
+
+  norms = [sql.Column(f'SQRT(SUM(POWER({x}, 2)))', alias=x) for x in xs]
+  norms = sql.Sql(
+      sql.Columns(split_by).add(norms),
+      table,
+      groupby=split_by,
+      with_data=with_data,
+  )
+  norms = execute(str(norms))
+  table_with_normalized_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
+  for x in xs:
+    normalized = (
+        sql.Column(x)
+        / sql.Column(x, 'SUM(POWER({}, 2))', partition=split_by) ** 0.5
+    )
+    normalized.alias = x
+    table_with_normalized_x.add(normalized)
+  table = with_data.add(
+      sql.Datasource(sql.Sql(table_with_normalized_x, table), 'DataNormalized')
+  )
+  return table, with_data, xs_cols, y, avgs, norms
+
+
+def apply_algorithm_to_sufficient_stats_elements(
+    sufficient_stats_elements, split_by, algorithm, *args, **kwargs
+):
+  """Applies algorithm to sufficient stats to get the coefficients of Models.
+
+  Args:
+    sufficient_stats_elements: Contains the elements to construct sufficient
+      stats. It's one of the return of get_sufficient_stats_elements().
+    split_by: The columns that we use to split the data.
+    algorithm: A function that can take the sufficient_stats_elements of a slice
+      of data and computes the coefficients of the Model.
+    *args: Additional args passed to the algorithm.
+    **kwargs: Additional kwargs passed to the algorithm.
+
+  Returns:
+    The coefficients of the Model.
+  """
+  fn = lambda row: algorithm(row, *args, **kwargs)
+  if split_by:
+    # Special characters in split_by got escaped during SQL execution.
+    sufficient_stats_elements.columns = (
+        split_by + list(sufficient_stats_elements.columns)[len(split_by) :]
+    )
+    return sufficient_stats_elements.groupby(split_by, observed=True).apply(fn)
+  return fn(sufficient_stats_elements)
+
+
+def compute_ridge_coefs(sufficient_stats, xs, m):
+  """Computes coefficients of linear/ridge regression from sufficient_stats."""
+  if isinstance(sufficient_stats, pd.DataFrame):
+    sufficient_stats = sufficient_stats.iloc[0]
+  fit_intercept = m.fit_intercept
+  if fit_intercept and m.normalize:
+    return compute_coef_for_normalize_ridge(sufficient_stats, xs, m)
+  x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats, fit_intercept)
+  if isinstance(m, Ridge):
+    n_obs = sufficient_stats['n_obs']
+    penalty = np.identity(len(x_t_y))
+    if fit_intercept:
+      penalty[0, 0] = 0
+    # We use AVG() to compute x_t_x so the penalty needs to be scaled.
+    x_t_x += m.alpha / n_obs * penalty
+  cond = np.linalg.cond(x_t_x)
+  if cond > 20:
+    print(
+        "WARNING: The condition number of X'X is %i, which might be too large."
+        ' The model coefficients might be inaccurate.' % cond
+    )
+  coef = np.linalg.solve(x_t_x, x_t_y)
+  xs = [x.alias_raw for x in xs]
+  if fit_intercept:
+    xs = ['intercept'] + xs
+  return pd.DataFrame([coef], columns=xs)
+
+
+def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
+  """Computes the coefficient of OLS or Ridge with normalization."""
+  n = len(xs)
+  # Compute the elements of X_scaled^T * X_scaled. See
+  # https://colab.research.google.com/drive/1wOWgdNzKGT_xl4A7Mrs_GbRKiVQACFfy#scrollTo=HrMCbB5SxS0A
+  x_t_x_elements = []
+  x_t_y = []
+  for i in range(n):
+    x_t_y.append(
+        sufficient_stats[f'x{i}y']
+        - sufficient_stats[f'x{i}'] * sufficient_stats['y']
+    )
+    for j in range(i, n):
+      x_t_x_elements.append(
+          sufficient_stats[f'x{i}x{j}']
+          - sufficient_stats[f'x{i}'] * sufficient_stats[f'x{j}']
+      )
+  x_t_x = symmetrize_triangular(x_t_x_elements)
+  if isinstance(m, Ridge):
+    x_t_x += m.alpha * np.diag(x_t_x.diagonal())
+  cond = np.linalg.cond(x_t_x)
+  if cond > 20:
+    print(
+        "WARNING: The condition number of X'X is %i, which might be too large."
+        ' The model coefficients might be inaccurate.' % cond
+    )
+  coef = np.linalg.solve(x_t_x, x_t_y)
+  xs = [x.alias_raw for x in xs]
+  intercept = sufficient_stats.y - coef.dot(
+      [sufficient_stats[f'x{i}'] for i in range(n)]
+  )
+  coef = [intercept] + list(coef)
+  xs = ['intercept'] + xs
+  return pd.DataFrame([coef], columns=xs)
+
+
+def symmetrize_triangular(tril_elements):
+  """Converts a list of upper triangular matrix to a symmetric matrix.
+
+  For example, [1, 2, 3] -> [[1, 2], [2, 3]].
+
+  Args:
+    tril_elements: A list that can form a triangular matrix.
+
+  Returns:
+    A symmetric matrix whose upper triangular part is formed from tril_elements.
+  """
+  n = int(np.floor((2 * len(tril_elements)) ** 0.5))
+  if n * (n + 1) / 2 != len(tril_elements):
+    raise ValueError('The elements cannot form a symmetric matrix!')
+  sym = np.zeros([n, n])
+  sym[np.triu_indices(n)] = tril_elements
+  return sym + sym.T - np.diag(sym.diagonal())
 
 
 def construct_matrix_from_elements(sufficient_stats_elements, fit_intercept):
@@ -240,286 +588,30 @@ def construct_matrix_from_elements(sufficient_stats_elements, fit_intercept):
   return x_t_x, np.array(x_t_y)
 
 
-def symmetrize_triangular(tril_elements):
-  """Converts a list of upper triangular matrix to a symmetric matrix.
-
-  For example, [1, 2, 3] -> [[1, 2], [2, 3]].
-
-  Args:
-    tril_elements: A list that can form a triangular matrix.
-
-  Returns:
-    A symmetric matrix whose upper triangular part is formed from tril_elements.
-  """
-  n = int(np.floor((2 * len(tril_elements))**0.5))
-  if n * (n + 1) / 2 != len(tril_elements):
-    raise ValueError('The elements cannot form a symmetric matrix!')
-  sym = np.zeros([n, n])
-  sym[np.triu_indices(n)] = tril_elements
-  return sym + sym.T - np.diag(sym.diagonal())
-
-
-class Model(operations.Operation):
-  """Base class for model fitting."""
-
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               model=None,
-               model_name=None,
-               where=None,
-               name=None,
-               fit_intercept=True,
-               normalize=False,
-               additional_fingerprint_attrs: Optional[List[str]] = None):
-    """Initialize the model.
-
-    Args:
-      y: The Metric whose result will be used as the response variable.
-      x: The Metrics whose results will be used as the explanatory variables.
-      group_by: The column(s) to aggregate and compute x and y. The model will
-        be fit on MetricList([y, x]).compute_on(df, group_by).
-      model: The model to fit. It's either a sklearn.linear_model or obeys the
-        API convention, namely, has a method fit(X, y) and attributes
-        model.coef_ and model.intercept_.
-      model_name: The name of the model, will be used to auto-generate a name if
-        name is not given.
-      where: A string or list of strings to be concatenated that will be passed
-        to df.query() as a prefilter.
-      name: The name to use for the model.
-      fit_intercept: If to include intercept in the model.
-      normalize: This parameter is ignored when fit_intercept is False. If True,
-        the regressors X will be normalized before regression by subtracting the
-        mean and dividing by the l2-norm.
-      additional_fingerprint_attrs: Additioinal attributes to be encoded into
-        the fingerprint. See get_fingerprint() for how it's used.
-    """
-    if not isinstance(y, metrics.Metric):
-      raise ValueError('y must be a Metric!')
-    if count_features(y) != 1:
-      raise ValueError('y must be a 1D array but is %iD!' % count_features(y))
-    self.group_by = [group_by] if isinstance(group_by, str) else group_by or []
-    if isinstance(x, Sequence):
-      x = metrics.MetricList(x)
-    self.x = x
-    self.y = y
-    self.model = model
-    self.k = count_features(x)
-    if not name:
-      x_names = [m.name for m in x] if isinstance(
-          x, metrics.MetricList) else [x.name]
-      name = '%s(%s ~ %s)' % (model_name, y.name, ' + '.join(x_names))
-    name_tmpl = name + ' Coefficient: {}'
-    additional_fingerprint_attrs = (
-        [additional_fingerprint_attrs]
-        if isinstance(additional_fingerprint_attrs, str)
-        else list(additional_fingerprint_attrs or [])
-    )
-    super(Model, self).__init__(
-        metrics.MetricList((y, x)),
-        name_tmpl,
-        group_by,
-        [],
-        name=name,
-        where=where,
-        additional_fingerprint_attrs=['fit_intercept', 'normalize']
-        + additional_fingerprint_attrs,
-    )
-    self.fit_intercept = fit_intercept
-    self.normalize = normalize
-
-  def compute(self, df):
-    x, y = df.iloc[:, 1:], df.iloc[:, 0]
-    if self.normalize and self.fit_intercept:
-      x_scaled = x - x.mean()
-      norms = np.sqrt((x_scaled**2).sum())
-      x = x_scaled / norms
-    self.model.fit(x, y)
-    coef = self.model.coef_
-    if self.normalize and self.fit_intercept:
-      coef = coef / norms.values
-    names = list(df.columns[1:])
-    if self.fit_intercept:
-      if self.normalize:
-        intercept = y.mean() - df.iloc[:, 1:].mean().dot(coef)
-      else:
-        intercept = self.model.intercept_
-      coef = [intercept] + list(coef)
-      names = ['intercept'] + names
-    return pd.DataFrame([coef], columns=names)
-
-  def compute_through_sql(self, table, split_by, execute, mode):
-    try:
-      if mode == 'magic':
-        if self.where:
-          table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
-        res = self.compute_on_sql_magic_mode(table, split_by, execute)
-        return utils.apply_name_tmpl(self.name_tmpl, res)
-      return super(Model, self).compute_through_sql(
-          table, split_by, execute, mode
-      )
-    except NotImplementedError:
-      raise
-    except Exception as e:  # pylint: disable=broad-except
-      msg = (
-          "Please see the root cause of the failure above. If it's caused by"
-          ' the query being too large/complex, you can try '
-          "compute_on_sql(..., mode='%s')."
-      )
-      if mode == 'magic':
-        raise ValueError(msg % 'mixed') from e
-      raise ValueError(msg % 'magic') from e
-
-  def compute_on_sql_magic_mode(self, table, split_by, execute):
-    raise NotImplementedError
-
-
-class LinearRegression(Model):
-  """A class that can fit a linear regression."""
-
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               fit_intercept: bool = True,
-               normalize: bool = False,
-               where: Optional[str] = None,
-               name: Optional[str] = None):
-    """Initialize a sklearn.LinearRegression model."""
-    model = linear_model.LinearRegression(fit_intercept=fit_intercept)
-    super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', where,
-                                           name, fit_intercept, normalize)
-
-  def compute_on_sql_magic_mode(self, table, split_by, execute):
-    return Ridge(self.y, self.x, self.group_by, 0, self.fit_intercept,
-                 self.normalize, self.where_raw,
-                 self.name).compute_on_sql_magic_mode(table, split_by, execute)
-
-
-class Ridge(Model):
-  """A class that can fit a ridge regression."""
-
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               alpha=1,
-               fit_intercept: bool = True,
-               normalize: bool = False,
-               where: Optional[str] = None,
-               name: Optional[str] = None,
-               copy_X=True,
-               max_iter=None,
-               tol=0.001,
-               solver='auto',
-               random_state=None):
-    """Initialize a sklearn.Ridge model."""
-    model = linear_model.Ridge(
-        alpha=alpha,
-        fit_intercept=fit_intercept,
-        copy_X=copy_X,
-        max_iter=max_iter,
-        tol=tol,
-        solver=solver,
-        random_state=random_state)
-    super(Ridge, self).__init__(y, x, group_by, model, 'Ridge', where, name,
-                                fit_intercept, normalize, ['alpha'])
-    self.alpha = alpha
-
-  def compute_on_sql_magic_mode(self, table, split_by, execute):
-    # Never normalize for the sufficient_stats. Normalization is handled in
-    # compute_ridge_coefs() instead.
-    xs, sufficient_stats, _, _ = get_sufficient_stats_elements(
-        self, table, split_by, execute, normalize=False, include_n_obs=True)
-    return apply_algorithm_to_sufficient_stats_elements(sufficient_stats,
-                                                        split_by,
-                                                        compute_ridge_coefs, xs,
-                                                        self)
-
-
-def compute_ridge_coefs(sufficient_stats, xs, m):
-  """Computes coefficients of linear/ridge regression from sufficient_stats."""
-  if isinstance(sufficient_stats, pd.DataFrame):
-    sufficient_stats = sufficient_stats.iloc[0]
-  fit_intercept = m.fit_intercept
-  if fit_intercept and m.normalize:
-    return compute_coef_for_normalize_ridge(sufficient_stats, xs, m)
-  x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats, fit_intercept)
-  if isinstance(m, Ridge):
-    n_obs = sufficient_stats['n_obs']
-    penalty = np.identity(len(x_t_y))
-    if fit_intercept:
-      penalty[0, 0] = 0
-    # We use AVG() to compute x_t_x so the penalty needs to be scaled.
-    x_t_x += m.alpha / n_obs * penalty
-  cond = np.linalg.cond(x_t_x)
-  if cond > 20:
-    print(
-        "WARNING: The condition number of X'X is %i, which might be too large."
-        ' The model coefficients might be inaccurate.' % cond)
-  coef = np.linalg.solve(x_t_x, x_t_y)
-  xs = [n.replace('macro_', '$').strip('`') for n in xs]
-  if fit_intercept:
-    xs = ['intercept'] + xs
-  return pd.DataFrame([coef], columns=xs)
-
-
-def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
-  """Computes the coefficient of OLS or Ridge with normalization."""
-  n = len(xs)
-  # Compute the elements of X_scaled^T * X_scaled. See
-  # https://colab.research.google.com/drive/1wOWgdNzKGT_xl4A7Mrs_GbRKiVQACFfy#scrollTo=HrMCbB5SxS0A
-  x_t_x_elements = []
-  x_t_y = []
-  for i in range(n):
-    x_t_y.append(sufficient_stats[f'x{i}y'] -
-                 sufficient_stats[f'x{i}'] * sufficient_stats['y'])
-    for j in range(i, n):
-      x_t_x_elements.append(sufficient_stats[f'x{i}x{j}'] -
-                            sufficient_stats[f'x{i}'] *
-                            sufficient_stats[f'x{j}'])
-  x_t_x = symmetrize_triangular(x_t_x_elements)
-  if isinstance(m, Ridge):
-    x_t_x += m.alpha * np.diag(x_t_x.diagonal())
-  cond = np.linalg.cond(x_t_x)
-  if cond > 20:
-    print(
-        "WARNING: The condition number of X'X is %i, which might be too large."
-        ' The model coefficients might be inaccurate.' % cond)
-  coef = np.linalg.solve(x_t_x, x_t_y)
-  xs = [n.replace('macro_', '$').strip('`') for n in xs]
-  intercept = sufficient_stats.y - coef.dot(
-      [sufficient_stats[f'x{i}'] for i in range(n)])
-  coef = [intercept] + list(coef)
-  xs = ['intercept'] + xs
-  return pd.DataFrame([coef], columns=xs)
-
-
 class Lasso(Model):
   """A class that can fit a Lasso regression."""
 
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               alpha=1,
-               fit_intercept: bool = True,
-               normalize: bool = False,
-               where: Optional[str] = None,
-               name: Optional[str] = None,
-               precompute=False,
-               copy_X=True,
-               max_iter=1000,
-               tol=0.0001,
-               warm_start=False,
-               positive=False,
-               random_state=None,
-               selection='cyclic'):
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      alpha=1,
+      fit_intercept: bool = True,
+      normalize: bool = False,
+      where: Optional[str] = None,
+      name: Optional[str] = None,
+      precompute=False,
+      copy_X=True,
+      max_iter=1000,
+      tol=0.0001,
+      warm_start=False,
+      positive=False,
+      random_state=None,
+      selection='cyclic',
+  ):
     """Initialize a sklearn.Lasso model."""
     model = linear_model.Lasso(
         alpha=alpha,
@@ -558,25 +650,28 @@ class Lasso(Model):
 class ElasticNet(Model):
   """A class that can fit a ElasticNet regression."""
 
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               alpha=1,
-               l1_ratio=0.5,
-               fit_intercept: bool = True,
-               normalize: bool = False,
-               where: Optional[str] = None,
-               name: Optional[str] = None,
-               precompute=False,
-               copy_X=True,
-               max_iter=1000,
-               tol=0.0001,
-               warm_start=False,
-               positive=False,
-               random_state=None,
-               selection='cyclic'):
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      alpha=1,
+      l1_ratio=0.5,
+      fit_intercept: bool = True,
+      normalize: bool = False,
+      where: Optional[str] = None,
+      name: Optional[str] = None,
+      precompute=False,
+      copy_X=True,
+      max_iter=1000,
+      tol=0.0001,
+      warm_start=False,
+      positive=False,
+      random_state=None,
+      selection='cyclic',
+  ):
     """Initialize a sklearn.ElasticNet model."""
     model = linear_model.ElasticNet(
         alpha=alpha,
@@ -612,7 +707,10 @@ class ElasticNet(Model):
         sufficient_stats_elements, split_by, compute_coef_for_elastic_net, xs,
         l1, l2, self.fit_intercept, self.tol, self.max_iter)
     if self.fit_intercept and self.normalize:
-      return compute_normalized_coef(coef, norms, avgs, split_by)
+      coef = compute_normalized_coef(coef, norms, avgs, split_by)
+    columns = list(coef.columns)
+    columns[-len(xs) :] = [x.alias_raw for x in xs]
+    coef.columns = columns
     return coef
 
 
@@ -627,12 +725,12 @@ def compute_coef_for_elastic_net(sufficient_stats_elements, xs, l1, l2,
   init_guess = np.random.random(*x_t_y.shape)
   coef = fista_for_elastic_net(init_guess, l1, l2, x_t_x, x_t_y, tol, max_iter,
                                fit_intercept)
-  xs = [n.replace('macro_', '$').strip('`') for n in xs]
+  columns = list(xs.aliases)
   if fit_intercept:
     # We centered x and y above so the intercept from optimization is not right.
     coef[0] = (avg_y - avg_xs @ coef[1:]).values[0]
-    xs = ['intercept'] + xs
-  return pd.DataFrame([list(coef)], columns=xs)
+    columns = ['intercept'] + columns
+  return pd.DataFrame([list(coef)], columns=columns)
 
 
 def center_x(sufficient_stats_elements, n):
@@ -791,14 +889,17 @@ class LogisticRegression(Model):
     """Initialize a sklearn.LogisticRegression model."""
     if penalty not in ('none', 'l1', 'l2', 'elasticnet'):
       raise ValueError(
-          f"Penalty must be one of ('none', 'l1', 'l2', 'elasticnet') but is {penalty}!"
+          "Penalty must be one of ('none', 'l1', 'l2', 'elasticnet') but is"
+          f' {penalty}!'
       )
     if penalty == 'elasticnet' and (not l1_ratio or not 0 <= l1_ratio <= 1):
       raise ValueError(
-          f'l1_ratio must be between 0 and 1; got (l1_ratio={l1_ratio})')
+          f'l1_ratio must be between 0 and 1; got (l1_ratio={l1_ratio})'
+      )
     if l1_ratio is not None and penalty != 'elasticnet':
       raise ValueError(
-          f"l1_ratio parameter is only used when penalty is 'elasticnet'. Got (penalty={penalty})"
+          "l1_ratio parameter is only used when penalty is 'elasticnet'. Got"
+          f' (penalty={penalty})'
       )
     model = linear_model.LogisticRegression(
         fit_intercept=fit_intercept,
@@ -894,14 +995,18 @@ class LogisticRegression(Model):
     n_y = n_y.compute_on_sql(y, y.groupby.aliases[len(self.group_by):], execute)
     if (n_y.values != 2).any():
       raise ValueError(
-          f'Magic mode only support two classes but got {n_y} distinct y values!'
+          f'Magic mode only support two classes but got {n_y} distinct y'
+          ' values!'
       )
 
     if self.penalty in ('l1', 'elasticnet'):
       _, sufficient_stats, _, _ = get_sufficient_stats_elements(
           self, table, split_by, execute, include_n_obs=True)
 
-    table, with_data, xs, y, _, _ = get_data(self, table, split_by, execute)
+    table, with_data, xs_cols, y, _, _ = get_data(
+        self, table, split_by, execute
+    )
+    xs = xs_cols.aliases
     if self.fit_intercept:
       xs.append('1')
     conds = []
@@ -1064,25 +1169,26 @@ class LogisticRegression(Model):
       res = newtons_method(init_guess, grads, hess, self.tol, self.max_iter,
                            conds)
 
-    xs = [n.replace('macro_', '$').strip('`') for n in xs]
+    xs = [x.alias_raw for x in xs_cols]
     if split_by:
       df = pd.DataFrame(conds, columns=split_by)
       if len(split_by) == 1:
         idx = pd.Index(df[split_by[0]])
       else:
-        idx = pd.MultiIndex.from_frame((df))
-      res = pd.DataFrame(res, columns=xs, index=idx)
+        idx = pd.MultiIndex.from_frame(df)
+      res = pd.DataFrame(res, index=idx)
       if self.fit_intercept:
-        res.columns = list(res.columns[:-1]) + ['intercept']
+        res.columns = xs + ['intercept']
         # Make intercept the 1st column.
-        xs = ['intercept'] + xs[:-1]
+        xs = ['intercept'] + xs
         res = res[xs]
-      res.sort_index(inplace=True)
-      return res
+      else:
+        res.columns = xs
+      return res.sort_index()
     res = res[0]
     if self.fit_intercept:
       res = np.concatenate([[res[-1]], res[:-1]])
-      xs = ['intercept'] + xs[:-1]
+      xs = ['intercept'] + xs
     return pd.DataFrame([res], columns=xs)
 
 
@@ -1184,12 +1290,15 @@ def fista_for_logistic_regression(
       return coef
   if n_slice == 1:
     print(
-        "WARNING: Optimization of LogisticRegression didn't converge! Try increasing `max_iter`."
+        "WARNING: Optimization of LogisticRegression didn't converge! Try"
+        ' increasing `max_iter`.'
     )
   else:
     print(
-        "WARNING: Optimization of LogisticRegression didn't converge for slice:%s. Try increasing `max_iter`."
-        % np.array(conds)[~converged])
+        "WARNING: Optimization of LogisticRegression didn't converge for"
+        ' slice:%s. Try increasing `max_iter`.'
+        % np.array(conds)[~converged]
+    )
   return coef
 
 
@@ -1222,27 +1331,10 @@ def newtons_method(coef, grads, hess, tol, max_iter, conds):
     print("WARNING: Optimization of LogisticRegression didn't converge!")
   else:
     print(
-        "WARNING: Optimization of LogisticRegression didn't converge for slice: ",
-        np.array(conds)[~converged])
+        (
+            "WARNING: Optimization of LogisticRegression didn't converge for"
+            ' slice: '
+        ),
+        np.array(conds)[~converged],
+    )
   return coef
-
-
-def count_features(m: metrics.Metric):
-  """Gets the width of the result of m.compute_on()."""
-  if isinstance(m, Model):
-    return m.k
-  if isinstance(m, metrics.MetricList):
-    return sum([count_features(i) for i in m])
-  if isinstance(m, operations.MetricWithCI):
-    return count_features(
-        m.children[0]) * 3 if m.confidence else count_features(
-            m.children[0]) * 2
-  if isinstance(m, operations.Operation):
-    return count_features(m.children[0])
-  if isinstance(m, metrics.CompositeMetric):
-    return max([count_features(i) for i in m.children])
-  if isinstance(m, metrics.Quantile):
-    if m.one_quantile:
-      return 1
-    return len(m.quantile)
-  return 1

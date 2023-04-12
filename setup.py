@@ -21,7 +21,7 @@ README = (HERE/"README.md").read_text()
 
 setup(
     name="meterstick",
-    version="1.3.1",
+    version="1.4.1",
     description="A grammar of data analysis",
     long_description=README,
     long_description_content_type="text/markdown",
@@ -30,7 +30,7 @@ setup(
     authoremail="meterstick-external@google.com",
     license="Apache License 2.0",
     packages=["meterstick"],
-    installrequires=["six", "numpy", "scipy", "pandas"],
+    installrequires=["absltest", "six", "numpy", "scipy", "pandas", "pydot"],
     classifiers=[
         "License :: OSI Approved :: Apache Software License",
         "Development Status :: 5 - Production/Stable",
