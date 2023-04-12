@@ -312,13 +312,21 @@ class Model(operations.Operation):
           x, metrics.MetricList) else [x.name]
       name = '%s(%s ~ %s)' % (model_name, y.name, ' + '.join(x_names))
     name_tmpl = name + ' Coefficient: {}'
+    additional_fingerprint_attrs = (
+        [additional_fingerprint_attrs]
+        if isinstance(additional_fingerprint_attrs, str)
+        else list(additional_fingerprint_attrs or [])
+    )
     super(Model, self).__init__(
         metrics.MetricList((y, x)),
         name_tmpl,
-        group_by, [],
+        group_by,
+        [],
         name=name,
         where=where,
-        additional_fingerprint_attrs=['fit_intercept', 'normalize'])
+        additional_fingerprint_attrs=['fit_intercept', 'normalize']
+        + additional_fingerprint_attrs,
+    )
     self.fit_intercept = fit_intercept
     self.normalize = normalize
 
@@ -808,12 +816,26 @@ class LogisticRegression(Model):
         warm_start=warm_start,
         n_jobs=n_jobs,
         l1_ratio=l1_ratio)
-    super(LogisticRegression,
-          self).__init__(y, x, group_by, model, 'LogisticRegression', where,
-                         name, fit_intercept, [
-                             'penalty', 'tol', 'c', 'intercept_scaling',
-                             'max_iter', 'l1_ratio', 'random_state'
-                         ])
+    super(LogisticRegression, self).__init__(
+        y,
+        x,
+        group_by,
+        model,
+        'LogisticRegression',
+        where,
+        name,
+        fit_intercept,
+        False,
+        [
+            'penalty',
+            'tol',
+            'c',
+            'intercept_scaling',
+            'max_iter',
+            'l1_ratio',
+            'random_state',
+        ],
+    )
     self.penalty = penalty
     self.tol = tol
     self.c = C

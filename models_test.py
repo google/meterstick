@@ -295,7 +295,7 @@ class LogisticRegressionTest(absltest.TestCase):
     pd.testing.assert_frame_equal(output, expected)
 
 
-class MiscellaneousTests(absltest.TestCase):
+class MiscellaneousTests(parameterized.TestCase):
 
   def test_model_composition(self):
     lm = models.LinearRegression(
@@ -352,6 +352,58 @@ class MiscellaneousTests(absltest.TestCase):
     actual = models.symmetrize_triangular([1, 2, 3, 4, 5, 6])
     expected = np.array([[1, 2, 3], [2, 4, 5], [3, 5, 6]])
     np.testing.assert_equal(actual, expected)
+
+  @parameterized.named_parameters(
+      (
+          'linear_regression',
+          models.LinearRegression,
+          {'fit_intercept', 'normalize'},
+      ),
+      ('ridge', models.Ridge, {'alpha', 'fit_intercept', 'normalize'}),
+      (
+          'lasso',
+          models.Lasso,
+          {
+              'alpha',
+              'fit_intercept',
+              'max_iter',
+              'normalize',
+              'random_state',
+              'tol',
+          },
+      ),
+      (
+          'elastic_net',
+          models.ElasticNet,
+          {
+              'alpha',
+              'fit_intercept',
+              'l1_ratio',
+              'max_iter',
+              'normalize',
+              'random_state',
+              'tol',
+          },
+      ),
+      (
+          'logistic_regression',
+          models.LogisticRegression,
+          {
+              'c',
+              'fit_intercept',
+              'intercept_scaling',
+              'l1_ratio',
+              'max_iter',
+              'normalize',
+              'penalty',
+              'random_state',
+              'tol',
+          },
+      ),
+  )
+  def test_additional_fingerprint_attrs(self, lm, attrs):
+    actual = lm(metrics.Sum('y'), metrics.Sum('x')).additional_fingerprint_attrs
+    self.assertEqual(actual, attrs)
 
 
 if __name__ == '__main__':
