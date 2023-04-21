@@ -47,34 +47,40 @@ class Operation(metrics.Metric):
       input to the Operation. Might be None in __init__, but must be assigned
       before compute().
     extra_split_by: Many Operations rely on adding extra split_by columns to
-      child Metric. For example,
-      PercentChange('condition', base_value, Sum('X')).compute_on(df, 'grp')
-      would compute Sum('X').compute_on(df, ['grp', 'condition']) then get the
-      change. As the result, the CacheKey used in PercentChange is different to
-      that used in Sum('X'). The latter has more columns in the split_by.
-      extra_split_by records what columns need to be added to children Metrics
-      so we can flush the cache correctly. The convention is extra_split_by
-      comes after split_by.
+      child Metric. For example, PercentChange('condition', base_value,
+      Sum('X')).compute_on(df, 'grp') would compute Sum('X').compute_on(df,
+      ['grp', 'condition']) then get the change. As the result, the CacheKey
+      used in PercentChange is different to that used in Sum('X'). The latter
+      has more columns in the split_by. extra_split_by records what columns need
+      to be added to children Metrics so we can flush the cache correctly. The
+      convention is extra_split_by comes after split_by.
     extra_index: Not every extra_split_by show up in the result. For example,
       the group_by columns in Models don't show up in the final output.
       extra_index stores the columns that will show up and should be a subset of
       extra_split_by. If not given, it's same as extra_split_by.
-    precomputable_in_jk: Indicates whether it is possible to cut corners to
-      obtain leave-one-out (LOO) estimates for the Jackknife. This attribute is
-      True if the input df is only used in compute_on() and compute_child().
-      This is necessary because Jackknife emits None as the input df for LOO
-      estimation when cutting corners. The compute_on() and compute_child()
-      functions know to read from cache but other functions may not know what to
-      do. If your Operation uses df outside the compute_on() and compute_child()
-      functions, you have either to
-      1. ensure that your computation doesn't break when df is None.
-      2. set attribute 'precomputable_in_jk' to False (which will force the
-         jackknife to be computed the manual way, which is slower).
+    precomputable_in_jk_bs: Indicates whether it is possible to cut corners in
+      Jackknife and Bootstrap with unit. During the precomputation the leaf
+      Metrics might get modified. If the computation of the Operation won't get
+      impacted by that, it's precomputable. More precisely, the default
+      compute_children() returns children.compute_on(df, split_by +
+      extra_split_by). If all the Operation need from the descendants are
+      included in the result of compute_children(), the intermediate results it
+      cached during the computation, and the name of the descendants, then it's
+      precomputable. For examplem PercentChange(unit, 0, Sum(x)).compute_on(df)
+      needs Sum(x).compute_on(df, unit) and nothing more from the Sum, so it's
+      precomputable. Everything MH(unit, 0, Sum(x), grp).compute_on(df) needs
+      from Sum have been computed and cached during the computation of
+      Sum(x).compute_on(df, unit + grp) so MH is precomputable. The easiest way
+      to check if an Operation is precomputable is that you just set the
+      attribute to True and try Metrics like Jackknife(..., Operation(Dot('x',
+      'y', where='x>2'))) and Jackknife(..., Operation(Dot('x', 'y',
+      where='x>2')), enable_optimization=False). If the first one computes and
+      gives the same result to the second one, the Operation is precomputable.
     where: A string or list of strings to be concatenated that will be passed to
       df.query() as a prefilter.
     cache_key: What key to use to cache the df. You can use anything that can be
-      a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ...).
-    And all other attributes inherited from Metric.
+      a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ...). And
+      all other attributes inherited from Metric.
   """
 
   def __init__(self,
@@ -91,7 +97,7 @@ class Operation(metrics.Metric):
     super(Operation,
           self).__init__(name, child or (), where, name_tmpl, extra_split_by,
                          extra_index, additional_fingerprint_attrs, **kwargs)
-    self.precomputable_in_jk = True
+    self.precomputable_in_jk_bs = True
     self.apply_name_tmpl = True
 
   def split_data(self, df, split_by=None):
@@ -1248,19 +1254,29 @@ class MetricWithCI(Operation):
     sql_batch_size: The number of resamples to compute in one SQL run. It only
       has effect in the 'mixed' mode of compute_on_sql(). Note that you can also
       specify batch_size in compute_on_sql() directly, which precedes this one.
+    enable_optimization: If all leaf Metrics are Sum and/or Count, or can be
+      expressed equivalently by Sum and/or Count, then we can preaggregate the
+      data for faster computation. In addition, for Jackknife we can further cut
+      corners to compute leave-one-out-estimates. This attribute controls
+      whether to use these optimizations.
+    has_been_preaggregated: If the Metric and data has already been
+      preaggregated, this will be set to True.
     _is_root_node: If the instance is a root Metric. And all other attributes
       inherited from Operation.
   """
 
-  def __init__(self,
-               unit: Optional[Text],
-               child: Optional[metrics.Metric] = None,
-               confidence: Optional[float] = None,
-               name_tmpl: Optional[Text] = None,
-               prefix: Optional[Text] = None,
-               additional_fingerprint_attrs=None,
-               sql_batch_size=None,
-               **kwargs):
+  def __init__(
+      self,
+      unit: Optional[Text],
+      child: Optional[metrics.Metric] = None,
+      confidence: Optional[float] = None,
+      name_tmpl: Optional[Text] = None,
+      prefix: Optional[Text] = None,
+      additional_fingerprint_attrs=None,
+      sql_batch_size=None,
+      enable_optimization=True,
+      **kwargs,
+  ):
     if confidence and not 0 < confidence < 1:
       raise ValueError('Confidence must be in (0, 1).')
     self.unit = unit
@@ -1277,7 +1293,9 @@ class MetricWithCI(Operation):
     self.sql_batch_size = sql_batch_size
     if not self.prefix and self.name_tmpl:
       self.prefix = prefix or self.name_tmpl.format('').strip()
-    self.precomputable_in_jk = False
+    self.precomputable_in_jk_bs = False
+    self.enable_optimization = enable_optimization
+    self.has_been_preaggregated = False
     self._is_root_node = None
 
   def compute_on_samples(self,
@@ -1455,7 +1473,7 @@ class MetricWithCI(Operation):
     return half_width, half_width
 
   def get_stderrs_or_ci_half_width(self, bucket_estimates):
-    """Returns confidence interval infomation in an unmelted DataFrame."""
+    """Returns confidence interval information in an unmelted DataFrame."""
     stderrs, dof = self.get_stderrs(bucket_estimates)
     if self.confidence:
       res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
@@ -1467,6 +1485,9 @@ class MetricWithCI(Operation):
 
   def get_samples(self, df, split_by=None):
     raise NotImplementedError
+
+  def can_precompute(self):
+    return False
 
   def to_sql(self, table, split_by=None):
     if not isinstance(self, (Jackknife, Bootstrap)):
@@ -1747,9 +1768,14 @@ class Jackknife(MetricWithCI):
                confidence: Optional[float] = None,
                enable_optimization=True,
                **kwargs):
-    super(Jackknife, self).__init__(unit, child, confidence, '{} Jackknife',
-                                    **kwargs)
-    self.enable_optimization = enable_optimization
+    super(Jackknife, self).__init__(
+        unit,
+        child,
+        confidence,
+        '{} Jackknife',
+        enable_optimization=enable_optimization,
+        **kwargs,
+    )
 
   def compute_slices(self, df, split_by=None):
     """Computes Jackknife with precomputation when possible.
@@ -1777,11 +1803,9 @@ class Jackknife(MetricWithCI):
     if not self.can_precompute():
       return super(Jackknife, self).compute_slices(df, split_by)
     if self != utils.get_fully_expanded_equivalent_metric_tree(self)[0]:
-      prefix = utils.get_unique_prefix(df)
-      util, df = utils.get_fully_expanded_equivalent_metric_tree(
-          self, df, prefix
-      )
+      util, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)
       return self.compute_util_metric_on(util, df, split_by)
+
     self.compute_child(df, split_by + [self.unit])
     precomputed = self.find_all_in_cache_by_metric_type(metric=metrics.Sum)
     precomputed.update(
@@ -1907,29 +1931,6 @@ class Jackknife(MetricWithCI):
     stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
     return stderrs * dof / np.sqrt(dof + 1), dof
 
-  def can_precompute(self):
-    """If all leafs can be expressed as Sum or Count, LOO can be precomputed."""
-    if not self.enable_optimization:
-      return False
-
-    def precomputable(root):
-      for m in root.traverse(include_self=False):
-        if isinstance(m, Operation) and not m.precomputable_in_jk:
-          return False
-        if isinstance(m, metrics.Count) and m.distinct:
-          return False
-        if isinstance(m, (metrics.Sum, metrics.Count)):
-          continue
-        if not m.children:
-          equiv, _ = utils.get_equivalent_metric(m)
-          if not equiv:
-            return False
-          if not precomputable(equiv):
-            return False
-      return True
-
-    return precomputable(self)
-
   def compute_children_sql(self, table, split_by, execute, mode, batch_size):
     """Compute the children on leave-one-out data in SQL."""
     batch_size = batch_size or 1
@@ -1979,6 +1980,32 @@ class Jackknife(MetricWithCI):
         replicates.append(loo)
     return replicates
 
+  def can_precompute(self):
+    return self.enable_optimization and is_metric_precomputable(self)
+
+
+def is_metric_precomputable(metric: MetricWithCI) -> bool:
+  """If metric is precomputable in Jackknife or Bootstrap."""
+  for m in metric.traverse(include_self=False):
+    if isinstance(m, Operation) and not m.precomputable_in_jk_bs:
+      return False
+    if isinstance(m, metrics.Count) and m.distinct:
+      return False
+    precomputable_leaf_types = (metrics.Sum, metrics.Count)
+    if not isinstance(metric, Jackknife):
+      precomputable_leaf_types = tuple(
+          list(precomputable_leaf_types) + [metrics.Max, metrics.Min]
+      )
+    if isinstance(m, precomputable_leaf_types):
+      continue
+    if not m.children:
+      equiv, _ = utils.get_equivalent_metric(m)
+      if not equiv:
+        return False
+      if not is_metric_precomputable(equiv):
+        return False
+  return True
+
 
 class Bootstrap(MetricWithCI):
   """Class for Bootstrap estimates of standard errors.
@@ -1995,48 +2022,123 @@ class Bootstrap(MetricWithCI):
       Additionally, a display() function will be bound to the result so you can
       visualize the confidence interval nicely in Colab and Jupyter notebook.
     children: A tuple of a Metric whose result we bootstrap on.
-    And all other attributes inherited from Operation.
+    enable_optimization: If all leaf Metrics are Sum and/or Count, or can be
+      expressed equivalently by Sum and/or Count, then we can preaggregate the
+      data for faster computation. See compute_slices() for more details.
+    has_been_preaggregated: If the Metric and data has already been
+      preaggregated, this will be set to True. And all other attributes
+      inherited from Operation.
   """
 
-  def __init__(self,
-               unit: Optional[Text] = None,
-               child: Optional[metrics.Metric] = None,
-               n_replicates: int = 10000,
-               confidence: Optional[float] = None,
-               **kwargs):
+  def __init__(
+      self,
+      unit: Optional[Text] = None,
+      child: Optional[metrics.Metric] = None,
+      n_replicates: int = 10000,
+      confidence: Optional[float] = None,
+      enable_optimization=True,
+      **kwargs,
+  ):
     super(Bootstrap, self).__init__(
         unit,
         child,
         confidence,
         '{} Bootstrap',
         additional_fingerprint_attrs=['n_replicates'],
-        **kwargs)
+        enable_optimization=enable_optimization,
+        **kwargs,
+    )
     self.n_replicates = n_replicates
 
+  def compute_slices(self, df, split_by=None):
+    """Computes Bootstrap with unit with precomputation when possible.
+
+    For Bootstrap with unit, if all leafs can be expressed as Sum or Count, we
+    can preaggregate the data for faster computation. For example,
+    Bootstrap(unit, Sum('x')).compute_on(df) equals to
+    Bootstrap(unit, Sum('sum(x)')).compute_on(preaggregated)
+    where preaggregated is computed as
+      preaggregated = df.groupby(unit)[['x']].sum()
+      preaggregated.columns = ['sum(x)']
+    1. We can also preaggregate for Count, Max and Min.
+    2. We can apply the trick to Metrics that can be expressed by Sum and Count,
+      which includes Mean, Dot, Variance, StandardDeviation, CV, Correlation and
+      Cov.
+    3. The same trick applies when there are Operations, for example,
+      Bootstrap(unit, PercentChange(Sum('x'))).compute_on(df)
+      but now we cannot further drop the unit.
+
+    Here we specifically handle such situation by
+    1. replace all leaf Metrics with Sum and/or Count.
+    2. push all filters down to the leaf Metrics.
+    3. Compute the child using split_by + [self.unit].
+    4. Find all the results of Sum/Count/Max/Min in the cache then
+      4.1 Concat them into the preaggregated dataframe. A Sum('x') will have its
+        result in the preaggregated df under column "sum('x') where {filter}".
+        If there is no filter the 'where' part is skipped. A Count('y') will
+        have its result under column "count('x') where {filter}".
+      4.2 Replace all the leaf Metrics to use the columns in the preaggregated
+        df. For example, Sum('x') will be replaced by Sum("sum('x')") and
+        Count('x', where='foo') will become Sum("count('x') where foo").
+    5. A tricky part is units might get dropped by the filters in the children.
+      We adjust it in get_preaggregated_data().
+
+    Args:
+      df: The DataFrame to compute on.
+      split_by: The columns that we use to split the data.
+
+    Returns:
+      The unmelted result.
+    """
+    if self.has_been_preaggregated or not self.can_precompute():
+      return super(Bootstrap, self).compute_slices(df, split_by)
+    if self != utils.get_fully_expanded_equivalent_metric_tree(self)[0]:
+      util, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)
+      return self.compute_util_metric_on(util, df, split_by)
+    preagg, preagg_df = get_preaggregated_data(self, df, split_by)
+    return self.compute_util_metric_on(preagg, preagg_df, split_by)
+
+  def can_precompute(self):
+    return (
+        self.unit and self.enable_optimization and is_metric_precomputable(self)
+    )
+
   def get_samples(self, df, split_by=None):
-    split_by = [split_by] if isinstance(split_by, str) else split_by or []
-    if self.unit is None:
+    """Resamples for Bootstrap. When samples are likely to repeat, cache."""
+    # If there is no extra split_by added, each unit will correspond to one row
+    # in the preaggregated data so we can just sample by rows.
+    if self.unit is None or (
+        self.has_been_preaggregated and not utils.get_extra_split_by(self, True)
+    ):
       to_sample = self.group(df, split_by)
       for _ in range(self.n_replicates):
         yield None, to_sample.sample(frac=1, replace=True)
     else:
       grp_by = split_by + [self.unit] if split_by else self.unit
+      df = df.set_index(grp_by)
       grped = df.groupby(grp_by, observed=True)
       idx = grped.indices
-      units_split_by = df[grp_by].drop_duplicates()
+      n_units = len(idx)
+      units_df = grped.first().iloc[:, [0]]
+      units_grped = self.group(units_df, split_by)
+      use_cache = np.log(self.n_replicates) / n_units > np.log(n_units)
+      sampled = set()
       for _ in range(self.n_replicates):
-        resampled = self.group(units_split_by, split_by).sample(
-            frac=1, replace=True).values
-        if not split_by:
-          yield None, df.iloc[np.concatenate([idx[i] for i in resampled])]
+        resampled = units_grped.sample(frac=1, replace=True).index
+        if use_cache:
+          cache_key = tuple(resampled)
+          if cache_key in sampled:
+            yield cache_key, None
+          else:
+            sampled.add(cache_key)
+            yield cache_key, df.loc[resampled].reset_index()
         else:
-          yield None, df.iloc[np.concatenate([idx[tuple(i)] for i in resampled
-                                             ])]
+          yield None, df.loc[resampled].reset_index()
 
   def compute_children_sql(self, table, split_by, execute, mode, batch_size):
     """Compute the children on resampled data in SQL."""
     batch_size = batch_size or 1000
-    global_filter = metrics.get_global_filter(self)
+    global_filter = utils.get_global_filter(self)
     util_metric = copy.deepcopy(self)
     util_metric.n_replicates = batch_size
     util_metric.confidence = None
@@ -2066,6 +2168,89 @@ class Bootstrap(MetricWithCI):
                                             execute, True, mode)
       replicates.append(bst.unstack('_resample_idx'))
     return replicates
+
+
+def get_preaggregated_data(m, df, split_by):
+  """Gets the preaggegated Metric and data.
+
+  Read the doc of Bootstrap.compute_slices() first.
+  Here we construct the preaggegated Metric and data so that
+  preagg.compute_on(preagg_df, split_by) == m.compute_on(df, split_by).
+  It's achieved by
+  1. push all filters to leaf nodes.
+  2. collect all unique leaf nodes to a MetricList, leafs.
+  3. collect all split_by dimensions we need to keep in the preaggegated data.
+  4. The preaggegated data is then
+    leafs.compute_on(df, all_split_by).reset_index().
+  A subtle thing is that slices might get dropped by filters in the children
+  during the computation. For example, the preaggegated data we got for
+  Bootstrap('unit', Sum(x, where='unit != 0)) will not have the rows whose unit
+  is 0. We need to recover the dropped slices fill in NA.
+
+  Args:
+    m: A Bootstrap with unit.
+    df: The data passed to Jackknife/Bootstrap.compute_on().
+    split_by: The split_by passed to Jackknife/Bootstrap.compute_on().
+
+  Returns:
+    The equivalent Metric that computes on the preaggregated data;
+    The preaggregated dataframe.
+  """
+  all_split_by = (
+      split_by
+      + ([m.unit] if m.unit else [])
+      + list(utils.get_extra_split_by(m, return_superset=True))
+  )
+  original_idx = df.groupby(all_split_by, observed=True).first().iloc[:, [0]]
+  filter_in_leaf = utils.push_filters_to_leaf(m)
+  leafs = metrics.MetricList(tuple(set(utils.get_leaf_metrics(filter_in_leaf))))
+  preagg_df = m.compute_util_metric_on(leafs, df, all_split_by)
+  preagg_leafs = get_preaggregated_metric_tree(leafs)
+  preagg_df.columns = [c.var for c in preagg_leafs]
+  preagg_df = preagg_df.loc[:, ~preagg_df.columns.duplicated()].copy()
+  preagg_df = preagg_df.reindex(original_idx.index)
+  if all_split_by:
+    preagg_df.reset_index(all_split_by, inplace=True)
+  for l, p in zip(leafs, preagg_leafs):
+    key = utils.CacheKey(l, m.cache_key, l.where_raw, all_split_by)
+    res = m.get_cached(key)
+    key = key.replace_metric(p).replace_where(m.cache_key.where)
+    m.save_to_cache(key, res)
+  preagg = get_preaggregated_metric_tree(filter_in_leaf)
+  return preagg, preagg_df
+
+
+def get_preaggregated_metric_tree(m):
+  """Gets the equivalent Metric of m on the preaggregated data."""
+  if not isinstance(m, metrics.Metric):
+    return m
+  if not m.children:
+    return get_preaggregated_metric(m)
+  m = copy.copy(m)
+  m.children = [get_preaggregated_metric_tree(c) for c in m.children]
+  m.has_been_preaggregated = True
+  return m
+
+
+def get_preaggregated_metric(m):
+  """Gets the equivalent metric of on the preaggregated data if m is a leaf."""
+  if not isinstance(m, (metrics.Sum, metrics.Count, metrics.Max, metrics.Min)):
+    raise ValueError(
+        f'Expecting Sum/Count/Max/Min but got f{m.name} is f{type(m)}.'
+    )
+  tmpl_lookup = {
+      metrics.Sum: 'sum(%s)',
+      metrics.Count: 'count(%s)',
+      metrics.Max: 'max(%s)',
+      metrics.Min: 'min(%s)',
+  }
+  name = tmpl_lookup[type(m)] % m.var
+  var = f'{name} where {m.where}' if m.where else name
+  if isinstance(m, metrics.Max):
+    return metrics.Max(var, name=m.name)
+  if isinstance(m, metrics.Min):
+    return metrics.Min(var, name=m.name)
+  return metrics.Sum(var, name=m.name)
 
 
 def get_se(metric, table, split_by, global_filter, indexes, local_filter,

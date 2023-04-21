@@ -361,6 +361,60 @@ class UtilsTest(absltest.TestCase):
     )
     self.assertEqual(output, expected)
 
+  def test_get_fully_expanded_equivalent_metric_tree_df(self):
+    m = metrics.MetricList((metrics.Variance('x'), metrics.Dot('x', 'x')))
+    df = pd.DataFrame({'x': range(3)})
+    original_df = df.copy()
+    _, actual = utils.get_fully_expanded_equivalent_metric_tree(m, df)
+    prefix = utils.get_unique_prefix(df)
+    expected = df.copy()
+    expected[f'{prefix}(x * x)'] = df.x * df.x
+    testing.assert_frame_equal(df, original_df)
+    testing.assert_frame_equal(actual, expected)
+
+  def test_push_filters_to_leaf(self):
+    s = metrics.Sum('x', where='a')
+    m = s / metrics.Count('y')
+    m.where = 'c'
+    m = metrics.MetricList([s + 1, m], where='b')
+    output = utils.push_filters_to_leaf(m)
+    expected = metrics.MetricList([
+        metrics.Sum('x', where=('a', 'b')) + 1,
+        metrics.Sum('x', where=('a', 'b', 'c'))
+        / metrics.Count('y', where=('b', 'c')),
+    ])
+    self.assertEqual(output, expected)
+
+  def test_push_filters_to_leaf_with_cache_key_where(self):
+    s = metrics.Sum('x', where='a')
+    m = s / metrics.Count('y')
+    m.where = 'c'
+    m = metrics.MetricList([s + 1, m], where='b')
+    m.cache_key = utils.CacheKey(m, 'key', 'd')
+    output = utils.push_filters_to_leaf(m)
+    expected = metrics.MetricList([
+        metrics.Sum('x', where=('a', 'b', 'd')) + 1,
+        metrics.Sum('x', where=('a', 'b', 'c', 'd'))
+        / metrics.Count('y', where=('b', 'c', 'd')),
+    ])
+    self.assertEqual(output, expected)
+
+  def test_get_leaf_metrics(self):
+    m = metrics.MetricList(
+        (metrics.Ratio('x', 'y'), metrics.Sum('c', where='f') + 1)
+    )
+    output = utils.get_leaf_metrics(m)
+    expected = [metrics.Sum('x'), metrics.Sum('y'), metrics.Sum('c', where='f')]
+    self.assertEqual(output, expected)
+
+  def test_get_leaf_metrics_include_constants(self):
+    m = metrics.MetricList(
+        (metrics.Ratio('x', 'y', where='f'), metrics.Sum('c') + 1)
+    )
+    output = utils.get_leaf_metrics(m, True)
+    expected = [metrics.Sum('x'), metrics.Sum('y'), metrics.Sum('c'), 1]
+    self.assertEqual(output, expected)
+
 
 if __name__ == '__main__':
   absltest.main()

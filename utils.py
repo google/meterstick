@@ -20,6 +20,7 @@ from __future__ import print_function
 import copy
 from typing import Iterable, List, Optional, Text, Union
 
+from meterstick import sql
 import pandas as pd
 
 
@@ -32,7 +33,7 @@ class CacheKey():
 
   During the computation of a Metric, we often use a key to cache results. It
   either comes from users or a default value. For caching to be valid, one cache
-  key needs to correpond to the same DataFrame AND split_by, but it can still
+  key needs to correspond to the same DataFrame AND split_by, but it can still
   lead to unintuitive behavior. For example,
   PercentChange(condition, base, Sum('X')).compute_on(df, cache_key='foo')
   would cache the percent change in PercentChange under key 'foo' and
@@ -141,6 +142,13 @@ class CacheKey():
     new_key = copy.deepcopy(self)
     new_key.split_by = split_by
     new_key.fingerprint['split_by'] = split_by
+    return new_key
+
+  def replace_where(self, where):
+    where = (where,) if isinstance(where, str) else tuple(sorted(where)) or ()
+    new_key = copy.deepcopy(self)
+    new_key.where = where
+    new_key.fingerprint['where'] = where
     return new_key
 
   def __eq__(self, other):
@@ -490,7 +498,7 @@ def parse_auxiliary_col(auxiliary_col, df: Optional[pd.DataFrame] = None):
   return name, res
 
 
-def get_fully_expanded_equivalent_metric_tree(m, df=None, prefix=''):
+def get_fully_expanded_equivalent_metric_tree(m, df=None):
   """Gets a Metric that is equivalent to m, and cannot be further expanded.
 
   Some Metrics can be expressed by simpler Metrics like Sum and Count. Sum and
@@ -509,8 +517,6 @@ def get_fully_expanded_equivalent_metric_tree(m, df=None, prefix=''):
   Args:
     m: A Metric.
     df: The dataframe we compute on. If None, we skip the computation part.
-    prefix: A prefix that doesn't exist in df. We'll prefix it to all columns
-      added so the new columns won't collide with the existing ones.
 
   Returns:
     A Metric equivalent to m with leaf Metrics replaced by Sum and Count. df is
@@ -519,6 +525,7 @@ def get_fully_expanded_equivalent_metric_tree(m, df=None, prefix=''):
   """
   df = copy.copy(df)
   prev = m
+  prefix = get_unique_prefix(df) if df is not None else ''
   curr = get_equivalent_metric_tree(m, df, prefix)
   while prev != curr:
     prev, curr = curr, get_equivalent_metric_tree(curr, df, prefix)
@@ -557,5 +564,74 @@ def get_equivalent_metric(m, df=None, prefix=''):
   return equiv, df
 
 
+def push_filters_to_leaf(metric, is_root=True):
+  """Returns a Metric that all filters have been pushed to leaf nodes.
+
+  Note that the return can differ subtly to the original metric when computing
+  on the same data. For example, the result of these two metrics won't be same
+    m1 = Jackknife('unit', Sum(x), where='unit !=1')
+    m2 = Jackknife('unit', Sum(x, where='unit !=1'))
+  m1.compute_on(df) == Jackknife('unit', Sum(x)).compute_on(df[df.unit != 1])
+  while m2.compute_on(df) doesn't. For m1, the unit-1 slice is never used while
+  for m2, it's used in resampling and only get dropped during the computation.
+  In other words, suppose there are 5 units in the data, m1 won't generate
+  leave-1-out data while m2 will.
+  This situation is rare and for built-in stuff it only happens to Jackknife and
+  Bootstrap with unit when the filter filters out unit slice(s). Nevertheless,
+  it'd be good to keep the subtlety in mind.
+
+  Args:
+    metric: A Metric instance.
+    is_root: If metric is the root node of the metric tree. For root node, if it
+      has a filter encoded in its cache_key, we pass it down as well.
+
+  Returns:
+    A Metric instance 'equivalent' to the input metric but only have filters in
+    leaf nodes. Please see above for the subtlety of 'equivalent'.
+  """
+  if not is_metric(metric):
+    return metric
+  if is_root and metric.cache_key and metric.cache_key.where:
+    metric = copy.deepcopy(metric)
+    metric.add_where(metric.cache_key.where)
+  if not metric.children:
+    return copy.deepcopy(metric)
+  metric = copy.copy(metric)
+  where = metric.where_raw
+  children = metric.children
+  if where:
+    children = [
+        copy.copy(c).add_where(where) if is_metric(c) else c for c in children
+    ]
+  metric.children = [push_filters_to_leaf(c, False) for c in children]
+  metric.where = None
+  return metric
+
+
 def is_metric(m):
   return hasattr(m, 'compute_on')
+
+
+def get_leaf_metrics(metric, include_constants=False):
+  leaf = []
+  for m in metric.traverse(include_constants=include_constants):
+    if not getattr(m, 'children', []):
+      leaf.append(m)
+  return leaf
+
+
+def get_global_filter(metric) -> sql.Filters:
+  """Collects the filters that can be applied globally to the Metric tree."""
+  global_filter = sql.Filters()
+  if metric.where:
+    global_filter.add(metric.where)
+  # Filters inside resampling Operations shound not be considered global.
+  if type(metric).__name__ in ('Jackknife', 'Bootstrap'):
+    return global_filter
+  children_filters = [
+      set(get_global_filter(c)) for c in metric.children if is_metric(c)
+  ]
+  if children_filters:
+    shared_filter = set.intersection(*children_filters)
+    global_filter.add(shared_filter)
+  return global_filter

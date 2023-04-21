@@ -67,22 +67,6 @@ def to_sql(table, split_by=None):
   return lambda metric: metric.to_sql(table, split_by)
 
 
-def get_global_filter(metric):
-  """Collects the filters that can be applied globally to the Metric tree."""
-  global_filter = sql.Filters()
-  if metric.where:
-    global_filter.add(metric.where)
-  children_filters = [
-      set(get_global_filter(c))
-      for c in metric.children
-      if isinstance(c, Metric)
-  ]
-  if children_filters:
-    shared_filter = set.intersection(*children_filters)
-    global_filter.add(shared_filter)
-  return global_filter
-
-
 def is_operation(m):
   """We can't use isinstance because of loop dependency."""
   return isinstance(m, Metric) and m.children and not isinstance(
@@ -204,6 +188,14 @@ class Metric(object):
       self.where_raw = (where,)
     else:
       self.where_raw = tuple(where)
+
+  def add_where(self, where):
+    where = [where] if isinstance(where, str) else list(where) or []
+    if not self.where:
+      self.where = where
+    else:
+      self.where = tuple(set(list(self.where_raw) + where))
+    return self
 
   def compute_with_split_by(self,
                             df,
@@ -673,7 +665,7 @@ class Metric(object):
 
   def to_sql(self, table, split_by: Optional[Union[Text, List[Text]]] = None):
     """Generates SQL query for the metric."""
-    global_filter = get_global_filter(self)
+    global_filter = utils.get_global_filter(self)
     indexes = sql.Columns(split_by).add(utils.get_extra_idx(self))
     with_data = sql.Datasources()
     if isinstance(table, sql.Sql) and table.with_data:

@@ -33,6 +33,18 @@ from scipy import stats
 from sklearn import linear_model
 
 
+def spy_decorator(method_to_decorate):
+  # Adapted from https://stackoverflow.com/a/41599695.
+  m = mock.MagicMock()
+
+  def wrapper(self, *args, **kwargs):
+    m(*args, **kwargs)
+    return method_to_decorate(self, *args, **kwargs)
+
+  wrapper.mock = m
+  return wrapper
+
+
 class DistributionTests(absltest.TestCase):
 
   df = pd.DataFrame({
@@ -282,11 +294,11 @@ class CumulativeDistributionTests(absltest.TestCase):
 
 
 class PercentChangeTests(absltest.TestCase):
-
   df = pd.DataFrame({
       'X': [1, 2, 3, 4, 5, 6],
       'Condition': [0, 0, 0, 1, 1, 1],
-      'grp': ['A', 'A', 'B', 'A', 'B', 'C']
+      'grp': ['A', 'A', 'B', 'A', 'B', 'C'],
+      'grp2': [0, 0, 0, 1, 1, 1],
   })
   metric_lst = metrics.MetricList((metrics.Sum('X'), metrics.Count('X')))
 
@@ -443,6 +455,19 @@ class PercentChangeTests(absltest.TestCase):
         expected.values, index=output.index, columns=output.columns)
     testing.assert_frame_equal(output, expected)
 
+  def test_difference_in_differences(self):
+    pct1 = operations.PercentChange(
+        'grp', 'A', metrics.Sum('X'), where='grp2 == 0'
+    )
+    pct2 = operations.PercentChange(
+        'grp', 'A', metrics.Sum('X'), where='grp2 == 1'
+    )
+    m = pct1 - pct2
+    output = m.compute_on(self.df)
+    expected = pct1.compute_on(self.df) - pct2.compute_on(self.df)
+    expected.columns = output.columns
+    testing.assert_frame_equal(output, expected)
+
   def test_percent_change_pipeline(self):
     metric = operations.PercentChange('Condition', 0)
     output = self.metric_lst | metric | metrics.compute_on(self.df)
@@ -455,11 +480,11 @@ class PercentChangeTests(absltest.TestCase):
 
 
 class AbsoluteChangeTests(absltest.TestCase):
-
   df = pd.DataFrame({
       'X': [1, 2, 3, 4, 5, 6],
       'Condition': [0, 0, 0, 1, 1, 1],
-      'grp': ['A', 'A', 'B', 'A', 'B', 'C']
+      'grp': ['A', 'A', 'B', 'A', 'B', 'C'],
+      'grp2': [0, 0, 0, 1, 1, 1],
   })
   metric_lst = metrics.MetricList((metrics.Sum('X'), metrics.Count('X')))
 
@@ -614,6 +639,21 @@ class AbsoluteChangeTests(absltest.TestCase):
     expected = expected_metric.compute_on(df, 'grp2')
     expected = pd.DataFrame(
         expected.values, index=output.index, columns=output.columns)
+    testing.assert_frame_equal(output, expected)
+
+  def test_chained_operation(self):
+    m = (
+        metrics.Sum('X')
+        | operations.PercentChange('grp', 'A')
+        | operations.AbsoluteChange('grp2', 0)
+    )
+    output = m.compute_on(self.df)
+    expected = pd.DataFrame({
+        'sum(X) Percent Change Absolute Change': [25.0, np.nan],
+        'grp': ['B', 'C'],
+        'grp2': [1, 1],
+    })
+    expected.set_index(['grp2', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
   def test_absolute_change_pipeline(self):
@@ -1736,6 +1776,30 @@ class JackknifeTests(parameterized.TestCase):
     expected = pd.concat(expected, keys=['A', 'B'], names=['grp'])
     testing.assert_frame_equal(output, expected)
 
+  def test_unequal_index_broacasting(self):
+    df = pd.DataFrame({
+        'X': range(6),
+        'grp': ['A'] * 3 + ['B'] * 3,
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    s = metrics.Sum('X')
+    pct = operations.PercentChange('grp', 'A', s)
+    m = operations.Jackknife('cookie', s * pct, 0.9)
+    m_no_opt = operations.Jackknife('cookie', s * pct, 0.9, False)
+
+    output = m.compute_on(df, melted=True)
+    output_pt_est = output['Value']
+    expected_pt_est = pct.compute_on(df, melted=True).iloc[:, 0] * df.X.sum()
+    expected_pt_est.index = expected_pt_est.index.set_levels(
+        ['sum(X) * sum(X) Percent Change'], 0
+    )
+    output_html = output.display(return_formatted_df=True)
+    expected_html = m_no_opt.compute_on(df).display(return_formatted_df=True)
+
+    testing.assert_series_equal(expected_pt_est, output_pt_est)
+    testing.assert_frame_equal(output_html, expected_html)
+    self.assertTrue(m.can_precompute())
+
   def test_integration(self):
     df = pd.DataFrame({
         'X': np.arange(0, 3, 0.5),
@@ -1882,37 +1946,44 @@ class JackknifeTests(parameterized.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class BootstrapTests(absltest.TestCase):
+class BootstrapTests(parameterized.TestCase):
 
   n = 100
   x = np.arange(0, 3, 0.5)
   df = pd.DataFrame({'X': x, 'grp': ['A'] * 3 + ['B'] * 3})
   metric = metrics.MetricList((metrics.Sum('X'), metrics.Count('X')))
   bootstrap_no_unit = operations.Bootstrap(None, metric, n)
+  bootstrap_no_unit_no_opt = operations.Bootstrap(
+      None, metric, n, enable_optimization=False
+  )
   bootstrap_unit = operations.Bootstrap('unit', metric, n)
+  bootstrap_unit_no_opt = operations.Bootstrap(
+      'unit', metric, n, enable_optimization=False
+  )
 
   def test_get_samples(self):
     m = operations.Bootstrap(None, metrics.Sum('X'), 2)
-    output = [s[1] for s in m.get_samples(self.df)]
+    output = [s[1] for s in m.get_samples(self.df, [])]
     self.assertLen(output, 2)
     for s in output:
       self.assertLen(s, len(self.df))
 
   def test_get_samples_splitby(self):
     m = operations.Bootstrap(None, metrics.Sum('X'), 2)
-    output = [s[1] for s in m.get_samples(self.df, 'grp')]
+    output = [s[1] for s in m.get_samples(self.df, ['grp'])]
     self.assertLen(output, 2)
     expected = self.df.groupby('grp').size()
     for s in output:
       testing.assert_series_equal(s.groupby('grp').size(), expected)
 
   def test_get_samples_with_unit(self):
-    m = operations.Bootstrap('grp', metrics.Sum('X'), 10)
-    output = [s[1] for s in m.get_samples(self.df)]
-    self.assertLen(output, 10)
+    m = operations.Bootstrap('grp', metrics.Sum('X'), 20)
+    output = [s[1] for s in m.get_samples(self.df, [])]
+    self.assertLen(output, 20)
     grp_cts = self.df.groupby('grp').size()
     for s in output:
-      self.assertEqual([2], (s.groupby('grp').size() / grp_cts).sum())
+      if s is not None:
+        self.assertEqual([2], (s.groupby('grp').size() / grp_cts).sum())
 
   def test_get_samples_with_unit_splitby(self):
     df = pd.DataFrame({
@@ -1921,7 +1992,7 @@ class BootstrapTests(absltest.TestCase):
         'grp2': ['foo'] * 5 + ['bar'] * 5
     })
     m = operations.Bootstrap('grp', metrics.Sum('X'), 10)
-    output = [s[1] for s in m.get_samples(df, 'grp2')]
+    output = [s[1] for s in m.get_samples(df, ['grp2'])]
     self.assertLen(output, 10)
     grp_cts = df.groupby(['grp2', 'grp']).size()
     for s in output:
@@ -1960,40 +2031,203 @@ class BootstrapTests(absltest.TestCase):
     expected.index.name = 'Metric'
     testing.assert_frame_equal(melted, expected)
 
-  def test_bootstrap_unit(self):
-    df = pd.DataFrame({'X': self.x, 'unit': ['A', 'A', 'B', 'B', 'C', 'C']})
+  @parameterized.named_parameters(*PRECOMPUTABLE_METRICS_BS)
+  def test_bootstrap_unit(self, m):
+    df = pd.DataFrame({
+        'X': np.random.rand(6),
+        'Y': np.random.rand(6),
+        'w': np.random.rand(6),
+        'w2': np.random.randint(1, 10, size=6),
+        'unit': ['A', 'A', 'B', 'C', 'C', 'C'],
+    })
+    bootstrap_unit = operations.Bootstrap('unit', m, 5)
+    bootstrap_unit_no_opt = operations.Bootstrap(
+        'unit', m, 5, enable_optimization=False
+    )
     np.random.seed(42)
-    unmelted = self.bootstrap_unit.compute_on(df)
+    with mock.patch.object(
+        operations.Bootstrap,
+        'get_samples',
+        spy_decorator(operations.Bootstrap.get_samples),
+    ) as mock_fn_opt:
+      output1 = bootstrap_unit.compute_on(df)
+    np.random.seed(42)
+    with mock.patch.object(
+        operations.Bootstrap,
+        'get_samples',
+        spy_decorator(operations.Bootstrap.get_samples),
+    ) as mock_fn_no_opt:
+      output2 = bootstrap_unit_no_opt.compute_on(df)
 
     np.random.seed(42)
     estimates = []
-    for _ in range(self.n):
+    for _ in range(5):
       buckets_sampled = np.random.choice(['A', 'B', 'C'], size=3)
       sample = pd.concat(df[df['unit'] == b] for b in buckets_sampled)
-      res = metrics.Sum('X').compute_on(sample, return_dataframe=False)
+      res = m.compute_on(sample, return_dataframe=False)
       estimates.append(res)
-    std_sumx = np.std(estimates, ddof=1)
-
+    std = np.std(estimates, ddof=1)
     expected = pd.DataFrame(
-        [[7.5, std_sumx, 6., 0.]],
+        [[m.compute_on(df, return_dataframe=False), std]],
         columns=pd.MultiIndex.from_product(
-            [['sum(X)', 'count(X)'], ['Value', 'Bootstrap SE']],
-            names=['Metric', None]))
-    testing.assert_frame_equal(unmelted, expected)
+            [[m.name], ['Value', 'Bootstrap SE']], names=['Metric', None]
+        ),
+    ).astype(float)
 
+    testing.assert_frame_equal(output1, expected)
+    mock_fn_opt.mock.assert_called_once()
+    self.assertLen(mock_fn_opt.mock.call_args[0][0], 3)
+    testing.assert_frame_equal(output2, expected)
+    mock_fn_no_opt.mock.assert_called_once()
+    self.assertIs(mock_fn_no_opt.mock.call_args[0][0], df)
+
+  @parameterized.named_parameters(*PRECOMPUTABLE_METRICS_BS)
+  def test_bootstrap_unit_opt_splitby(self, m):
+    m = copy.deepcopy(m)
+    m.where = 'unit != 0'
+    n = 8
+    df = pd.DataFrame({
+        'X': np.random.rand(n),
+        'Y': np.random.rand(n),
+        'w': np.random.rand(n),
+        'w2': np.random.randint(1, 10, size=n),
+        'unit': [0, 1, 1, 2, 2, 2, 2, 2],
+        'grp': [1, 2] * 4,
+    })
+    bootstrap_unit = operations.Bootstrap('unit', m, 5)
+    with mock.patch.object(
+        operations.Bootstrap,
+        'get_samples',
+        spy_decorator(operations.Bootstrap.get_samples),
+    ) as mock_fn_opt:
+      bootstrap_unit.compute_on(df, 'grp')
+
+    mock_fn_opt.mock.assert_called_once()
+    self.assertLen(mock_fn_opt.mock.call_args[0][0], 5)
+
+  @parameterized.named_parameters(*PRECOMPUTABLE_METRICS_BS)
+  def test_bootstrap_unit_root_filter(self, m):
+    n = 8
+    df = pd.DataFrame({
+        'X': np.random.rand(n),
+        'Y': np.random.rand(n),
+        'w': np.random.rand(n),
+        'w2': np.random.randint(1, 10, size=n),
+        'unit': [0, 0, 1, 2, 2, 2, 2, 2],
+        'grp': [1, 2] * 4,
+    })
+    bootstrap_unit = operations.Bootstrap('unit', m, 5, 0.9, where='unit!=0')
+    bootstrap_unit_no_opt = operations.Bootstrap(
+        'unit', m, 5, 0.9, False, where='unit!=0'
+    )
     np.random.seed(42)
-    melted = self.bootstrap_unit.compute_on(df, melted=True)
-    expected = pd.DataFrame(
-        data={
-            'Value': [7.5, 6.],
-            'Bootstrap SE': [std_sumx, 0.]
-        },
-        columns=['Value', 'Bootstrap SE'],
-        index=['sum(X)', 'count(X)'])
-    expected.index.name = 'Metric'
-    testing.assert_frame_equal(melted, expected)
+    with mock.patch.object(
+        operations.Bootstrap,
+        'get_samples',
+        spy_decorator(operations.Bootstrap.get_samples),
+    ) as mock_fn_opt:
+      output = bootstrap_unit.compute_on(df, 'grp').display(
+          return_formatted_df=True
+      )
+    np.random.seed(42)
+    expected = bootstrap_unit_no_opt.compute_on(df, 'grp').display(
+        return_formatted_df=True
+    )
 
-  def test_bootstrap_splitby(self):
+    mock_fn_opt.mock.assert_called_once()
+    self.assertLen(mock_fn_opt.mock.call_args[0][0], 3)
+    testing.assert_frame_equal(output, expected)
+
+  @parameterized.named_parameters(*PRECOMPUTABLE_OPERATIONS)
+  def test_bootstrap_unit_opt_on_operation_filter(self, m):
+    m = copy.deepcopy(m)
+    if not m.children:
+      m = m(metrics.Ratio('X', 'Y'))
+    m.where = 'unit != 0'
+    n = 40
+    df = pd.DataFrame({
+        'X': np.random.rand(n),
+        'Y': np.random.rand(n),
+        'w': np.random.rand(n),
+        'w2': np.random.randint(1, 10, size=n),
+        'unit': np.random.choice(range(3), n),
+        'condition': np.random.choice(range(4), n),
+        'cookie': np.random.choice(range(5), n),
+    })
+    bootstrap_unit = operations.Bootstrap('unit', m, 5)
+    with mock.patch.object(
+        operations.Bootstrap,
+        'get_samples',
+        spy_decorator(operations.Bootstrap.get_samples),
+    ) as mock_fn_opt:
+      bootstrap_unit.compute_on(df)
+    preaggregated = mock_fn_opt.mock.call_args[0][0]
+
+    split_by = list(utils.get_extra_split_by(m)) + ['unit']
+    self.assertLen(preaggregated, df[split_by].apply(tuple, 1).nunique())
+    self.assertTrue(
+        preaggregated[preaggregated.unit == 0]
+        .drop(columns=split_by)
+        .isnull()
+        .all()
+        .all()
+    )
+
+  @parameterized.named_parameters(*PRECOMPUTABLE_OPERATIONS)
+  def test_bootstrap_unit_opt_on_operation_leaf_filter(self, m):
+    m = copy.deepcopy(m)
+    if not m.children:
+      m = m(metrics.Ratio('X', 'Y'))
+    m.children[0].where = 'unit != 0'
+    n = 40
+    df = pd.DataFrame({
+        'X': np.random.rand(n),
+        'Y': np.random.rand(n),
+        'w': np.random.rand(n),
+        'w2': np.random.randint(1, 10, size=n),
+        'unit': np.random.choice(range(3), n),
+        'condition': np.random.choice(range(4), n),
+        'cookie': np.random.choice(range(5), n),
+    })
+    bootstrap_unit = operations.Bootstrap('unit', m, 5)
+    with mock.patch.object(
+        operations.Bootstrap,
+        'get_samples',
+        spy_decorator(operations.Bootstrap.get_samples),
+    ) as mock_fn_opt:
+      bootstrap_unit.compute_on(df)
+    preaggregated = mock_fn_opt.mock.call_args[0][0]
+
+    split_by = list(utils.get_extra_split_by(m)) + ['unit']
+    self.assertLen(preaggregated, df[split_by].apply(tuple, 1).nunique())
+    self.assertTrue(
+        preaggregated[preaggregated.unit == 0]
+        .drop(columns=split_by)
+        .isnull()
+        .all()
+        .all()
+    )
+
+  def test_bootstrap_unit_cache_across_samples(self):
+    df = pd.DataFrame({
+        'x': range(4),
+        'unit': [0, 0, 1, 1],
+        'grp': [0, 1] * 2,
+    })
+    SUM_COMPUTE_THROUGH.mock.reset_mock()
+    bootstrap_unit = operations.Bootstrap(
+        'unit', operations.AbsoluteChange('grp', 0, metrics.Sum('x')), 5
+    )
+    with mock.patch.object(
+        metrics.Sum,
+        'compute_through',
+        spy_decorator(metrics.Sum.compute_through),
+    ) as mock_fn_opt:
+      bootstrap_unit.compute_on(df)
+    # The additional two calls are for precomputation and point estimate.
+    self.assertLess(mock_fn_opt.mock.call_count, 7)
+
+  def test_bootstrap_no_unit_splitby(self):
     np.random.seed(42)
     unmelted = self.bootstrap_no_unit.compute_on(self.df, 'grp')
 
@@ -2018,7 +2252,7 @@ class BootstrapTests(absltest.TestCase):
     self.assertEqual(output.index.names, ['grp0', 'grp'])
     output.display()  # Check display() runs.
 
-  def test_bootstrap_where(self):
+  def test_bootstrap_no_unit_where(self):
     df = pd.DataFrame({'X': range(1, 7), 'grp': ['B'] * 3 + ['A'] * 3})
     metric = operations.Bootstrap(
         None, metrics.Sum('X'), self.n, where='grp == "A"')
@@ -2058,6 +2292,32 @@ class BootstrapTests(absltest.TestCase):
             names=['Metric', None]))
     testing.assert_frame_equal(unmelted, expected)
     unmelted.display()  # Check display() runs.
+
+  def test_unequal_index_broacasting(self):
+    df = pd.DataFrame({
+        'X': range(6),
+        'grp': ['A'] * 3 + ['B'] * 3,
+        'cookie': [1, 2, 3, 1, 2, 3],
+    })
+    s = metrics.Sum('X')
+    pct = operations.PercentChange('grp', 'A', s)
+    m = operations.Bootstrap('cookie', s * pct, 10, 0.9)
+    m_no_opt = operations.Bootstrap('cookie', s * pct, 10, 0.9, False)
+
+    np.random.seed(0)
+    output = m.compute_on(df, melted=True)
+    output_pt_est = output['Value']
+    expected_pt_est = pct.compute_on(df, melted=True).iloc[:, 0] * df.X.sum()
+    expected_pt_est.index = expected_pt_est.index.set_levels(
+        ['sum(X) * sum(X) Percent Change'], 0
+    )
+    output_html = output.display(return_formatted_df=True)
+    np.random.seed(0)
+    expected_html = m_no_opt.compute_on(df).display(return_formatted_df=True)
+
+    testing.assert_series_equal(expected_pt_est, output_pt_est)
+    testing.assert_frame_equal(output_html, expected_html)
+    self.assertTrue(m.can_precompute())
 
   def test_integration(self):
     change = metrics.Sum('X') | operations.AbsoluteChange('grp', 'A')
@@ -2162,18 +2422,6 @@ class FilterTest(parameterized.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-def spy_decorator(method_to_decorate):
-  # Adapted from https://stackoverflow.com/a/41599695.
-  m = mock.MagicMock()
-
-  def wrapper(self, *args, **kwargs):
-    m(*args, **kwargs)
-    return method_to_decorate(self, *args, **kwargs)
-
-  wrapper.mock = m
-  return wrapper
-
-
 SUM_COMPUTE_THROUGH = spy_decorator(metrics.Sum.compute_through)
 
 
@@ -2201,6 +2449,8 @@ class CachingTest(parameterized.TestCase):
     actual_call_ct = SUM_COMPUTE_THROUGH.mock.call_count
     expected_call_ct = 2 * op.n_replicates + 2 if isinstance(
         op, operations.Bootstrap) else 2
+    if isinstance(op, operations.Bootstrap) and op.unit:
+      expected_call_ct += 2  # for precomputation
 
     self.assertEqual(actual_call_ct, expected_call_ct)
     self.assertEmpty(op.cache)
