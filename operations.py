@@ -181,7 +181,11 @@ class Distribution(Operation):
         if split_by
         else children.sum()
     )
-    return children / total
+    res = children / total
+    # The order might get messed up for MultiIndex.
+    if len(children.index.names) > 1:
+      return res.reorder_levels(children.index.names)
+    return res
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -212,7 +216,7 @@ class Distribution(Operation):
         table, indexes, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'DistributionRaw')
     child_table_alias, rename = with_data.merge(child_table)
-    groupby = sql.Columns(indexes.aliases, distinct=True)
+    groupby = sql.Columns(indexes.aliases)
     columns = sql.Columns()
     for c in child_sql.columns:
       if c.alias in groupby:
@@ -255,11 +259,19 @@ class CumulativeDistribution(Operation):
         over,
         additional_fingerprint_attrs=['order', 'ascending'],
         **kwargs)
+    if order and len(self.extra_index) > 1:
+      raise ValueError(
+          'Only one column is supported when "order" is specified.'
+      )
 
   def compute(self, df):
     if self.order:
-      df = pd.concat((
-          df.loc[[o]] for o in self.order if o in df.index.get_level_values(0)))
+      order = [o for o in self.order if o in df.index.get_level_values(0)]
+      order = order if self.ascending else reversed(order)
+      if len(df.index.names) == 1:
+        df = df.reindex(order)
+      else:
+        df = df.reindex(order, level=0)
     else:
       df.sort_values(self.extra_index, ascending=self.ascending, inplace=True)
     dist = df.cumsum()
@@ -298,9 +310,10 @@ class CumulativeDistribution(Operation):
     child_table_alias, rename = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
     order = list(utils.get_extra_idx(self))
-    order[0] = sql.Column(
-        _get_order_for_cum_dist(sql.Column(order[0]).alias, self),
-        auto_alias=False)
+    order = [
+        sql.Column(self.get_ordered_col(sql.Column(o).alias), auto_alias=False)
+        for o in order
+    ]
     for c in child_sql.columns:
       if c in columns:
         continue
@@ -315,15 +328,15 @@ class CumulativeDistribution(Operation):
       columns.add(col)
     return sql.Sql(columns, child_table_alias), with_data
 
-
-def _get_order_for_cum_dist(over, metric):
-  if metric.order:
-    over = 'CASE %s\n' % over
-    tmpl = 'WHEN %s THEN %s'
-    over += '\n'.join(
-        tmpl % (_format_to_condition(o), i) for i, o in enumerate(metric.order))
-    over += '\nELSE %s\nEND' % len(metric.order)
-  return over if metric.ascending else over + ' DESC'
+  def get_ordered_col(self, over):
+    if self.order:
+      over = 'CASE %s\n' % over
+      tmpl = 'WHEN %s THEN %s'
+      over += '\n'.join(
+          tmpl % (_format_to_condition(o), i) for i, o in enumerate(self.order)
+      )
+      over += '\nELSE %s\nEND' % len(self.order)
+    return over if self.ascending else over + ' DESC'
 
 
 def _format_to_condition(val):
@@ -961,7 +974,7 @@ class MH(Comparison):
             MHBase.`sum(impression)` + MHRaw.`sum(impression)`)), 0)) - 100
         AS `ctr MH Ratio`
     FROM MHRaw
-    JOIN
+    LEFT JOIN
     MHBase
     USING (split_by, stratified)
     WHERE
@@ -1077,9 +1090,17 @@ class MH(Comparison):
           alias=alias_tmpl.format(child.name))
 
     using = indexes.difference(cond_cols).add(self.stratified_by)
-    return sql.Sql(columns,
-                   sql.Join(raw_table_alias, base_table_alias, using=using),
-                   cond, indexes.aliases), with_data
+    return (
+        sql.Sql(
+            columns,
+            sql.Join(
+                raw_table_alias, base_table_alias, join='LEFT', using=using
+            ),
+            cond,
+            indexes.aliases,
+        ),
+        with_data,
+    )
 
 
 def get_display_fn(name,
@@ -1172,7 +1193,9 @@ def get_display_fn(name,
       comparison_suffix = '(%s)$' % '|'.join(comparison_suffix)
       # Don't use inplace=True. It will change the index of 'base' too.
       res.index = res.index.set_levels(
-          res.index.levels[0].str.replace(comparison_suffix, ''), 0)
+          res.index.levels[0].str.replace(comparison_suffix, '', regex=True),
+          level=0,
+      )
       show_control = True if show_control is None else show_control
     metric_order = list(res.index.get_level_values(
         0).unique()) if metric_order is None else metric_order
@@ -1183,8 +1206,8 @@ def get_display_fn(name,
       if len(condition_column) == 1:
         condition_col = condition_column[0]
       else:
-        res['_expr_id'] = res[condition_column].agg(', '.join, axis=1)
-        control = ', '.join(ctrl_id)
+        res['_expr_id'] = res[condition_column].agg(tuple, axis=1).astype(str)
+        control = str(control)
         condition_col = '_expr_id'
 
     metric_formats = (
@@ -1325,9 +1348,10 @@ class MetricWithCI(Operation):
         estimates.append(res)
       except Exception as e:  # pylint: disable=broad-except
         print(
-            'Warning: Failed on %s sample data for reason %s. If you see many '
-            'such failures, your data might be too sparse.' %
-            (self.name_tmpl.format(''), repr(e)))
+            'Warning: Failed on%s sample data for reason %s. If you see many '
+            'such failures, your data might be too sparse.'
+            % (self.name_tmpl.format(''), repr(e))
+        )
     return estimates
 
   def compute_children(self,
@@ -1581,10 +1605,17 @@ class MetricWithCI(Operation):
       if len(self.children) == 1 and isinstance(
           child, (PercentChange, AbsoluteChange)):
         has_base_vals = True
-        base, with_data = child.children[0].get_sql_and_with_clause(
+        base_metric = copy.deepcopy(child.children[0])
+        if child.where:
+          base_metric.add_where(child.where_raw)
+        base, with_data = base_metric.get_sql_and_with_clause(
             table,
-            sql.Columns(split_by).add(child.extra_index), global_filter,
-            indexes, local_filter, with_data)
+            sql.Columns(split_by).add(child.extra_index),
+            global_filter,
+            indexes,
+            local_filter,
+            with_data,
+        )
         base_alias, base_rename = with_data.merge(
             sql.Datasource(base, '_ShouldAlreadyExists'))
         columns.add(
@@ -2234,6 +2265,16 @@ def get_preaggregated_metric_tree(m):
 
 def get_preaggregated_metric(m):
   """Gets the equivalent metric of on the preaggregated data if m is a leaf."""
+  var = get_preaggregated_metric_var(m)
+  if isinstance(m, metrics.Max):
+    return metrics.Max(var, name=m.name)
+  if isinstance(m, metrics.Min):
+    return metrics.Min(var, name=m.name)
+  return metrics.Sum(var, name=m.name)
+
+
+def get_preaggregated_metric_var(m: metrics.Metric):
+  """Gets the new column name for leaf metric m in the preaggregated data."""
   if not isinstance(m, (metrics.Sum, metrics.Count, metrics.Max, metrics.Min)):
     raise ValueError(
         f'Expecting Sum/Count/Max/Min but got f{m.name} is f{type(m)}.'
@@ -2245,12 +2286,9 @@ def get_preaggregated_metric(m):
       metrics.Min: 'min(%s)',
   }
   name = tmpl_lookup[type(m)] % m.var
-  var = f'{name} where {m.where}' if m.where else name
-  if isinstance(m, metrics.Max):
-    return metrics.Max(var, name=m.name)
-  if isinstance(m, metrics.Min):
-    return metrics.Min(var, name=m.name)
-  return metrics.Sum(var, name=m.name)
+  name = f'{name} where {m.where}' if m.where else name
+  name = name.replace('$', 'macro_')
+  return name if name == sql.escape_alias(name) else f'`{name}`'
 
 
 def get_se(metric, table, split_by, global_filter, indexes, local_filter,
@@ -2264,8 +2302,6 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
 
   global_filter = sql.Filters([global_filter, local_filter]).add(metric.where)
   local_filter = sql.Filters()
-  metric, table, split_by, global_filter, indexes, with_data = preaggregate_if_possible(
-      metric, table, split_by, global_filter, indexes, with_data)
 
   if isinstance(metric, Jackknife):
     if metric.can_precompute():
@@ -2518,9 +2554,9 @@ def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
     return get_jackknife_data_fast_no_adjustment(metric, table, global_filter,
                                                  indexes, local_filter,
                                                  with_data)
-  return get_jackknife_data_fast_with_adjustment(metric, table, split_by,
-                                                 global_filter, indexes,
-                                                 local_filter, with_data)
+  return get_jackknife_data_fast_no_adjustment(
+      metric, table, global_filter, indexes, local_filter, with_data
+  )
 
 
 def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,

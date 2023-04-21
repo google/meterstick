@@ -247,6 +247,15 @@ class CumulativeDistributionTests(absltest.TestCase):
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
 
+  def test_cumulative_distribution_order_on_operation(self):
+    op = operations.AbsoluteChange('country', 'US', self.sum_x)
+    metric = operations.CumulativeDistribution('grp', op, ('B', 'A'), False)
+    output = metric.compute_on(self.df)
+    expected = operations.CumulativeDistribution(
+        'grp', op, ('A', 'B')
+    ).compute_on(self.df)
+    testing.assert_frame_equal(output, expected)
+
   def test_cumulative_distribution_ascending(self):
     metric = operations.CumulativeDistribution(
         'grp', self.sum_x, ascending=False)
@@ -254,6 +263,16 @@ class CumulativeDistributionTests(absltest.TestCase):
     expected = pd.DataFrame({'Cumulative Distribution of sum(X)': [0.25, 1.]},
                             index=['B', 'A'])
     expected.index.name = 'grp'
+    testing.assert_frame_equal(output, expected)
+
+  def test_cumulative_distribution_order_descending(self):
+    metric = operations.CumulativeDistribution(
+        'grp', self.sum_x, ('B', 'A'), False
+    )
+    output = metric.compute_on(self.df)
+    expected = operations.CumulativeDistribution(
+        'grp', self.sum_x, ('A', 'B')
+    ).compute_on(self.df)
     testing.assert_frame_equal(output, expected)
 
   def test_cumulative_distribution_order_splitby(self):

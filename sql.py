@@ -28,11 +28,15 @@ from typing import Iterable, Optional, Text, Union
 def is_compatible(sql0, sql1, exact_from=False):
   """Checks if two datasources are compatible so their columns can be merged.
 
-  Being compatible means datasources have same GROUP BY clauses and compatible
-  FROM clause. Compatible means a FROM clause, though may be not exactly same as
-  the other, doesn't change the results. For example, a table selecting from t1
-  could have the same result if it was selecting from t1 LEFT JOIN t2 as long as
-  all values added to t1 are NULLs and our computation ignores NULLs.
+  Being compatible means datasources
+  1. have same GROUP BY clauses
+  2. have compatible PARTITION BY. For simplicity as long as one SQL instance
+  has any PARTITION BY, we consider them incompatible.
+  3. have compatible FROM clause. Compatible means a FROM clause, though may be
+  not exactly same as the other, doesn't change the results. For example, a
+  table selecting from t1 could have the same result if it was selecting from
+  t1 LEFT JOIN t2 as long as all values added to t1 are NULLs and our
+  computation ignores NULLs.
 
   We have several kinds of JOINs in the codes.
   1. CROSS JOIN with a single value, which is just adding a constant column, so
@@ -67,9 +71,15 @@ def is_compatible(sql0, sql1, exact_from=False):
   """
   if not isinstance(sql0, Sql) or not isinstance(sql1, Sql):
     raise ValueError('Both inputs must be a Sql instance!')
-  if (sql0.where != sql1.where or sql0.groupby != sql1.groupby or
-      sql0.with_data != sql1.with_data or sql0.columns.distinct or
-      sql1.columns.distinct):
+  if (
+      sql0.where != sql1.where
+      or sql0.groupby != sql1.groupby
+      or sql0.with_data != sql1.with_data
+      or sql0.columns.distinct
+      or sql1.columns.distinct
+      or ' OVER ' in str(sql0)
+      or ' OVER ' in str(sql1)
+  ):
     return False, None
   if sql0.from_data == sql1.from_data:
     return True, sql1.from_data

@@ -262,18 +262,21 @@ def symmetrize_triangular(tril_elements):
 class Model(operations.Operation):
   """Base class for model fitting."""
 
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               model=None,
-               model_name=None,
-               where=None,
-               name=None,
-               fit_intercept=True,
-               normalize=False,
-               additional_fingerprint_attrs: Optional[List[str]] = None):
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      model=None,
+      model_name=None,
+      where=None,
+      name=None,
+      fit_intercept=True,
+      normalize=False,
+      additional_fingerprint_attrs: Optional[List[str]] = None,
+  ):
     """Initialize the model.
 
     Args:
@@ -296,29 +299,33 @@ class Model(operations.Operation):
       additional_fingerprint_attrs: Additioinal attributes to be encoded into
         the fingerprint. See get_fingerprint() for how it's used.
     """
-    if not isinstance(y, metrics.Metric):
+    if y and not isinstance(y, metrics.Metric):
       raise ValueError('y must be a Metric!')
-    if count_features(y) != 1:
+    if y and count_features(y) != 1:
       raise ValueError('y must be a 1D array but is %iD!' % count_features(y))
     self.group_by = [group_by] if isinstance(group_by, str) else group_by or []
     if isinstance(x, Sequence):
       x = metrics.MetricList(x)
-    self.x = x
-    self.y = y
+    child = None
+    if x and y:
+      self.x = x
+      self.y = y
+      child = metrics.MetricList((y, x))
     self.model = model
     self.k = count_features(x)
-    if not name:
+    self.model_name = model_name
+    if not name and x and y:
       x_names = [m.name for m in x] if isinstance(
           x, metrics.MetricList) else [x.name]
       name = '%s(%s ~ %s)' % (model_name, y.name, ' + '.join(x_names))
-    name_tmpl = name + ' Coefficient: {}'
+    name_tmpl = '%s Coefficient: {}' % name
     additional_fingerprint_attrs = (
         [additional_fingerprint_attrs]
         if isinstance(additional_fingerprint_attrs, str)
         else list(additional_fingerprint_attrs or [])
     )
     super(Model, self).__init__(
-        metrics.MetricList((y, x)),
+        child,
         name_tmpl,
         group_by,
         [],
@@ -375,19 +382,38 @@ class Model(operations.Operation):
   def compute_on_sql_magic_mode(self, table, split_by, execute):
     raise NotImplementedError
 
+  def __call__(self, child):
+    if not isinstance(child, metrics.MetricList):
+      raise ValueError(f'Model can only take a MetricList but got {child}!')
+    model = super(Model, self).__call__(child)
+    model.y = child[0]
+    model.x = metrics.MetricList(child[1:])
+    model.k = count_features(model.x)
+    x_names = [m.name for m in model.x]
+    model.name = '%s(%s ~ %s)' % (
+        model.model_name,
+        model.y.name,
+        ' + '.join(x_names),
+    )
+    model.name_tmpl = model.name + ' Coefficient: {}'
+    return model
+
 
 class LinearRegression(Model):
   """A class that can fit a linear regression."""
 
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               fit_intercept: bool = True,
-               normalize: bool = False,
-               where: Optional[str] = None,
-               name: Optional[str] = None):
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      fit_intercept: bool = True,
+      normalize: bool = False,
+      where: Optional[str] = None,
+      name: Optional[str] = None,
+  ):
     """Initialize a sklearn.LinearRegression model."""
     model = linear_model.LinearRegression(fit_intercept=fit_intercept)
     super(LinearRegression, self).__init__(y, x, group_by, model, 'OLS', where,
@@ -402,21 +428,24 @@ class LinearRegression(Model):
 class Ridge(Model):
   """A class that can fit a ridge regression."""
 
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               alpha=1,
-               fit_intercept: bool = True,
-               normalize: bool = False,
-               where: Optional[str] = None,
-               name: Optional[str] = None,
-               copy_X=True,
-               max_iter=None,
-               tol=0.001,
-               solver='auto',
-               random_state=None):
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      alpha=1,
+      fit_intercept: bool = True,
+      normalize: bool = False,
+      where: Optional[str] = None,
+      name: Optional[str] = None,
+      copy_X=True,
+      max_iter=None,
+      tol=0.001,
+      solver='auto',
+      random_state=None,
+  ):
     """Initialize a sklearn.Ridge model."""
     model = linear_model.Ridge(
         alpha=alpha,
@@ -502,24 +531,27 @@ def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
 class Lasso(Model):
   """A class that can fit a Lasso regression."""
 
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               alpha=1,
-               fit_intercept: bool = True,
-               normalize: bool = False,
-               where: Optional[str] = None,
-               name: Optional[str] = None,
-               precompute=False,
-               copy_X=True,
-               max_iter=1000,
-               tol=0.0001,
-               warm_start=False,
-               positive=False,
-               random_state=None,
-               selection='cyclic'):
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      alpha=1,
+      fit_intercept: bool = True,
+      normalize: bool = False,
+      where: Optional[str] = None,
+      name: Optional[str] = None,
+      precompute=False,
+      copy_X=True,
+      max_iter=1000,
+      tol=0.0001,
+      warm_start=False,
+      positive=False,
+      random_state=None,
+      selection='cyclic',
+  ):
     """Initialize a sklearn.Lasso model."""
     model = linear_model.Lasso(
         alpha=alpha,
@@ -558,25 +590,28 @@ class Lasso(Model):
 class ElasticNet(Model):
   """A class that can fit a ElasticNet regression."""
 
-  def __init__(self,
-               y: metrics.Metric,
-               x: Union[metrics.Metric, Sequence[metrics.Metric],
-                        metrics.MetricList],
-               group_by: Optional[Union[Text, List[Text]]] = None,
-               alpha=1,
-               l1_ratio=0.5,
-               fit_intercept: bool = True,
-               normalize: bool = False,
-               where: Optional[str] = None,
-               name: Optional[str] = None,
-               precompute=False,
-               copy_X=True,
-               max_iter=1000,
-               tol=0.0001,
-               warm_start=False,
-               positive=False,
-               random_state=None,
-               selection='cyclic'):
+  def __init__(
+      self,
+      y: Optional[metrics.Metric] = None,
+      x: Optional[
+          Union[metrics.Metric, Sequence[metrics.Metric], metrics.MetricList]
+      ] = None,
+      group_by: Optional[Union[Text, List[Text]]] = None,
+      alpha=1,
+      l1_ratio=0.5,
+      fit_intercept: bool = True,
+      normalize: bool = False,
+      where: Optional[str] = None,
+      name: Optional[str] = None,
+      precompute=False,
+      copy_X=True,
+      max_iter=1000,
+      tol=0.0001,
+      warm_start=False,
+      positive=False,
+      random_state=None,
+      selection='cyclic',
+  ):
     """Initialize a sklearn.ElasticNet model."""
     model = linear_model.ElasticNet(
         alpha=alpha,
@@ -1229,6 +1264,8 @@ def newtons_method(coef, grads, hess, tol, max_iter, conds):
 
 def count_features(m: metrics.Metric):
   """Gets the width of the result of m.compute_on()."""
+  if not m:
+    return 0
   if isinstance(m, Model):
     return m.k
   if isinstance(m, metrics.MetricList):

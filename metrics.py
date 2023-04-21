@@ -761,6 +761,13 @@ class Metric(object):
     """
     return ()
 
+  def __str__(self):
+    where = f' where {self.where}' if self.where else ''
+    return self.name + where
+
+  def __repr__(self):
+    return self.__str__()
+
   def __deepcopy__(self, memo):
     # We don't copy self.cache, for two reasons.
     # 1. The copied Metric can share the same cache to maximize caching.
@@ -984,6 +991,8 @@ class MetricList(Metric):
   def compute_on_children(self, children, split_by):
     if isinstance(children, list):
       children = self.to_dataframe(children)
+    if self.name_tmpl:
+      children.columns = [self.name_tmpl.format(c) for c in children.columns]
     if self.columns:
       if len(children.columns) != len(self.columns):
         raise ValueError(
@@ -1280,9 +1289,8 @@ class CompositeMetric(Metric):
             columns.add(col)
         query = sql.Sql(sql.Columns(indexes.aliases).add(columns), from_data)
 
-    if not is_operation(self.children[0]) and not is_operation(
-        self.children[1]) and len(query.columns) == 1:
-      query.columns[0].set_alias(self.name)
+    if len(query.columns.difference(indexes)) == 1:
+      query.columns[-1].set_alias(self.name)
 
     if self.columns:
       columns = query.columns.difference(indexes)
