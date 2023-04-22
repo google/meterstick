@@ -268,10 +268,7 @@ class CumulativeDistribution(Operation):
     if self.order:
       order = [o for o in self.order if o in df.index.get_level_values(0)]
       order = order if self.ascending else reversed(order)
-      if len(df.index.names) == 1:
-        df = df.reindex(order)
-      else:
-        df = df.reindex(order, level=0)
+      df = df.loc[order]
     else:
       df.sort_values(self.extra_index, ascending=self.ascending, inplace=True)
     dist = df.cumsum()
