@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import datetime
 import itertools
 from typing import Any, Iterable, List, Optional, Sequence, Text, Union
 
@@ -40,6 +41,7 @@ def compute_on(df,
   # pylint: enable=g-long-lambda
 
 
+# pylint: disable=g-long-lambda
 def compute_on_sql(
     table,
     split_by=None,
@@ -48,9 +50,9 @@ def compute_on_sql(
     mode=None,
     cache_key=None,
     cache=None,
+    return_dataframe=True,
     **kwargs):
   """A wrapper that metric | compute_on_sql() === metric.compute_on_sql()."""
-  # pylint: disable=g-long-lambda
   return lambda m: m.compute_on_sql(
       table,
       split_by,
@@ -59,8 +61,27 @@ def compute_on_sql(
       mode,
       cache_key,
       cache=cache,
+      return_dataframe=return_dataframe,
       **kwargs)
-  # pylint: enable=g-long-lambda
+
+
+def compute_on_beam(
+    table,
+    split_by=None,
+    execute=None,
+    melted=False,
+    mode=None,
+    cache_key=None,
+    cache=None,
+    **kwargs,
+):
+  """A wrapper for metric.compute_on_beam()."""
+  return lambda m: m.compute_on_beam(
+      table, split_by, execute, melted, mode, cache_key, cache=cache, **kwargs
+  )
+
+
+# pylint: enable=g-long-lambda
 
 
 def to_sql(table, split_by=None):
@@ -71,6 +92,45 @@ def is_operation(m):
   """We can't use isinstance because of loop dependency."""
   return isinstance(m, Metric) and m.children and not isinstance(
       m, (MetricList, CompositeMetric))
+
+
+# Classes we built so caching can be enabled with confidence.
+BUILT_INS = (
+    # Metrics
+    'MetricList',
+    'CompositeMetric',
+    'Ratio',
+    'Count',
+    'Sum',
+    'Dot',
+    'Mean',
+    'Max',
+    'Min',
+    'Quantile',
+    'Variance',
+    'StandardDeviation',
+    'CV',
+    'Correlation',
+    'Cov',
+    # Operations
+    'Operation',
+    'Distribution',
+    'CumulativeDistribution',
+    'PercentChange',
+    'AbsoluteChange',
+    'PrePostChange',
+    'CUPED',
+    'MH',
+    'Jackknife',
+    'Bootstrap',
+    'PoissonBootstrap',
+    # Models
+    'LinearRegression',
+    'Ridge',
+    'Lasso',
+    'ElasticNet',
+    'LogisticRegression',
+)
 
 
 class Metric(object):
@@ -140,6 +200,12 @@ class Metric(object):
     extra_index: Used by Operation. See the doc there.
     name_tmpl: Used by Metrics that have children. It's applied to children's
       names in the output.
+    enable_caching: If this Metric instance will be cached in computation. All
+      the classes listed in BUILT_INS have it enabled but by default caching is
+      turned off for custom Metrics because it's tricky to get it right. Make
+      sure you read the 'Custom Metric' and 'Caching' sections in the demo
+      notebook and understand the `additional_fingerprint_attrs` attribute
+      before you turn this on.
     cache: A dict to store the result. It's shared across the Metric tree.
     cache_key: The key currently being used in computation.
   """
@@ -169,6 +235,7 @@ class Metric(object):
                                                      str) else extra_index
     self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
     self.name_tmpl = name_tmpl
+    self.enable_caching = False
     self.cache_key = None
 
   @property
@@ -197,12 +264,226 @@ class Metric(object):
       self.where = tuple(set(list(self.where_raw) + where))
     return self
 
-  def compute_with_split_by(self,
-                            df,
-                            split_by: Optional[List[Text]] = None,
-                            slice_value=None):
-    del split_by, slice_value  # In case users need them in derived classes.
-    return self.compute(df)
+  def _compute_with_caching_and_postprocessing(
+      self,
+      compute_fn,
+      df,
+      split_by,
+      melted,
+      return_dataframe,
+      apply_name_tmpl,
+      cache_key,
+      cache,
+      *args,
+      **kwargs,
+  ):
+    """Wraps computation logic with caching and common postprocessing.
+
+    This function does:
+    1. Initializes a cache if it doesn't eixst.
+    2. Reads from cache if possible.
+    3. Otherwise calls compute_fn(df, split_by, *args, **kwargs).
+    4. Postprocesses the result like melting and converting to pandas DataFrame.
+    5. Cleans up cache if needed.
+
+    Args:
+      compute_fn: A function that compute_fn(df, split_by, *args, **kwargs)
+        returns a number, pd.Series or a melted DataFrame. See compute_through
+        and compute_through_sql for examples.
+      df: The DataFrame to compute on.
+      split_by: The columns that we use to split the data.
+      melted: Whether to transform the result to long format.
+      return_dataframe: Whether to convert the result to DataFrame if it's not.
+        If False, it could still return a DataFrame.
+      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
+        Distribution('country', Sum('X')).compute_on(df), we first compute
+        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
+        the name_tmpl 'Distribution of {}' to all column names.
+      cache_key: What key to use to cache the df. You can use anything that can
+        be a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
+      *args: Args passed to compute_fn.
+      **kwargs: Args passed to compute_fn.
+
+    Returns:
+      Final result returned to user. If split_by, it's a pd.Series or a
+      pd.DataFrame, otherwise it could be a base type.
+    """
+    self.cache = {} if cache is None else cache
+    split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
+    try:
+      key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
+      if self.in_cache(key):
+        raw_res = self.get_cached(key)
+      else:
+        self.cache_key = key
+        raw_res = compute_fn(df, split_by, *args, **kwargs)
+        self.save_to_cache(key, raw_res)
+
+      res = self.manipulate(raw_res, melted, return_dataframe, apply_name_tmpl)
+      return self.final_compute(res, melted, return_dataframe, split_by, df)
+    finally:
+      if cache_key is None:  # Only root metric can have None as cache_key
+        self.clean_up_cache()
+
+  def wrap_cache_key(self, key, split_by=None, where=None, slice_val=None):
+    if key and not isinstance(key, utils.CacheKey) and self.cache_key:
+      key = self.cache_key.replace_key(key)
+    key = key or self.cache_key
+    return utils.CacheKey(
+        self, key, where or self.where_raw, split_by, slice_val
+    )
+
+  def save_to_cache(self, key, val, split_by=None):
+    if not isinstance(key, utils.CacheKey):
+      key = self.wrap_cache_key(key, split_by)
+    val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
+    self.cache[key] = val
+
+  def get_cached(self, key):
+    if not self.in_cache(key):
+      raise ValueError(f'Key {key} Not found in cache!')
+    key = key if isinstance(key, utils.CacheKey) else self.wrap_cache_key(key)
+    return self.cache[key]
+
+  def in_cache(self, key):
+    key = key if isinstance(key, utils.CacheKey) else self.wrap_cache_key(key)
+    return key.metric.can_use_cache() and key in self.cache
+
+  def can_use_cache(self):
+    # Caching is tricky and only turned on for built-ins and custom Metrics
+    # with enable_caching.
+    return type(self).__name__ in BUILT_INS or self.enable_caching
+
+  def find_all_in_cache_by_metric_type(self, metric):
+    """Retrieves results from a certain type of metric from cache."""
+    return {k: v for k, v in self.cache.items() if k.metric.__class__ == metric}
+
+  def manipulate(
+      self,
+      res,
+      melted: bool = False,
+      return_dataframe: bool = True,
+      apply_name_tmpl=None,
+  ):
+    """Common adhoc data manipulation.
+
+    It does
+    1. Converts res to a DataFrame if asked.
+    2. Melts res to long format if asked.
+    3. Removes redundant index levels in res.
+    4. Apply self.name_tmpl to the output name or columns if asked.
+
+    Args:
+      res: Returned by compute_through(). Usually a DataFrame, but could be a
+        pd.Series or a base type.
+      melted: Whether to transform the result to long format.
+      return_dataframe: Whether to convert the result to DataFrame if it's not.
+        If False, it could still return a DataFrame if the input is already a
+        DataFrame.
+      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
+        Distribution('country', Sum('X')).compute_on(df), we first compute
+        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
+        the name_tmpl 'Distribution of {}' to all column names.
+
+    Returns:
+      Final result returned to user. If split_by, it's a pd.Series or a
+      pd.DataFrame, otherwise it could be a base type.
+    """
+    if isinstance(res, pd.Series):
+      res.name = self.name
+    if not isinstance(res, pd.DataFrame) and return_dataframe:
+      res = self.to_dataframe(res)
+    if melted:
+      res = utils.melt(res)
+    if apply_name_tmpl:
+      res = utils.apply_name_tmpl(self.name_tmpl, res, melted)
+    return utils.remove_empty_level(res)
+
+  def to_dataframe(self, res):
+    if isinstance(res, pd.DataFrame):
+      return res
+    elif isinstance(res, pd.Series):
+      return pd.DataFrame(res)
+    return pd.DataFrame({self.name: [res]})
+
+  def final_compute(self, res, melted, return_dataframe, split_by, df):
+    del melted, return_dataframe, split_by, df  # Useful in derived classes.
+    return res
+
+  def clean_up_cache(self):
+    """Flushes the cache when a Metric tree has been computed.
+
+    A Metric and all the descendants form a tree. When a computation is started
+    from a MetricList or CompositeMetric, we know the input DataFrame is not
+    going to change in the computation. So even if user doesn't ask for caching,
+    we still enable it, but we need to clean things up when done. As the results
+    need to be cached until all Metrics in the tree have been computed, we
+    should only clean up at the end of the computation of the entry/top Metric.
+    We recognize the top Metric by looking at the cache_key. All descendants
+    will have it assigned as RESERVED_KEY but the entry Metric's will be None.
+    """
+    self.cache.clear()
+    for m in self.traverse():
+      m.cache_key = None
+
+  def compute_on(
+      self,
+      df: pd.DataFrame,
+      split_by: Optional[Union[Text, List[Text]]] = None,
+      melted: bool = False,
+      return_dataframe: bool = True,
+      cache_key: Any = None,
+      cache=None,
+  ):
+    """Key API of Metric.
+
+    This is what you should call to use Metric. As caching is the shared part of
+    Metric, we suggest you NOT to overwrite this method. Overwriting
+    compute_slices and/or final_compute should be enough. If not, contact us
+    with your use cases.
+
+    Args:
+      df: The DataFrame to compute on.
+      split_by: The columns that we use to split the data.
+      melted: Whether to transform the result to long format.
+      return_dataframe: Whether to convert the result to DataFrame if it's not.
+        If False, it could still return a DataFrame.
+      cache_key: What key to use to cache the df. You can use anything that can
+        be a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
+
+    Returns:
+      Final result returned to user. If split_by, it's a pd.Series or a
+      pd.DataFrame, otherwise it could be a base type.
+    """
+    return self._compute_with_caching_and_postprocessing(
+        self.compute_through,
+        df,
+        split_by,
+        melted,
+        return_dataframe,
+        None,
+        cache_key,
+        cache,
+    )
+
+  def compute_through(self, df, split_by: Optional[List[Text]] = None):
+    """Precomputes df -> split df and apply compute() -> postcompute."""
+    df = df.query(self.where) if df is not None and self.where else df
+    res = self.precompute(df, split_by)
+    res = self.compute_slices(res, split_by)
+    return self.postcompute(res, split_by)
+
+  def precompute(self, df, split_by):
+    del split_by  # Useful in derived classes.
+    return df
+
+  def postcompute(self, df, split_by):
+    del split_by  # Useful in derived classes.
+    return df
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     """Applies compute() to all slices. Each slice needs a unique cache_key."""
@@ -259,9 +540,6 @@ class Metric(object):
   def compute_children(self, df, split_by):
     raise NotImplementedError
 
-  def compute(self, df):
-    raise NotImplementedError
-
   def compute_on_children(self, children, split_by):
     """Computes the return using the result returned by children Metrics.
 
@@ -292,279 +570,14 @@ class Metric(object):
         # Use iloc rather than loc because indexes can have duplicates.
         yield df.iloc[idx], k
 
-  def compute_through(self, df, split_by: Optional[List[Text]] = None):
-    """Precomputes df -> split df and apply compute() -> postcompute."""
-    df = df.query(self.where) if df is not None and self.where else df
-    res = self.precompute(df, split_by)
-    res = self.compute_slices(res, split_by)
-    return self.postcompute(res, split_by)
+  def compute_with_split_by(
+      self, df, split_by: Optional[List[Text]] = None, slice_value=None
+  ):
+    del split_by, slice_value  # In case users need them in derived classes.
+    return self.compute(df)
 
-  def compute_on(self,
-                 df: pd.DataFrame,
-                 split_by: Optional[Union[Text, List[Text]]] = None,
-                 melted: bool = False,
-                 return_dataframe: bool = True,
-                 cache_key: Any = None,
-                 cache=None):
-    """Key API of Metric.
-
-    Wraps computing logic with caching. This is what you should call to use
-    Metric. It's compute_through + final_compute + caching. As caching is the
-    shared part of Metric, we suggest you NOT to overwrite this method.
-    Overwriting compute_slices and/or final_compute should be enough. If not,
-    contact us with your use cases.
-
-    Args:
-      df: The DataFrame to compute on.
-      split_by: The columns that we use to split the data.
-      melted: Whether to transform the result to long format.
-      return_dataframe: Whether to convert the result to DataFrame if it's not.
-        If False, it could still return a DataFrame.
-      cache_key: What key to use to cache the df. You can use anything that can
-        be a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ..).
-      cache: The cache the whole Metric tree shares during one round of
-        computation. If it's None, we initiate an empty dict.
-
-    Returns:
-      Final result returned to user. If split_by, it's a pd.Series or a
-      pd.DataFrame, otherwise it could be a base type.
-    """
-    self.cache = {} if cache is None else cache
-    split_by = [split_by] if isinstance(split_by, str) else split_by or []
-    try:
-      key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
-      if self.in_cache(key):
-        raw_res = self.get_cached(key)
-      else:
-        self.cache_key = key
-        raw_res = self.compute_through(df, split_by)
-        self.save_to_cache(key, raw_res)
-
-      res = self.manipulate(raw_res, melted, return_dataframe)
-      return self.final_compute(res, melted, return_dataframe, split_by, df)
-    finally:
-      if cache_key is None:  # Only root metric can have None as cache_key
-        self.clean_up_cache()
-
-  def precompute(self, df, split_by):
-    del split_by  # Useful in derived classes.
-    return df
-
-  def postcompute(self, df, split_by):
-    del split_by  # Useful in derived classes.
-    return df
-
-  def final_compute(self, res, melted, return_dataframe, split_by, df):
-    del melted, return_dataframe, split_by, df  # Useful in derived classes.
-    return res
-
-  def manipulate(self,
-                 res: pd.Series,
-                 melted: bool = False,
-                 return_dataframe: bool = True,
-                 apply_name_tmpl=None):
-    """Common adhoc data manipulation.
-
-    It does
-    1. Converts res to a DataFrame if asked.
-    2. Melts res to long format if asked.
-    3. Removes redundant index levels in res.
-    4. Apply self.name_tmpl to the output name or columns if asked.
-
-    Args:
-      res: Returned by compute_through(). Usually a DataFrame, but could be a
-        pd.Series or a base type.
-      melted: Whether to transform the result to long format.
-      return_dataframe: Whether to convert the result to DataFrame if it's not.
-        If False, it could still return a DataFrame if the input is already a
-        DataFrame.
-      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
-        Distribution('country', Sum('X')).compute_on(df), we first compute
-        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
-        the name_tmpl 'Distribution of {}' to all column names.
-
-    Returns:
-      Final result returned to user. If split_by, it's a pd.Series or a
-      pd.DataFrame, otherwise it could be a base type.
-    """
-    if isinstance(res, pd.Series):
-      res.name = self.name
-    if not isinstance(res, pd.DataFrame) and return_dataframe:
-      res = self.to_dataframe(res)
-    if melted:
-      res = utils.melt(res)
-    if apply_name_tmpl is None and is_operation(self):
-      apply_name_tmpl = True
-    if apply_name_tmpl:
-      res = utils.apply_name_tmpl(self.name_tmpl, res, melted)
-    return utils.remove_empty_level(res)
-
-  def compute_util_metric_on(self,
-                             metric,
-                             df,
-                             split_by,
-                             melted=False,
-                             return_dataframe=True,
-                             cache_key=None):
-    """Computes a util metric with caching and filtering handled correctly."""
-    cache_key = self.wrap_cache_key(cache_key, split_by)
-    return metric.compute_on(
-        df,
-        split_by,
-        melted,
-        return_dataframe,
-        cache_key,
-        self.cache,
-    )
-
-  def compute_util_metric_on_sql(self,
-                                 metric,
-                                 table,
-                                 split_by=None,
-                                 execute=None,
-                                 melted=False,
-                                 mode=None,
-                                 cache_key=None):
-    """Computes a util metric with caching and filtering handled correctly."""
-    cache_key = self.wrap_cache_key(cache_key, split_by)
-    return metric.compute_on_sql(
-        table, split_by, execute, melted, mode, cache_key, self.cache
-    )
-
-  @staticmethod
-  def group(df, split_by=None):
-    return df.groupby(split_by, observed=True) if split_by else df
-
-  def to_dataframe(self, res):
-    if isinstance(res, pd.DataFrame):
-      return res
-    elif isinstance(res, pd.Series):
-      return pd.DataFrame(res)
-    return pd.DataFrame({self.name: [res]})
-
-  def wrap_cache_key(self, key, split_by=None, where=None, slice_val=None):
-    if key and not isinstance(key, utils.CacheKey) and self.cache_key:
-      key = self.cache_key.replace_key(key)
-    key = key or self.cache_key
-    return utils.CacheKey(self, key, where or self.where_raw, split_by,
-                          slice_val)
-
-  def save_to_cache(self, key, val, split_by=None):
-    if not isinstance(key, utils.CacheKey):
-      key = self.wrap_cache_key(key, split_by)
-    val = val.copy() if isinstance(val, (pd.Series, pd.DataFrame)) else val
-    self.cache[key] = val
-
-  def in_cache(self, key):
-    key = key if isinstance(key, utils.CacheKey) else self.wrap_cache_key(key)
-    return key in self.cache
-
-  def get_cached(self, key):
-    key = key if isinstance(key, utils.CacheKey) else self.wrap_cache_key(key)
-    return self.cache[key]
-
-  def find_all_in_cache_by_metric_type(self, metric):
-    """Retrieves results from a certain type of metric from cache."""
-    return {k: v for k, v in self.cache.items() if k.metric.__class__ == metric}
-
-  def get_fingerprint(self):
-    """Returns attributes that uniquely identify the Metric.
-
-    Metrics with the same fingerprint will compute to the same numbers on the
-    same data. Note that name is not part of the fingerprint.
-
-    Returns:
-      A sorted tuple of (attribute, value) pairs that uniquely identify the
-      Metric.
-    """
-    fingerprint = {'class': self.__class__}
-    if self.where:
-      fingerprint['where'] = sorted(self.where_raw)
-    if self.children:
-      fingerprint['children'] = (
-          c.get_fingerprint() if isinstance(c, Metric) else c
-          for c in self.children)
-    if self.extra_split_by:
-      fingerprint['extra_split_by'] = self.extra_split_by
-    if self.extra_index != self.extra_split_by:
-      fingerprint['extra_index'] = self.extra_index
-    for k in self.additional_fingerprint_attrs:
-      val = getattr(self, k, None)
-      if isinstance(val, dict):
-        for kw, arg in val.items():
-          fingerprint['%s:%s' % (k, kw)] = arg
-      elif isinstance(val, Metric):
-        fingerprint[k] = val.get_fingerprint()
-      elif val is not None:
-        fingerprint[k] = val
-    for k, v in fingerprint.items():
-      if not isinstance(v, str) and isinstance(v, Iterable):
-        fingerprint[k] = tuple(list(v))
-    return tuple(sorted(fingerprint.items()))
-
-  def clean_up_cache(self):
-    """Flushes the cache when a Metric tree has been computed.
-
-    A Metric and all the descendants form a tree. When a computation is started
-    from a MetricList or CompositeMetric, we know the input DataFrame is not
-    going to change in the computation. So even if user doesn't ask for caching,
-    we still enable it, but we need to clean things up when done. As the results
-    need to be cached until all Metrics in the tree have been computed, we
-    should only clean up at the end of the computation of the entry/top Metric.
-    We recognize the top Metric by looking at the cache_key. All descendants
-    will have it assigned as RESERVED_KEY but the entry Metric's will be None.
-    """
-    self.cache.clear()
-    for m in self.traverse():
-      m.cache_key = None
-
-  def to_dot(self, strict=True):
-    """Represents the Metric in DOT language.
-
-    Args:
-      strict: If to make the DOT language graph strict. The strict mode will
-        dedupe duplicated edges.
-
-    Returns:
-      A string representing the Metric tree in DOT language.
-    """
-    import pydot  # pylint: disable=g-import-not-at-top
-    dot = pydot.Dot(self.name, graph_type='graph', strict=strict)
-    for m in self.traverse(include_constants=True):
-      label = str(getattr(m, 'name', m))
-      if getattr(m, 'where', ''):
-        label += ' where %s' % m.where
-      dot.add_node(pydot.Node(id(m), label=label))
-
-    def add_edges(metric):
-      if isinstance(metric, Metric):
-        for c in metric.children:
-          dot.add_edge(pydot.Edge(id(metric), id(c)))
-          add_edges(c)
-
-    add_edges(self)
-    return dot.to_string()
-
-  def visualize_metric_tree(self, rendering_fn, strict=True):
-    """Renders the Metric tree.
-
-    Args:
-      rendering_fn: A function that takes a string of DOT representation of the
-        Metric and renders it as side effect.
-      strict: If to make the DOT language graph strict. The strict mode will
-        dedupe duplicated edges.
-    """
-    rendering_fn(self.to_dot(strict))
-
-  def traverse(self, include_self=True, include_constants=False):
-    ms = [self] if include_self else list(self.children)
-    while ms:
-      m = ms.pop(0)
-      if isinstance(m, Metric):
-        ms += list(m.children)
-        yield m
-      elif include_constants:
-        yield m
+  def compute(self, df):
+    raise NotImplementedError
 
   def compute_on_sql(
       self,
@@ -575,6 +588,7 @@ class Metric(object):
       mode=None,
       cache_key=None,
       cache=None,
+      return_dataframe=True,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
 
@@ -600,65 +614,63 @@ class Metric(object):
         ..).
       cache: The cache the whole Metric tree shares during one round of
         computation. If it's None, we initiate an empty dict.
+      return_dataframe: If False, result of simple Metric will be a number or
+        pd.Series (when has split_by).
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
-    self.cache = {} if cache is None else cache
-    split_by = [split_by] if isinstance(split_by, str) else split_by or []
-    try:
-      key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
-      if self.in_cache(key):
-        res = self.get_cached(key)
-      else:
-        self.cache_key = key
-        raw_res = self.compute_through_sql(table, split_by, execute, mode)
-        res = raw_res
-        # For simple metrics we save a pd.Series to be consistent with
-        # compute_on().
-        if isinstance(
-            raw_res,
-            pd.DataFrame) and raw_res.shape[1] == 1 and not is_operation(self):
-          raw_res = raw_res.iloc[:, 0]
-        self.save_to_cache(key, raw_res)
-      res = self.manipulate(res, melted, apply_name_tmpl=False)
-      return self.final_compute(res, melted, True, split_by, table)
-    finally:
-      if cache_key is None:  # Only root metric can have None as cache_key
-        self.clean_up_cache()
+    return self._compute_with_caching_and_postprocessing(
+        self.compute_through_sql,
+        table,
+        split_by,
+        melted,
+        return_dataframe,
+        False,
+        cache_key,
+        cache,
+        execute,
+        mode,
+    )
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
     if mode not in (None, 'mixed', 'magic'):
       raise ValueError('Mode %s is not supported!' % mode)
     if not self.children:
-      return self.compute_on_sql_sql_mode(table, split_by, execute)
+      res = self.compute_on_sql_sql_mode(table, split_by, execute)
+      return self.to_series_or_number(res)
     if not mode:
       try:
-        return self.compute_on_sql_sql_mode(table, split_by, execute)
-      except Exception:  # pylint: disable=broad-except
+        res = self.compute_on_sql_sql_mode(table, split_by, execute)
+        return self.to_series_or_number(res)
+      except NotImplementedError:
         pass
     if self.where:
-      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
-    return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+      table = sql.Sql(None, table, self.where)
+    res = self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+    return self.to_series_or_number(res)
+
+  def to_series_or_number(self, df):
+    if is_operation(self) or not isinstance(df, pd.DataFrame):
+      return df
+    if df.shape[1] == 1:
+      df = df.iloc[:, 0]
+      if len(df) == 1 and not df.index.name:
+        df = df.values[0]
+    return df
 
   def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
     """Executes the query from to_sql() and process the result."""
     query = self.to_sql(table, split_by)
     res = execute(str(query))
-    extra_idx = list(utils.get_extra_idx(self))
+    extra_idx = list(utils.get_extra_idx(self, return_superset=True))
     indexes = split_by + extra_idx if split_by else extra_idx
     columns = [a.alias_raw for a in query.groupby.add(query.columns)]
     columns[:len(indexes)] = indexes
     res.columns = columns
-    # We replace '$' with 'macro_' in the generated SQL. To recover the names,
-    # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
-    # original names. We can get the index names so we can recover them but
-    # unfortunately it's not as easy to recover metric/column names, so for the
-    # metrics we just replace 'macro_' with '$'.
     if indexes:
       res.set_index(indexes, inplace=True)
-    res.columns = [c.replace('macro_', '$') for c in res.columns]
     if split_by:  # Use a stable sort.
       res.sort_values(split_by, kind='mergesort', inplace=True)
     return res
@@ -666,7 +678,9 @@ class Metric(object):
   def to_sql(self, table, split_by: Optional[Union[Text, List[Text]]] = None):
     """Generates SQL query for the metric."""
     global_filter = utils.get_global_filter(self)
-    indexes = sql.Columns(split_by).add(utils.get_extra_idx(self))
+    indexes = sql.Columns(split_by).add(
+        utils.get_extra_idx(self, return_superset=True)
+    )
     with_data = sql.Datasources()
     if isinstance(table, sql.Sql) and table.with_data:
       table = copy.deepcopy(table)
@@ -731,9 +745,72 @@ class Metric(object):
         children.append(c)
       else:
         children.append(
-            c.compute_on_sql(table, split_by + self.extra_split_by, execute,
-                             False, mode, self.cache_key, self.cache))
+            self.compute_util_metric_on_sql(
+                c, table, split_by + self.extra_split_by, execute, False, mode
+            )
+        )
     return children[0] if len(self.children) == 1 else children
+
+  def compute_on_beam(
+      self,
+      pcol,
+      split_by=None,
+      execute=None,
+      melted=False,
+      mode=None,
+      cache_key=None,
+      cache=None,
+      **kwargs,
+  ):
+    """Computes on an Apache Beam PCollection input.
+
+    Args:
+      pcol: An apache_beam.pvalue.PCollection instance we want to compute on. It
+        needs to have a schema so it's queryable.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes PCollection with a SqlTransform and
+        returns a DataFrame.
+      melted: Whether to transform the result to long format.
+      mode: Similar to the one in compute_on_sql(). `None` maximizes Beam usage
+        while 'mixed' minimizes the usage.
+      cache_key: What key to use to cache the result. You can use anything that
+        can be a key of a dict except '_RESERVED' and tuples like ('_RESERVED',
+        ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
+      **kwargs: Other kwargs passed to compute_on_sql.
+
+    Returns:
+      A pandas DataFrame.
+    """
+    # pylint: disable=g-import-not-at-top
+    from apache_beam import pvalue
+    from apache_beam.transforms import sql as beam_sql
+
+    if not isinstance(pcol, pvalue.PCollection):
+      raise ValueError(
+          'The input must be a PCollection but got %s!' % type(pcol)
+      )
+
+    def e(q):
+      label = f'Meterstick at {datetime.datetime.now()} runs {q}'
+      res = execute(pcol | label >> beam_sql.SqlTransform(str(q)))
+      return res
+
+    # pylint: disable=g-import-not-at-top
+
+    try:
+      return self.compute_on_sql(
+          'PCOLLECTION', split_by, e, melted, mode, cache_key, cache, **kwargs
+      )
+    except Exception as e:  # pylint: disable=broad-except
+      if not mode:
+        raise ValueError(
+            "Please see the root cause of the failure above. If it's caused by "
+            'the SQL query not being supported, try '
+            "compute_on_beam(..., mode='mixed')."
+        ) from e
+      raise
 
   def compute_equivalent(self, df, split_by=None):
     equiv, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)
@@ -741,9 +818,48 @@ class Metric(object):
         equiv, df, split_by, return_dataframe=False
     )
 
+  def compute_util_metric_on(
+      self,
+      metric,
+      df,
+      split_by,
+      melted=False,
+      return_dataframe=True,
+      cache_key=None,
+  ):
+    """Computes a util metric with caching and filtering handled correctly."""
+    cache_key = self.wrap_cache_key(cache_key, split_by)
+    return metric.compute_on(
+        df, split_by, melted, return_dataframe, cache_key, self.cache
+    )
+
+  def compute_util_metric_on_sql(
+      self,
+      metric,
+      table,
+      split_by=None,
+      execute=None,
+      melted=False,
+      mode=None,
+      cache_key=None,
+      return_dataframe=True,
+  ):
+    """Computes a util metric with caching and filtering handled correctly."""
+    cache_key = self.wrap_cache_key(cache_key, split_by)
+    return metric.compute_on_sql(
+        table,
+        split_by,
+        execute,
+        melted,
+        mode,
+        cache_key,
+        self.cache,
+        return_dataframe,
+    )
+
   def get_equivalent(self, *auxiliary_cols):
     """Gets a Metric that is equivalent to self."""
-    res = self.get_equivalent_without_filter(*auxiliary_cols)
+    res = self.get_equivalent_without_filter(*auxiliary_cols)  # pylint: disable=assignment-from-none
     if res:
       res.name = self.name
       res.where = self.where_raw
@@ -761,27 +877,58 @@ class Metric(object):
     """
     return ()
 
-  def __str__(self):
-    where = f' where {self.where}' if self.where else ''
-    return self.name + where
+  @staticmethod
+  def group(df, split_by=None):
+    return df.groupby(split_by, observed=True) if split_by else df
 
-  def __repr__(self):
-    return self.__str__()
+  def visualize_metric_tree(self, rendering_fn, strict=True):
+    """Renders the Metric tree.
 
-  def __deepcopy__(self, memo):
-    # We don't copy self.cache, for two reasons.
-    # 1. The copied Metric can share the same cache to maximize caching.
-    # 2. When deepcopy a Metric, its cache refers to CacheKey and CacheKey
-    # refers back. The loop leads to missing attributes error.
-    cls = self.__class__
-    obj = cls.__new__(cls)
-    memo[id(self)] = obj
-    for k, v in self.__dict__.items():
-      if k == 'cache':
-        obj.cache = v
-      else:
-        setattr(obj, k, copy.deepcopy(v, memo))
-    return obj
+    Args:
+      rendering_fn: A function that takes a string of DOT representation of the
+        Metric and renders it as side effect.
+      strict: If to make the DOT language graph strict. The strict mode will
+        dedupe duplicated edges.
+    """
+    rendering_fn(self.to_dot(strict))
+
+  def to_dot(self, strict=True):
+    """Represents the Metric in DOT language.
+
+    Args:
+      strict: If to make the DOT language graph strict. The strict mode will
+        dedupe duplicated edges.
+
+    Returns:
+      A string representing the Metric tree in DOT language.
+    """
+    import pydot  # pylint: disable=g-import-not-at-top
+
+    dot = pydot.Dot(self.name, graph_type='graph', strict=strict)
+    for m in self.traverse(include_constants=True):
+      label = str(getattr(m, 'name', m))
+      if getattr(m, 'where', ''):
+        label += ' where %s' % m.where
+      dot.add_node(pydot.Node(id(m), label=label))
+
+    def add_edges(metric):
+      if isinstance(metric, Metric):
+        for c in metric.children:
+          dot.add_edge(pydot.Edge(id(metric), id(c)))
+          add_edges(c)
+
+    add_edges(self)
+    return dot.to_string()
+
+  def traverse(self, include_self=True, include_constants=False):
+    ms = [self] if include_self else list(self.children)
+    while ms:
+      m = ms.pop(0)
+      if isinstance(m, Metric):
+        ms += list(m.children)
+        yield m
+      elif include_constants:
+        yield m
 
   def __or__(self, fn):
     """Overwrites the '|' operator to enable pipeline chaining."""
@@ -846,6 +993,64 @@ class Metric(object):
 
   def __hash__(self):
     return hash((self.name, self.get_fingerprint()))
+
+  def get_fingerprint(self):
+    """Returns attributes that uniquely identify the Metric.
+
+    Metrics with the same fingerprint will compute to the same numbers on the
+    same data. Note that name is not part of the fingerprint.
+
+    Returns:
+      A sorted tuple of (attribute, value) pairs that uniquely identify the
+      Metric.
+    """
+    fingerprint = {'class': self.__class__}
+    if self.where:
+      fingerprint['where'] = sorted(self.where_raw)
+    if self.children:
+      fingerprint['children'] = (
+          c.get_fingerprint() if isinstance(c, Metric) else c
+          for c in self.children
+      )
+    if self.extra_split_by:
+      fingerprint['extra_split_by'] = self.extra_split_by
+    if self.extra_index != self.extra_split_by:
+      fingerprint['extra_index'] = self.extra_index
+    for k in self.additional_fingerprint_attrs:
+      val = getattr(self, k, None)
+      if isinstance(val, dict):
+        for kw, arg in val.items():
+          fingerprint['%s:%s' % (k, kw)] = arg
+      elif isinstance(val, Metric):
+        fingerprint[k] = val.get_fingerprint()
+      elif val is not None:
+        fingerprint[k] = val
+    for k, v in fingerprint.items():
+      if not isinstance(v, str) and isinstance(v, Iterable):
+        fingerprint[k] = tuple(list(v))
+    return tuple(sorted(fingerprint.items()))
+
+  def __str__(self):
+    where = f' where {self.where}' if self.where else ''
+    return self.name + where
+
+  def __repr__(self):
+    return self.__str__()
+
+  def __deepcopy__(self, memo):
+    # We don't copy self.cache, for two reasons.
+    # 1. The copied Metric can share the same cache to maximize caching.
+    # 2. When deepcopy a Metric, its cache refers to CacheKey and CacheKey
+    # refers back. The loop leads to missing attributes error.
+    cls = self.__class__
+    obj = cls.__new__(cls)
+    memo[id(self)] = obj
+    for k, v in self.__dict__.items():
+      if k == 'cache':
+        obj.cache = v
+      else:
+        setattr(obj, k, copy.deepcopy(v, memo))
+    return obj
 
 
 class MetricList(Metric):
@@ -914,80 +1119,6 @@ class MetricList(Metric):
         print('Warning: %s failed for reason %s.' % (m.name, repr(e)))
     return res
 
-  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
-                              local_filter, with_data):
-    """Gets the SQL query and WITH clause.
-
-    The query is constructed by
-    1. Get the query for every children metric.
-    2. If all children queries are compatible, we just collect all the columns
-      from the children and use the WHERE and GROUP BY clauses from any
-      children. The FROM clause is more complex. We use the largest FROM clause
-      in children.
-      See the doc of is_compatible() for its meaning.
-      If any pair of children queries are incompatible, we merge the compatible
-      children as much as possible then add the merged SQLs to with_data, join
-      them on indexes, and SELECT *.
-
-    Args:
-      table: The table we want to query from.
-      split_by: The columns that we use to split the data.
-      global_filter: The filters that can be applied to the whole Metric tree.
-      indexes: The columns that we shouldn't apply any arithmetic operation.
-      local_filter: The filters that have been accumulated so far.
-      with_data: A global variable that contains all the WITH clauses we need.
-
-    Returns:
-      The SQL instance for metric, without the WITH clause component.
-      The global with_data which holds all datasources we need in the WITH
-        clause.
-    """
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
-    children_sql = [
-        c.get_sql_and_with_clause(table, split_by, global_filter, indexes,
-                                  local_filter, with_data)[0]
-        for c in self.children
-    ]
-    incompatible_sqls = sql.Datasources()
-    for child_sql in children_sql:
-      incompatible_sqls.merge(sql.Datasource(child_sql, 'MetricListChildTable'))
-
-    name_tmpl = self.name_tmpl or '{}'
-    if len(incompatible_sqls) == 1:
-      res = next(iter(incompatible_sqls.children.values()))
-      for c in res.columns:
-        if c not in indexes:
-          c.alias_raw = name_tmpl.format(c.alias_raw)
-      return res, with_data
-
-    columns = sql.Columns(indexes.aliases)
-    for i, (alias, table) in enumerate(incompatible_sqls.children.items()):
-      data = sql.Datasource(table, alias)
-      alias, rename = with_data.merge(data)
-      for c in table.columns:
-        if c not in columns:
-          columns.add(
-              sql.Column(
-                  '%s.%s' % (alias, rename.get(c.alias, c.alias)),
-                  alias=name_tmpl.format(c.alias_raw)))
-      if i == 0:
-        from_data = alias
-      else:
-        join = 'FULL' if indexes else 'CROSS'
-        from_data = sql.Join(from_data, alias, join=join, using=indexes)
-
-    query = sql.Sql(columns, from_data)
-    if self.columns:
-      columns = query.columns[len(indexes):]
-      if len(columns) != len(self.columns):
-        raise ValueError(
-            'rename_columns has length %s but there are %s columns in '
-            'the result!' % (len(self.columns), len(columns)))
-      for col, rename in zip(columns, self.columns):
-        col.set_alias(rename)  # Modify in-place.
-
-    return query, with_data
-
   def compute_on_children(self, children, split_by):
     if isinstance(children, list):
       children = self.to_dataframe(children)
@@ -997,18 +1128,22 @@ class MetricList(Metric):
       if len(children.columns) != len(self.columns):
         raise ValueError(
             'rename_columns has length %s but there are %s columns in '
-            'the result!' % (len(self.columns), len(children.columns)))
+            'the result!' % (len(self.columns), len(children.columns))
+        )
       children.columns = self.columns
     return children
 
-  def manipulate(self,
-                 res: pd.Series,
-                 melted: bool = False,
-                 return_dataframe: bool = True,
-                 apply_name_tmpl: Optional[Text] = None):
+  def manipulate(
+      self,
+      res: pd.Series,
+      melted: bool = False,
+      return_dataframe: bool = True,
+      apply_name_tmpl: bool = None,
+  ):
     """Rename columns if asked in addition to original manipulation."""
-    res = super(MetricList, self).manipulate(res, melted, return_dataframe,
-                                             apply_name_tmpl)
+    res = super(MetricList, self).manipulate(
+        res, melted, return_dataframe, apply_name_tmpl
+    )
     if not isinstance(res, pd.DataFrame):
       return res
     if self.columns:
@@ -1017,7 +1152,8 @@ class MetricList(Metric):
       if len(res.columns) != len(self.columns):
         raise ValueError(
             'rename_columns has length %s but there are %s columns in '
-            'the result!' % (len(self.columns), len(res.columns)))
+            'the result!' % (len(self.columns), len(res.columns))
+        )
       res.columns = self.columns
       if melted:
         res = utils.melt(res)
@@ -1046,6 +1182,131 @@ class MetricList(Metric):
       None
     """
     self.columns = rename_columns
+
+  def compute_on_sql(
+      self,
+      table,
+      split_by=None,
+      execute=None,
+      melted=False,
+      mode=None,
+      cache_key=None,
+      cache=None,
+      return_dataframe=True,
+  ):
+    if return_dataframe:
+      return super(MetricList, self).compute_on_sql(
+          table, split_by, execute, melted, mode, cache_key, cache
+      )
+    return self._compute_with_caching_and_postprocessing(
+        self.compute_children_sql,
+        table,
+        split_by,
+        melted,
+        return_dataframe,
+        False,
+        cache_key,
+        cache,
+        execute,
+        mode,
+    )
+
+  def compute_children_sql(self, table, split_by, execute, mode=None):
+    """The return should be similar to compute_children()."""
+    children = []
+    for c in self.children:
+      if not isinstance(c, Metric):
+        children.append(c)
+      else:
+        children.append(
+            self.compute_util_metric_on_sql(
+                c,
+                table,
+                split_by + self.extra_split_by,
+                execute,
+                False,
+                mode,
+                return_dataframe=self.children_return_dataframe,
+            )
+        )
+    return children[0] if len(self.children) == 1 else children
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL query and WITH clause.
+
+    The query is constructed by
+    1. Get the query for every children metric.
+    2. If all children queries are compatible, we just collect all the columns
+      from the children and use the WHERE and GROUP BY clauses from any
+      children.
+      If any pair of children queries are incompatible, we merge the compatible
+      children as much as possible then add the merged SQLs to with_data, join
+      them on indexes, and SELECT *.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The filters that can be applied to the whole Metric tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    utils.get_extra_idx(self)  # Check if indexes are compatible.
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
+    children_sql = [
+        c.get_sql_and_with_clause(table, split_by, global_filter, indexes,
+                                  local_filter, with_data)[0]
+        for c in self.children
+    ]
+    incompatible_sqls = sql.Datasources()
+    for child_sql in children_sql:
+      incompatible_sqls.merge(sql.Datasource(child_sql, 'MetricListChildTable'))
+
+    name_tmpl = self.name_tmpl or '{}'
+    if len(incompatible_sqls) == 1:
+      res = next(iter(incompatible_sqls.children.values()))
+      for c in res.columns:
+        if c not in indexes:
+          c.alias_raw = name_tmpl.format(c.alias_raw)
+      return res, with_data
+
+    columns = sql.Columns(indexes.aliases)
+    for i, (alias, table) in enumerate(incompatible_sqls.children.items()):
+      data = sql.Datasource(table, alias)
+      alias = with_data.merge(data)
+      for c in table.columns:
+        if c not in columns:
+          columns.add(
+              sql.Column(
+                  '%s.%s' % (alias, c.alias),
+                  alias=name_tmpl.format(c.alias_raw),
+              )
+          )
+      if i == 0:
+        from_data = alias
+      else:
+        join = 'FULL' if indexes else 'CROSS'
+        from_data = sql.Join(from_data, alias, join=join, using=indexes)
+
+    query = sql.Sql(columns, from_data)
+    if self.columns:
+      columns = query.columns[len(indexes):]
+      if len(columns) != len(self.columns):
+        raise ValueError(
+            'rename_columns has length %s but there are %s columns in '
+            'the result!' % (len(self.columns), len(columns)))
+      for col, rename in zip(columns, self.columns):
+        col.set_alias(rename)  # Modify in-place.
+
+    return query, with_data
 
   def __iter__(self):
     for m in self.children:
@@ -1115,15 +1376,6 @@ class CompositeMetric(Metric):
     self.name = name
     return self
 
-  def get_fingerprint(self):
-    # Make Sum(x) / Count(x) indistinguishable to Mean(x) in cache.
-    s = self.children[0]
-    c = self.children[1]
-    if isinstance(s, Sum) and isinstance(
-        c, Count) and s.var == c.var and s.where == c.where and not c.distinct:
-      return Mean(s.var, where=s.where_raw).get_fingerprint()
-    return super(CompositeMetric, self).get_fingerprint()
-
   def compute_children(self, df, split_by):
     if len(self.children) != 2:
       raise ValueError('CompositeMetric can only have two children.')
@@ -1167,8 +1419,12 @@ class CompositeMetric(Metric):
     m1, m2 = self.children[0], self.children[1]
     if isinstance(a, pd.DataFrame) and a.shape[1] == 1:
       a = a.iloc[:, 0]
+      if len(a) == 1 and not is_operation(m1) and not a.index.name:
+        a = a.values[0]
     if isinstance(b, pd.DataFrame) and b.shape[1] == 1:
       b = b.iloc[:, 0]
+      if len(b) == 1 and not is_operation(m2) and not b.index.name:
+        b = b.values[0]
     res = None
     if isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
       if len(a.columns) == len(b.columns):
@@ -1233,7 +1489,9 @@ class CompositeMetric(Metric):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     op = self.op
 
     if not isinstance(self.children[0], Metric):
@@ -1253,41 +1511,66 @@ class CompositeMetric(Metric):
           table, split_by, global_filter, indexes, local_filter, with_data)
       query1, with_data = self.children[1].get_sql_and_with_clause(
           table, split_by, global_filter, indexes, local_filter, with_data)
-      if len(query0.columns) != 1 and len(query1.columns) != 1 and len(
-          query0.columns) != len(query1.columns):
+      idx_aliases = sql.Columns(indexes).aliases
+      val_cols0 = [c for c in query0.columns if c.alias not in idx_aliases]
+      val_cols1 = [c for c in query1.columns if c.alias not in idx_aliases]
+      if (
+          len(val_cols0) != 1
+          and len(val_cols1) != 1
+          and len(val_cols0) != len(val_cols1)
+      ):
         raise ValueError('Children Metrics have different shapes!')
 
-      compatible, larger_from = sql.is_compatible(query0, query1)
-      if compatible:
+      idx0 = (
+          sql.Columns(query0.groupby)
+          .add(query0.columns[: -len(val_cols0)])
+          .aliases
+      )
+      idx1 = (
+          sql.Columns(query1.groupby)
+          .add(query1.columns[: -len(val_cols1)])
+          .aliases
+      )
+      has_same_idx = set(idx0) == set(idx1)
+      if not has_same_idx:
+        shared_idx = idx0 if len(idx0) < len(idx1) else idx1
+        if set(idx0).difference(idx1) and set(idx1).difference(idx0):
+          raise ValueError(
+              f'Indexes {idx0} and {idx1} are incompatible in'
+              ' CompositeMetric!'
+          )
+      using = indexes if has_same_idx else shared_idx
+
+      compatible = sql.is_compatible(query0, query1)
+      if compatible and has_same_idx:
         col0_col1 = zip(itertools.cycle(query0.columns), query1.columns)
         if len(query1.columns) == 1:
           col0_col1 = zip(query0.columns, itertools.cycle(query1.columns))
         columns = sql.Columns()
         for c0, c1 in col0_col1:
-          if c0 in indexes.aliases:
+          if c0.alias in idx_aliases:
             columns.add(c0)
           else:
             alias = self.name_tmpl.format(c0.alias_raw, c1.alias_raw)
             columns.add(op(c0, c1).set_alias(alias))
-        query = query0
+        query = copy.deepcopy(query0)
         query.columns = columns
-        query.from_data = larger_from
       else:
-        tbl0 = with_data.add(sql.Datasource(query0, 'CompositeMetricTable0'))
-        tbl1 = with_data.add(sql.Datasource(query1, 'CompositeMetricTable1'))
-        join = 'FULL' if indexes else 'CROSS'
-        from_data = sql.Join(tbl0, tbl1, join=join, using=indexes)
-        columns = sql.Columns()
-        col0_col1 = zip(itertools.cycle(query0.columns), query1.columns)
-        if len(query1.columns) == 1:
-          col0_col1 = zip(query0.columns, itertools.cycle(query1.columns))
+        tbl0 = with_data.merge(sql.Datasource(query0, 'CompositeMetricTable0'))
+        tbl1 = with_data.merge(sql.Datasource(query1, 'CompositeMetricTable1'))
+        join = 'FULL' if using else 'CROSS'
+        from_data = sql.Join(tbl0, tbl1, join=join, using=using)
+        columns = sql.Columns(idx_aliases)
+        col0_col1 = zip(itertools.cycle(val_cols0), val_cols1)
+        if len(val_cols1) == 1:
+          col0_col1 = zip(val_cols0, itertools.cycle(val_cols1))
         for c0, c1 in col0_col1:
-          if c0 not in indexes.aliases:
+          if c0.alias not in idx_aliases:
             col = op(
                 sql.Column('%s.%s' % (tbl0, c0.alias), alias=c0.alias_raw),
                 sql.Column('%s.%s' % (tbl1, c1.alias), alias=c1.alias_raw))
             columns.add(col)
-        query = sql.Sql(sql.Columns(indexes.aliases).add(columns), from_data)
+        query = sql.Sql(columns, from_data)
 
     if len(query.columns.difference(indexes)) == 1:
       query.columns[-1].set_alias(self.name)
@@ -1300,6 +1583,20 @@ class CompositeMetric(Metric):
         col.set_alias(rename)  # Modify in-place.
 
     return query, with_data
+
+  def get_fingerprint(self):
+    # Make Sum(x) / Count(x) indistinguishable to Mean(x) in cache.
+    s = self.children[0]
+    c = self.children[1]
+    if (
+        isinstance(s, Sum)
+        and isinstance(c, Count)
+        and s.var == c.var
+        and s.where == c.where
+        and not c.distinct
+    ):
+      return Mean(s.var, where=s.where_raw).get_fingerprint()
+    return super(CompositeMetric, self).get_fingerprint()
 
 
 class Ratio(CompositeMetric):
@@ -1347,7 +1644,9 @@ class SimpleMetric(Metric):
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     cols = self.get_sql_columns(local_filter)
     if cols:
       return sql.Sql(cols, table, global_filter, split_by), with_data
@@ -1450,10 +1749,6 @@ class Dot(SimpleMetric):
       fn = lambda df: (df[self.var] * df[self.var2]).sum()
     return df.groupby(split_by, observed=True).apply(fn)
 
-  def get_sql_columns(self, local_filter):
-    tmpl = 'AVG({} * {})' if self.normalize else 'SUM({} * {})'
-    return sql.Column((self.var, self.var2), tmpl, self.name, local_filter)
-
   def get_equivalent_without_filter(self, *auxiliary_cols):
     if self.normalize:
       return Sum(auxiliary_cols[0]) / Count(auxiliary_cols[0])
@@ -1461,6 +1756,10 @@ class Dot(SimpleMetric):
 
   def get_auxiliary_cols(self):
     return ((self.var, '*', self.var2),)
+
+  def get_sql_columns(self, local_filter):
+    tmpl = 'AVG({} * {})' if self.normalize else 'SUM({} * {})'
+    return sql.Column((self.var, self.var2), tmpl, self.name, local_filter)
 
   def get_fingerprint(self):
     if str(self.var) > str(self.var2):
@@ -1696,14 +1995,6 @@ class Variance(SimpleMetric):
       return self.compute_equivalent(df, split_by)
     return self.group(df, split_by)[self.var].var(ddof=self.ddof)
 
-  def get_sql_columns(self, local_filter):
-    if self.weight:
-      return
-    if self.ddof == 1:
-      return sql.Column(self.var, 'VAR_SAMP({})', self.name, local_filter)
-    else:
-      return sql.Column(self.var, 'VAR_POP({})', self.name, local_filter)
-
   def get_equivalent_without_filter(self, *auxiliary_cols):
     if not self.weight:
       return Cov(self.var, self.var, ddof=self.ddof)
@@ -1717,6 +2008,14 @@ class Variance(SimpleMetric):
     if self.weight:
       return ((self.var, '**', 2),)
     return ()
+
+  def get_sql_columns(self, local_filter):
+    if self.weight:
+      return
+    if self.ddof == 1:
+      return sql.Column(self.var, 'VAR_SAMP({})', self.name, local_filter)
+    else:
+      return sql.Column(self.var, 'VAR_POP({})', self.name, local_filter)
 
 
 class StandardDeviation(SimpleMetric):
@@ -1750,6 +2049,10 @@ class StandardDeviation(SimpleMetric):
       return self.compute_equivalent(df, split_by)
     return self.group(df, split_by)[self.var].std(ddof=self.ddof)
 
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    return Variance(self.var, bool(self.ddof), self.weight) ** 0.5
+
   def get_sql_columns(self, local_filter):
     if self.weight:
       return
@@ -1757,10 +2060,6 @@ class StandardDeviation(SimpleMetric):
       return sql.Column(self.var, 'STDDEV_SAMP({})', self.name, local_filter)
     else:
       return sql.Column(self.var, 'STDDEV_POP({})', self.name, local_filter)
-
-  def get_equivalent_without_filter(self, *auxiliary_cols):
-    del auxiliary_cols  # unused
-    return Variance(self.var, bool(self.ddof), self.weight)**0.5
 
 
 class CV(SimpleMetric):
@@ -1788,6 +2087,10 @@ class CV(SimpleMetric):
     var_grouped = self.group(df, split_by)[self.var]
     return var_grouped.std(ddof=self.ddof) / var_grouped.mean()
 
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    return StandardDeviation(self.var, bool(self.ddof)) / Mean(self.var)
+
   def get_sql_columns(self, local_filter):
     if self.ddof == 1:
       res = sql.Column(self.var, 'STDDEV_SAMP({})',
@@ -1798,10 +2101,6 @@ class CV(SimpleMetric):
                        self.name, local_filter) / sql.Column(
                            self.var, 'AVG({})', self.name, local_filter)
     return res.set_alias(self.name)
-
-  def get_equivalent_without_filter(self, *auxiliary_cols):
-    del auxiliary_cols  # unused
-    return StandardDeviation(self.var, bool(self.ddof)) / Mean(self.var)
 
 
 class Correlation(SimpleMetric):
@@ -1857,6 +2156,15 @@ class Correlation(SimpleMetric):
     return self.group(df, split_by)[self.var].corr(
         df[self.var2], method=self.method)
 
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    if self.method == 'pearson':
+      return (
+          Cov(self.var, self.var2, True, weight=self.weight)
+          / StandardDeviation(self.var, False, self.weight)
+          / StandardDeviation(self.var2, False, self.weight)
+      )
+
   def get_sql_columns(self, local_filter):
     if self.weight:
       return
@@ -1872,14 +2180,6 @@ class Correlation(SimpleMetric):
       util.var2 = self.var
       return util.get_fingerprint()
     return super(Correlation, self).get_fingerprint()
-
-  def get_equivalent_without_filter(self, *auxiliary_cols):
-    del auxiliary_cols  # unused
-    if self.method == 'pearson':
-      return Cov(
-          self.var, self.var2, True, weight=self.weight) / StandardDeviation(
-              self.var, False, self.weight) / StandardDeviation(
-                  self.var2, False, self.weight)
 
 
 class Cov(SimpleMetric):
@@ -1929,29 +2229,6 @@ class Cov(SimpleMetric):
   def compute_slices(self, df, split_by=None):
     return self.compute_equivalent(df, split_by)
 
-  def get_sql_columns(self, local_filter):
-    """Get SQL columns."""
-    if self.weight or self.fweight:
-      return
-    ddof = self.ddof
-    if ddof is None:
-      ddof = 0 if self.bias else 1
-    if ddof == 1:
-      return sql.Column((self.var, self.var2), 'COVAR_SAMP({}, {})', self.name,
-                        local_filter)
-    elif ddof == 0:
-      return sql.Column((self.var, self.var2), 'COVAR_POP({}, {})', self.name,
-                        local_filter)
-    return
-
-  def get_fingerprint(self):
-    if str(self.var) > str(self.var2):
-      util = copy.deepcopy(self)
-      util.var = self.var2
-      util.var2 = self.var
-      return util.get_fingerprint()
-    return super(Cov, self).get_fingerprint()
-
   def get_equivalent_without_filter(self, *auxiliary_cols):
     """Gets the equivalent Metric for Cov."""
     # See https://numpy.org/doc/stable/reference/generated/numpy.cov.html.
@@ -1996,3 +2273,28 @@ class Cov(SimpleMetric):
         (self.var, '*', self.var2),
         (self.fweight, '*', self.weight),
     )
+
+  def get_sql_columns(self, local_filter):
+    """Get SQL columns."""
+    if self.weight or self.fweight:
+      return
+    ddof = self.ddof
+    if ddof is None:
+      ddof = 0 if self.bias else 1
+    if ddof == 1:
+      return sql.Column(
+          (self.var, self.var2), 'COVAR_SAMP({}, {})', self.name, local_filter
+      )
+    elif ddof == 0:
+      return sql.Column(
+          (self.var, self.var2), 'COVAR_POP({}, {})', self.name, local_filter
+      )
+    return
+
+  def get_fingerprint(self):
+    if str(self.var) > str(self.var2):
+      util = copy.deepcopy(self)
+      util.var = self.var2
+      util.var2 = self.var
+      return util.get_fingerprint()
+    return super(Cov, self).get_fingerprint()

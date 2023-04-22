@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1843,15 +1843,20 @@ class JackknifeTests(parameterized.TestCase):
     m = operations.Jackknife('cookie', metrics.Sum('X', where='X > 0.5'), 0.9)
     res = m.compute_on(df)
     output = res.display(return_formatted_df=True)
-    expected = pd.DataFrame({
-        'sum(X)': [
-            '<div class="ci-display-good-change ci-display-cell"><div>'
-            '<span class="ci-display-ratio">7.0000</span>'
-            '<div class="ci-display-flex-line-break"></div>'
-            '<span class="ci-display-ci-range">[3.4906, 10.5094]</span>'
-            '</div></div>'
-        ]
-    })
+    expected = pd.DataFrame(
+        {
+            'sum(X)': (
+                (
+                    '<div class="ci-display-good-change'
+                    ' ci-display-cell"><div><span'
+                    ' class="ci-display-ratio">7.0000</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[3.4906,'
+                    ' 10.5094]</span></div></div>'
+                ),
+            )
+        }
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
@@ -1867,23 +1872,33 @@ class JackknifeTests(parameterized.TestCase):
     expected = pd.DataFrame(
         {
             'Dimensions': [
-                '<div><div><span class="ci-display-dimension">A</span></div>'
-                '</div>',
-                '<div><div><span class="ci-display-dimension">B</span></div>'
-                '</div>'
+                (
+                    '<div><div><span'
+                    ' class="ci-display-dimension">A</span></div></div>'
+                ),
+                (
+                    '<div><div><span'
+                    ' class="ci-display-dimension">B</span></div></div>'
+                ),
             ],
             'sum(X)': [
-                '<div class="ci-display-cell"><div>'
-                '<span class="ci-display-ratio">2.5000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[-5.3922, 10.3922]</span>'
-                '</div></div>', '<div class="ci-display-cell"><div>'
-                '<span class="ci-display-ratio">5.0000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[-1.3138, 11.3138]</span>'
-                '</div></div>'
-            ]
-        },)
+                (
+                    '<div class="ci-display-cell"><div><span'
+                    ' class="ci-display-ratio">2.5000</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[-5.3922,'
+                    ' 10.3922]</span></div></div>'
+                ),
+                (
+                    '<div class="ci-display-cell"><div><span'
+                    ' class="ci-display-ratio">5.0000</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[-1.3138,'
+                    ' 11.3138]</span></div></div>'
+                ),
+            ],
+        },
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
@@ -1900,21 +1915,29 @@ class JackknifeTests(parameterized.TestCase):
     expected = pd.DataFrame(
         {
             'Dimensions': [
-                '<div><div><span class="ci-display-experiment-id">A</span>'
-                '</div></div>',
-                '<div><div><span class="ci-display-experiment-id">B</span>'
-                '</div></div>'
+                (
+                    '<div><div><span class="ci-display-experiment-id">A</span>'
+                    '</div></div>'
+                ),
+                (
+                    '<div><div><span class="ci-display-experiment-id">B</span>'
+                    '</div></div>'
+                ),
             ],
             'sum(X)': [
                 '<div class="ci-display-cell">6.0000</div>',
-                '<div class="ci-display-good-change ci-display-cell">'
-                '<div>300.0000<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ratio">4900.00%</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[357.80, 9442.20] %</span>'
-                '</div></div>'
-            ]
-        },)
+                (
+                    '<div class="ci-display-good-change'
+                    ' ci-display-cell"><div>300.0000<div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ratio">4900.00%</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[357.80, 9442.20]'
+                    ' %</span></div></div>'
+                ),
+            ],
+        },
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
@@ -1932,35 +1955,54 @@ class JackknifeTests(parameterized.TestCase):
     expected = pd.DataFrame(
         {
             'Dimensions': [
-                '<div><div><span class="ci-display-experiment-id">foo</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-dimension">A</span></div></div>',
-                '<div><div><span class="ci-display-experiment-id">bar</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-dimension">A</span></div></div>',
-                '<div><div><span class="ci-display-experiment-id">foo</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-dimension">B</span></div></div>',
-                '<div><div><span class="ci-display-experiment-id">bar</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-dimension">B</span></div></div>'
+                (
+                    '<div><div><span'
+                    ' class="ci-display-experiment-id">foo</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-dimension">A</span></div></div>'
+                ),
+                (
+                    '<div><div><span'
+                    ' class="ci-display-experiment-id">bar</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-dimension">A</span></div></div>'
+                ),
+                (
+                    '<div><div><span'
+                    ' class="ci-display-experiment-id">foo</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-dimension">B</span></div></div>'
+                ),
+                (
+                    '<div><div><span'
+                    ' class="ci-display-experiment-id">bar</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-dimension">B</span></div></div>'
+                ),
             ],
             'sum(X)': [
                 '<div class="ci-display-cell">6.0000</div>',
-                '<div class="ci-display-good-change ci-display-cell">'
-                '<div>1001.0000<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ratio">995.0000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[988.6862, 1001.3138]</span>'
-                '</div></div>', '<div class="ci-display-cell">4.0000</div>',
-                '<div class="ci-display-cell">'
-                '<div>3005.0000<div class="ci-display-flex-line-break">'
-                '</div><span class="ci-display-ratio">3001.0000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[-380.8246, 6382.8246]'
-                '</span></div></div>'
-            ]
-        },)
+                (
+                    '<div class="ci-display-good-change'
+                    ' ci-display-cell"><div>1001.0000<div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ratio">995.0000</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[988.6862,'
+                    ' 1001.3138]</span></div></div>'
+                ),
+                '<div class="ci-display-cell">4.0000</div>',
+                (
+                    '<div class="ci-display-cell">'
+                    '<div>3005.0000<div class="ci-display-flex-line-break">'
+                    '</div><span class="ci-display-ratio">3001.0000</span>'
+                    '<div class="ci-display-flex-line-break"></div>'
+                    '<span class="ci-display-ci-range">[-380.8246, 6382.8246]'
+                    '</span></div></div>'
+                ),
+            ],
+        },
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
@@ -2359,6 +2401,119 @@ class BootstrapTests(parameterized.TestCase):
                             columns=['Metric', 'grp', 'Value', 'Bootstrap SE'])
     expected.set_index(['Metric', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
+
+
+class PoissonBootstrapTests(parameterized.TestCase):
+
+  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
+  def test_runs(self, split_by):
+    df = pd.DataFrame({
+        'x': range(6),
+        'grp': range(6),
+        'grp2': [0] * 3 + [1] * 3,
+        'grp3': [0, 1, 2] * 2,
+    })
+    m = metrics.MetricList([
+        metrics.Sum('x'),
+        metrics.Count('x'),
+        metrics.Max('x'),
+        metrics.Min('x'),
+    ])
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
+    m2 = operations.PoissonBootstrap('grp', m, 5, 0.9, False)
+    m3 = operations.PoissonBootstrap(None, m, 5, 0.9)
+    np.random.seed(0)
+    res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
+    np.random.seed(0)
+    res2 = m2.compute_on(df, split_by).display(return_formatted_df=True)
+    np.random.seed(0)
+    res3 = m3.compute_on(df, split_by).display(return_formatted_df=True)
+    testing.assert_frame_equal(res1, res2)
+    testing.assert_frame_equal(res2, res3)
+
+  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
+  def test_each_unit_has_one_row(self, split_by):
+    df = pd.DataFrame({
+        'x': range(6),
+        'grp': range(6),
+        'grp2': [0] * 3 + [1] * 3,
+        'grp3': [0, 1, 2] * 2,
+        'grp4': [0, 1] * 3,
+    })
+    m = metrics.MetricList([
+        metrics.Sum('x'),
+        metrics.Count('x'),
+        metrics.Max('x'),
+        metrics.Min('x'),
+    ])
+    m = operations.AbsoluteChange('grp4', 1, m)
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
+    m2 = operations.PoissonBootstrap(None, m, 5, 0.9)
+    np.random.seed(0)
+    res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
+    np.random.seed(0)
+    res2 = m2.compute_on(df, split_by).display(return_formatted_df=True)
+    testing.assert_frame_equal(res1, res2)
+
+  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
+  def test_each_unit_has_multiple_rows(self, split_by):
+    df = pd.DataFrame({
+        'x': range(6),
+        'grp': [0] * 3 + [1] * 3,
+        'grp2': [0, 1] * 3,
+        'grp3': [0, 1] * 3,
+        'grp4': [0, 1, 2] * 2,
+    })
+    m = metrics.MetricList([
+        metrics.Sum('x'),
+        metrics.Count('x'),
+        metrics.Max('x'),
+        metrics.Min('x'),
+    ])
+    m = operations.AbsoluteChange('grp4', 0, m)
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
+    m2 = operations.PoissonBootstrap('grp', m, 5, 0.9, False)
+    np.random.seed(0)
+    res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
+    np.random.seed(0)
+    res2 = m2.compute_on(df, split_by).display(return_formatted_df=True)
+    testing.assert_frame_equal(res1, res2)
+
+  def test_get_samples_with_unit(self):
+    x = range(6)
+    df = pd.DataFrame({'x': x, 'grp': ['A'] * 3 + ['B'] * 3})
+    m = operations.PoissonBootstrap(
+        'grp', metrics.Sum('x'), 20, enable_optimization=False
+    )
+    output = [s[1] for s in m.get_samples(df, [])]
+    grp_cts = df.groupby('grp').size()
+    for s in output:
+      if s is not None:
+        self.assertTrue((s.groupby('grp').size() / grp_cts).sum().is_integer())
+
+  @parameterized.parameters([True, False])
+  def test_poissonbootstrap_unit_cache_across_samples(self, enable_opt):
+    np.random.seed(0)
+    df = pd.DataFrame({
+        'x': range(4),
+        'unit': [0, 0, 1, 1],
+        'grp': [0, 1] * 2,
+    })
+    SUM_COMPUTE_THROUGH.mock.reset_mock()
+    m = operations.PoissonBootstrap(
+        'unit',
+        operations.AbsoluteChange('grp', 0, metrics.Sum('x')),
+        5,
+        enable_optimization=enable_opt,
+    )
+    with mock.patch.object(
+        metrics.Sum,
+        'compute_through',
+        spy_decorator(metrics.Sum.compute_through),
+    ) as mock_fn_opt:
+      m.compute_on(df)
+    # The additional two calls are for precomputation and point estimate.
+    self.assertLess(mock_fn_opt.mock.call_count, 7)
 
 
 OPERATIONS = [('Distribution', operations.Distribution('condition')),
