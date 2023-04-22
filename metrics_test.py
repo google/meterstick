@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -857,6 +857,37 @@ class TestCaching(parameterized.TestCase):
     ]
     fingerprints = set([m.get_fingerprint() for m in distinct_metrics])
     self.assertLen(fingerprints, len(distinct_metrics))
+
+  def test_class_level_caching_disabled_for_custom_metric_by_default(self):
+    class Custom(metrics.Metric):
+      def __init__(self, x):
+        self.x = x
+        super(Custom, self).__init__('Foo')
+
+      def compute(self, data):
+        return self.x
+
+    output = metrics.MetricList(
+        [metrics.MetricList([Custom(1)]), metrics.MetricList([Custom(2)])]
+    ).compute_on(self.df)
+    expected = pd.DataFrame([[1, 2]], columns=['Foo'] * 2)
+    testing.assert_frame_equal(output, expected)
+
+  def test_class_level_caching_enabled_for_custom_metric(self):
+    class WrongImpl(metrics.Metric):
+      def __init__(self, x):
+        self.x = x
+        super(WrongImpl, self).__init__('Foo')
+        self.cache_across_instances = True
+
+      def compute(self, data):
+        return self.x
+
+    output = metrics.MetricList([WrongImpl(1), WrongImpl(2)]).compute_on(
+        self.df
+    )
+    expected = pd.DataFrame([[1, 1]], columns=['Foo'] * 2)
+    testing.assert_frame_equal(output, expected)
 
 
 if __name__ == '__main__':
