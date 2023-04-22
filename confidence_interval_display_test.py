@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -71,18 +71,27 @@ class DisplayMetricsTest(absltest.TestCase):
                 LINE_BREAK.join((
                     '<div class="ci-display-cell"><div>0.7700',
                     '<span class="ci-display-ratio">-1.4000</span>',
-                    '<span class="ci-display-ci-range">[-5.0350, 2.2350]</span>'
-                    '</div></div>')),
+                    (
+                        '<span class="ci-display-ci-range">[-5.0350,'
+                        ' 2.2350]</span></div></div>'
+                    ),
+                )),
                 '<div class="ci-display-cell">0.2160</div>',
-                LINE_BREAK.join(
-                    ('<div class="ci-display-good-change ci-display-cell">'
-                     '<div>0.2220',
-                     '<span class="ci-display-ratio">2.7900</span>',
-                     '<span class="ci-display-ci-range">[0.7300, 4.8500]</span>'
-                     '</div></div>')),
+                LINE_BREAK.join((
+                    (
+                        '<div class="ci-display-good-change'
+                        ' ci-display-cell"><div>0.2220'
+                    ),
+                    '<span class="ci-display-ratio">2.7900</span>',
+                    (
+                        '<span class="ci-display-ci-range">[0.7300,'
+                        ' 4.8500]</span></div></div>'
+                    ),
+                )),
             ],
         },
-        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'])
+        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'],
+    )
     actual = confidence_interval_display.get_formatted_df(
         DF_WITH_DIMENSIONS,
         dims=['Country'],
@@ -193,20 +202,30 @@ class DisplayMetricsTest(absltest.TestCase):
             ],
             'PLA_CONV_CVR': [
                 '<div class="ci-display-cell">0.7870</div>',
-                LINE_BREAK.join(
-                    ('<div class="ci-display-cell"><div>0.7700',
-                     '<span class="ci-display-ratio">-1.4000</span>',
-                     '<span class="ci-display-ci-range">[-5.0350, 2.2350]'
-                     '</span></div></div>')),
+                LINE_BREAK.join((
+                    '<div class="ci-display-cell"><div>0.7700',
+                    '<span class="ci-display-ratio">-1.4000</span>',
+                    (
+                        '<span class="ci-display-ci-range">[-5.0350,'
+                        ' 2.2350]</span></div></div>'
+                    ),
+                )),
                 '<div class="ci-display-cell">0.2160</div>',
-                LINE_BREAK.join(
-                    ('<div class="ci-display-bad-change ci-display-cell"><div>'
-                     '0.2220', '<span class="ci-display-ratio">2.7900</span>',
-                     '<span class="ci-display-ci-range">[0.7300, 4.8500]</span>'
-                     '</div></div>')),
+                LINE_BREAK.join((
+                    (
+                        '<div class="ci-display-bad-change'
+                        ' ci-display-cell"><div>0.2220'
+                    ),
+                    '<span class="ci-display-ratio">2.7900</span>',
+                    (
+                        '<span class="ci-display-ci-range">[0.7300,'
+                        ' 4.8500]</span></div></div>'
+                    ),
+                )),
             ],
         },
-        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'])
+        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'],
+    )
     actual = confidence_interval_display.get_formatted_df(
         DF_WITH_DIMENSIONS,
         dims=['Country'],

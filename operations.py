@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -98,14 +98,6 @@ class Operation(metrics.Metric):
           self).__init__(name, child or (), where, name_tmpl, extra_split_by,
                          extra_index, additional_fingerprint_attrs, **kwargs)
     self.precomputable_in_jk_bs = True
-    self.apply_name_tmpl = True
-
-  def split_data(self, df, split_by=None):
-    """Splits the DataFrame returned by the children."""
-    for k, idx in df.groupby(split_by, observed=True).indices.items():
-      # split_by will be added back later during the concatenation.
-      # Use iloc rather than loc because indexes can have duplicates.
-      yield df.iloc[idx].droplevel(split_by), k
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     try:
@@ -151,6 +143,25 @@ class Operation(metrics.Metric):
     res = super(Operation,
                 self).compute_on_sql_mixed_mode(table, split_by, execute, mode)
     return utils.apply_name_tmpl(self.name_tmpl, res)
+
+  def split_data(self, df, split_by=None):
+    """Splits the DataFrame returned by the children."""
+    for k, idx in df.groupby(split_by, observed=True).indices.items():
+      # split_by will be added back later during the concatenation.
+      # Use iloc rather than loc because indexes can have duplicates.
+      yield df.iloc[idx].droplevel(split_by), k
+
+  def manipulate(
+      self,
+      res,
+      melted: bool = False,
+      return_dataframe: bool = True,
+      apply_name_tmpl=None,
+  ):
+    apply_name_tmpl = True if apply_name_tmpl is None else apply_name_tmpl
+    return super(Operation, self).manipulate(
+        res, melted, return_dataframe, apply_name_tmpl
+    )
 
   def __call__(self, child: metrics.Metric):
     op = copy.deepcopy(self) if self.children else self
@@ -215,15 +226,15 @@ class Distribution(Operation):
     child_sql, with_data = self.children[0].get_sql_and_with_clause(
         table, indexes, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'DistributionRaw')
-    child_table_alias, rename = with_data.merge(child_table)
+    child_table_alias = with_data.merge(child_table)
     groupby = sql.Columns(indexes.aliases)
     columns = sql.Columns()
     for c in child_sql.columns:
       if c.alias in groupby:
         continue
-      alias = rename.get(c.alias, c.alias)
-      col = sql.Column(alias) / sql.Column(
-          alias, 'SUM({})', partition=split_by.aliases)
+      col = sql.Column(c.alias) / sql.Column(
+          c.alias, 'SUM({})', partition=split_by.aliases
+      )
       col.set_alias('Distribution of %s' % c.alias_raw)
       columns.add(col)
     return sql.Sql(groupby.add(columns), child_table_alias), with_data
@@ -268,10 +279,7 @@ class CumulativeDistribution(Operation):
     if self.order:
       order = [o for o in self.order if o in df.index.get_level_values(0)]
       order = order if self.ascending else reversed(order)
-      if len(df.index.names) == 1:
-        df = df.reindex(order)
-      else:
-        df = df.reindex(order, level=0)
+      df = df.loc[order]
     else:
       df.sort_values(self.extra_index, ascending=self.ascending, inplace=True)
     dist = df.cumsum()
@@ -307,7 +315,7 @@ class CumulativeDistribution(Operation):
     child_sql, with_data = util_metric.get_sql_and_with_clause(
         table, split_by, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'CumulativeDistributionRaw')
-    child_table_alias, rename = with_data.merge(child_table)
+    child_table_alias = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
     order = list(utils.get_extra_idx(self))
     order = [
@@ -319,11 +327,12 @@ class CumulativeDistribution(Operation):
         continue
 
       col = sql.Column(
-          rename.get(c.alias, c.alias),
+          c.alias,
           'SUM({})',
           partition=split_by.aliases,
           order=order,
-          window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')
+          window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW',
+      )
       col.set_alias('Cumulative %s' % c.alias_raw)
       columns.add(col)
     return sql.Sql(columns, child_table_alias), with_data
@@ -428,11 +437,10 @@ class Comparison(Operation):
     child = self.children[0]
     cond_cols = sql.Columns(self.extra_split_by)
     groupby = sql.Columns(split_by).add(cond_cols)
-    alias_tmpl = self.name_tmpl
     raw_table_sql, with_data = child.get_sql_and_with_clause(
         table, groupby, global_filter, indexes, local_filter, with_data)
     raw_table = sql.Datasource(raw_table_sql, 'ChangeRaw')
-    raw_table_alias, rename = with_data.merge(raw_table)
+    raw_table_alias = with_data.merge(raw_table)
 
     base = self.baseline_key if isinstance(self.baseline_key,
                                            tuple) else [self.baseline_key]
@@ -440,26 +448,26 @@ class Comparison(Operation):
                  for c, b in zip(cond_cols.aliases, base))
     base_cond = ' AND '.join(base_cond)
     cols = sql.Columns(raw_table_sql.groupby.aliases)
-    cols.add((rename.get(a, a) for a in raw_table_sql.columns.aliases))
+    cols.add(raw_table_sql.columns.aliases)
     base_value = sql.Sql(
         cols.difference(cond_cols.aliases), raw_table_alias, base_cond)
     base_table = sql.Datasource(base_value, 'ChangeBase')
-    base_table_alias, rename = with_data.merge(base_table)
+    base_table_alias = with_data.merge(base_table)
 
-    exclude_base_condition = ('%s != %s' % (c, _format_to_condition(b))
-                              for c, b in zip(cond_cols.aliases, base))
-    exclude_base_condition = ' OR '.join(exclude_base_condition)
-    cond = None if self.include_base else sql.Filters([exclude_base_condition])
+    cond = None if self.include_base else sql.Filters([f'NOT ({base_cond})'])
     col_tmp = '%s.{r} - %s.{b}' if isinstance(
         self, AbsoluteChange) else 'SAFE_DIVIDE(%s.{r}, (%s.{b})) * 100 - 100'
     columns = sql.Columns()
-    for c in raw_table_sql.columns.difference(indexes.aliases):
-      raw_table_col = rename.get(c.alias, c.alias)
-      base_table_col = rename.get(c.alias, c.alias)
+    val_col_len = len(raw_table_sql.all_columns) - len(indexes)
+    for r, b in zip(
+        raw_table_sql.all_columns[-val_col_len:],
+        base_value.columns[-val_col_len:],
+    ):
       col = sql.Column(
-          col_tmp.format(r=raw_table_col, b=base_table_col) %
-          (raw_table_alias, base_table_alias),
-          alias=alias_tmpl.format(c.alias_raw))
+          col_tmp.format(r=r.alias, b=b.alias)
+          % (raw_table_alias, base_table_alias),
+          alias=self.name_tmpl.format(r.alias_raw),
+      )
       columns.add(col)
     using = indexes.difference(cond_cols)
     join = '' if using else 'CROSS'
@@ -1015,7 +1023,7 @@ class MH(Comparison):
         table, groupby, global_filter, util_indexes, local_filter, with_data)
 
     raw_table = sql.Datasource(raw_table_sql, 'MHRaw')
-    raw_table_alias, _ = with_data.merge(raw_table)
+    raw_table_alias = with_data.merge(raw_table)
 
     base = self.baseline_key if isinstance(self.baseline_key,
                                            tuple) else [self.baseline_key]
@@ -1027,7 +1035,7 @@ class MH(Comparison):
             raw_table_sql.columns.aliases).difference(cond_cols.aliases),
         raw_table_alias, base_cond)
     base_table = sql.Datasource(base_value, 'MHBase')
-    base_table_alias, _ = with_data.merge(base_table)
+    base_table_alias = with_data.merge(base_table)
 
     exclude_base_condition = ('%s != %s' % (c, _format_to_condition(b))
                               for c, b in zip(cond_cols.aliases, base))
@@ -1311,7 +1319,6 @@ class MetricWithCI(Operation):
         name_tmpl,
         additional_fingerprint_attrs=additional_fingerprint_attrs,
         **kwargs)
-    self.apply_name_tmpl = False
     self.prefix = prefix
     self.sql_batch_size = sql_batch_size
     if not self.prefix and self.name_tmpl:
@@ -1321,78 +1328,9 @@ class MetricWithCI(Operation):
     self.has_been_preaggregated = False
     self._is_root_node = None
 
-  def compute_on_samples(self,
-                         keyed_samples: Iterable[Tuple[Any, pd.DataFrame]],
-                         split_by=None):
-    """Iters through sample DataFrames and collects results.
-
-    Args:
-      keyed_samples: A tuple. The first element is the cache_key and the second
-        is the corresponding DataFrame. Remember a key should correspond to the
-        same data.
-      split_by: Something can be passed into DataFrame.group_by().
-
-    Returns:
-      List of results from samples.
-    """
-    estimates = []
-    for keyed_sample in keyed_samples:
-      try:
-        cache_key, sample = keyed_sample
-        if cache_key is None:
-          # If samples are unlikely to repeat, don't save res to self.cache.
-          res = self.children[0].compute_on(sample, split_by, melted=True)
-        else:
-          res = self.compute_child(
-              sample, split_by, melted=True, cache_key=cache_key)
-        estimates.append(res)
-      except Exception as e:  # pylint: disable=broad-except
-        print(
-            'Warning: Failed on%s sample data for reason %s. If you see many '
-            'such failures, your data might be too sparse.'
-            % (self.name_tmpl.format(''), repr(e))
-        )
-    return estimates
-
-  def compute_children(self,
-                       df: pd.DataFrame,
-                       split_by=None,
-                       melted=False,
-                       return_dataframe=True,
-                       cache_key=None):
-    del melted, return_dataframe, cache_key  # unused
-    return self.compute_on_samples(self.get_samples(df, split_by), split_by)
-
-  def compute_on_children(self, children, split_by):
-    del split_by  # unused
-    bucket_estimates = pd.concat(children, axis=1, sort=False)
-    return self.get_stderrs_or_ci_half_width(bucket_estimates)
-
-  def manipulate(self,
-                 res,
-                 melted=False,
-                 return_dataframe=True,
-                 apply_name_tmpl=False):
-    """Saves and restores the base in addition when has confidence."""
-    if self.confidence:
-      key = self.wrap_cache_key(self.cache_key)
-      key.add_extra_info('base')
-      if hasattr(res, 'meterstick_change_base'):
-        # If res is computed from input data, it will have the attribute.
-        base = res.meterstick_change_base
-        self.save_to_cache(key, base)
-      else:
-        # If res is read from cache, it won't have the attribute, but it must
-        # have been computed already so base has been saved in cache.
-        base = self.get_cached(key)
-    # Don't add suffix like "Jackknife" because point_est won't have it.
-    res = super(MetricWithCI, self).manipulate(res, melted, return_dataframe,
-                                               apply_name_tmpl)
-    return self.add_base_to_res(res, base) if self.confidence else res
-
   def compute_slices(self, df, split_by):
     std = super(MetricWithCI, self).compute_slices(df, split_by)
-    point_est = self.compute_child(df, split_by, melted=True)
+    point_est = self.compute_point_esitimate(df, split_by)
     res = point_est.join(utils.melt(std))
     if self.confidence:
       res[self.prefix +
@@ -1403,6 +1341,9 @@ class MetricWithCI(Operation):
       return res
     base = self.compute_change_base(df, split_by)
     return self.add_base_to_res(res, base)
+
+  def compute_point_esitimate(self, df, split_by):
+    return self.compute_child(df, split_by, melted=True)
 
   def compute_change_base(self,
                           df,
@@ -1442,6 +1383,102 @@ class MetricWithCI(Operation):
       warnings.simplefilter(action='ignore', category=UserWarning)
       res.meterstick_change_base = base
     return res
+
+  def compute_children(
+      self,
+      df: pd.DataFrame,
+      split_by=None,
+      melted=False,
+      return_dataframe=True,
+      cache_key=None,
+  ):
+    del melted, return_dataframe, cache_key  # unused
+    return self.compute_on_samples(self.get_samples(df, split_by), split_by)
+
+  def get_samples(self, df, split_by=None):
+    raise NotImplementedError
+
+  def compute_on_samples(
+      self, keyed_samples: Iterable[Tuple[Any, pd.DataFrame]], split_by=None
+  ):
+    """Iters through sample DataFrames and collects results.
+
+    Args:
+      keyed_samples: A tuple. The first element is the cache_key and the second
+        is the corresponding DataFrame. Remember a key should correspond to the
+        same data.
+      split_by: Something can be passed into DataFrame.group_by().
+
+    Returns:
+      List of results from samples.
+    """
+    estimates = []
+    for keyed_sample in keyed_samples:
+      try:
+        cache_key, sample = keyed_sample
+        if cache_key is None:
+          # If samples are unlikely to repeat, don't save res to self.cache.
+          res = self.children[0].compute_on(sample, split_by, melted=True)
+        else:
+          res = self.compute_child(
+              sample, split_by, melted=True, cache_key=cache_key
+          )
+        estimates.append(res)
+      except Exception as e:  # pylint: disable=broad-except
+        print(
+            'Warning: Failed on%s sample data for reason %s. If you see many '
+            'such failures, your data might be too sparse.'
+            % (self.name_tmpl.format(''), repr(e))
+        )
+    return estimates
+
+  def compute_on_children(self, children, split_by):
+    del split_by  # unused
+    bucket_estimates = pd.concat(children, axis=1, sort=False)
+    return self.get_stderrs_or_ci_half_width(bucket_estimates)
+
+  def get_stderrs_or_ci_half_width(self, bucket_estimates):
+    """Returns confidence interval information in an unmelted DataFrame."""
+    stderrs, dof = self.get_stderrs(bucket_estimates)
+    if self.confidence:
+      res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
+      res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']
+    else:
+      res = pd.DataFrame(stderrs, columns=[self.prefix + ' SE'])
+    res = utils.unmelt(res)
+    return res
+
+  @staticmethod
+  def get_stderrs(bucket_estimates):
+    dof = bucket_estimates.count(axis=1) - 1
+    return bucket_estimates.std(1), dof
+
+  def get_ci_width(self, stderrs, dof):
+    """You can return asymmetrical confidence interval."""
+    dof = dof.fillna(0).astype(int)  # Scipy might not recognize the Int64 type.
+    half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)
+    return half_width, half_width
+
+  def manipulate(
+      self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
+  ):
+    """Saves and restores the base in addition when has confidence."""
+    if self.confidence:
+      key = self.wrap_cache_key(self.cache_key)
+      key.add_extra_info('base')
+      if hasattr(res, 'meterstick_change_base'):
+        # If res is computed from input data, it will have the attribute.
+        base = res.meterstick_change_base
+        self.save_to_cache(key, base)
+      else:
+        # If res is read from cache, it won't have the attribute, but it must
+        # have been computed already so base has been saved in cache.
+        base = self.get_cached(key)
+    # Don't add suffix like "Jackknife" because point_est won't have it.
+    res = super(MetricWithCI, self).manipulate(
+        res, melted, return_dataframe, apply_name_tmpl or False
+    )
+    return self.add_base_to_res(res, base) if self.confidence else res
 
   def final_compute(self,
                     res,
@@ -1485,150 +1522,6 @@ class MetricWithCI(Operation):
     # pylint: enable=no-value-for-parameter
     return res
 
-  @staticmethod
-  def get_stderrs(bucket_estimates):
-    dof = bucket_estimates.count(axis=1) - 1
-    return bucket_estimates.std(1), dof
-
-  def get_ci_width(self, stderrs, dof):
-    """You can return asymmetrical confidence interval."""
-    dof = dof.fillna(0).astype(int)  # Scipy might not recognize the Int64 type.
-    half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)
-    return half_width, half_width
-
-  def get_stderrs_or_ci_half_width(self, bucket_estimates):
-    """Returns confidence interval information in an unmelted DataFrame."""
-    stderrs, dof = self.get_stderrs(bucket_estimates)
-    if self.confidence:
-      res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
-      res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']
-    else:
-      res = pd.DataFrame(stderrs, columns=[self.prefix + ' SE'])
-    res = utils.unmelt(res)
-    return res
-
-  def get_samples(self, df, split_by=None):
-    raise NotImplementedError
-
-  def can_precompute(self):
-    return False
-
-  def to_sql(self, table, split_by=None):
-    if not isinstance(self, (Jackknife, Bootstrap)):
-      raise NotImplementedError
-    # If self is not root, this function won't be called.
-    self._is_root_node = True
-    return super(MetricWithCI, self).to_sql(table, split_by)
-
-  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
-                              local_filter, with_data):
-    """Gets the SQL for Jackknife or Bootstrap.
-
-    The query is constructed by
-    1. Resample the table.
-    2. Compute the child Metric on the resampled data.
-    3. Compute the standard error from #2.
-    4. Compute the point estimate from original table.
-    5. sql.Join #3 and #4.
-    6. If metric has confidence level specified, we also get the degrees of
-      freedom so we can later compute the critical value of t distribution in
-      Python.
-    7. If metric only has one child and it's PercentChange or AbsoluteChange, we
-      also get the base values for comparison. They will be used in the
-      res.display().
-
-    Args:
-      table: The table we want to query from.
-      split_by: The columns that we use to split the data.
-      global_filter: The sql.Filters that can be applied to the whole Metric
-        tree.
-      indexes: The columns that we shouldn't apply any arithmetic operation.
-      local_filter: The sql.Filters that have been accumulated so far.
-      with_data: A global variable that contains all the WITH clauses we need.
-
-    Returns:
-      The SQL instance for metric, without the WITH clause component.
-      The global with_data which holds all datasources we need in the WITH
-        clause.
-    """
-    if not isinstance(self, (Jackknife, Bootstrap)):
-      raise NotImplementedError
-    # Confidence interval cannot be computed in SQL completely so the SQL
-    # generated below doesn't work correctly if self is not a root node.
-    if self.confidence and not self._is_root_node:
-      self._is_root_node = None
-      raise NotImplementedError
-    self._is_root_node = None
-
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
-
-    name = 'Jackknife' if isinstance(self, Jackknife) else 'Bootstrap'
-    self_copy = copy.deepcopy(self)
-    se, with_data = get_se(self_copy, table, split_by, global_filter, indexes,
-                           local_filter, with_data)
-    se_alias, se_rename = with_data.merge(sql.Datasource(se, name + 'SE'))
-
-    pt_est, with_data = self.children[0].get_sql_and_with_clause(
-        table, split_by, global_filter, indexes, local_filter, with_data)
-    pt_est_alias, pt_est_rename = with_data.merge(
-        sql.Datasource(pt_est, name + 'PointEstimate'))
-
-    columns = sql.Columns()
-    using = sql.Columns(se.groupby)
-    pt_est_col = []
-    for c in pt_est.columns:
-      if c in indexes.aliases:
-        using.add(c)
-      else:
-        pt_est_col.append(
-            sql.Column(
-                '%s.%s' % (pt_est_alias, pt_est_rename.get(c.alias, c.alias)),
-                alias=c.alias_raw))
-    se_cols = []
-    for c in se.columns:
-      if c not in indexes.aliases:
-        se_cols.append(
-            sql.Column(
-                '%s.%s' % (se_alias, se_rename.get(c.alias, c.alias)),
-                alias=c.alias_raw))
-    if self.confidence:
-      dof_cols = se_cols[1::2]
-      se_cols = se_cols[::2]
-      cols = zip(pt_est_col, se_cols, dof_cols)
-    else:
-      cols = zip(pt_est_col, se_cols)
-    columns.add(cols)
-
-    has_base_vals = False
-    if self.confidence:
-      child = self.children[0]
-      if len(self.children) == 1 and isinstance(
-          child, (PercentChange, AbsoluteChange)):
-        has_base_vals = True
-        base_metric = copy.deepcopy(child.children[0])
-        if child.where:
-          base_metric.add_where(child.where_raw)
-        base, with_data = base_metric.get_sql_and_with_clause(
-            table,
-            sql.Columns(split_by).add(child.extra_index),
-            global_filter,
-            indexes,
-            local_filter,
-            with_data,
-        )
-        base_alias, base_rename = with_data.merge(
-            sql.Datasource(base, '_ShouldAlreadyExists'))
-        columns.add(
-            sql.Column(
-                '%s.%s' % (base_alias, base_rename.get(c.alias, c.alias)),
-                alias=c.alias_raw) for c in base.columns.difference(indexes))
-
-    join = 'LEFT' if using else 'CROSS'
-    from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
-    if has_base_vals:
-      from_data = from_data.join(base_alias, join=join, using=using)
-    return sql.Sql(using.add(columns), from_data), with_data
-
   def compute_on_sql(
       self,
       table,
@@ -1639,6 +1532,7 @@ class MetricWithCI(Operation):
       cache_key=None,
       cache=None,
       batch_size=None,
+      return_dataframe=True,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
 
@@ -1666,10 +1560,12 @@ class MetricWithCI(Operation):
         initiate an empty dict.
       batch_size: The number of resamples to compute in one SQL run. It only has
         effect in the 'mixed' mode. It precedes self.batch_size.
+      return_dataframe: Not used. MetricWithCI always returns a DataFrame.
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
+    del return_dataframe  # not used
     self._runtime_batch_size = batch_size
     try:
       return super(MetricWithCI,
@@ -1775,6 +1671,211 @@ class MetricWithCI(Operation):
                            batch_size=None):
     """The return should be similar to compute_children()."""
     raise NotImplementedError
+
+  def to_sql(self, table, split_by=None):
+    if not isinstance(self, (Jackknife, Bootstrap)):
+      raise NotImplementedError
+    split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
+    # If self is not root, this function won't be called.
+    self._is_root_node = True
+    if self.has_been_preaggregated or not self.can_precompute():
+      if not self.where:
+        return super(MetricWithCI, self).to_sql(table, split_by)
+      table = sql.Sql(None, table, self.where)
+      util = copy.deepcopy(self)
+      util.where = None
+      return util.to_sql(table, split_by)
+
+    util, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
+    if self != util:
+      return util.to_sql(table, split_by)
+
+    util.where = None  # The filter has been taken care of in preaggregation.
+    util = utils.push_filters_to_leaf(util)
+    split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
+    all_split_by = (
+        split_by + list(utils.get_extra_split_by(util, True)) + [util.unit]
+    )
+    leaf = utils.get_leaf_metrics(util)
+    cols = [
+        l.get_sql_columns(l.where).set_alias(get_preaggregated_metric_var(l))
+        for l in leaf
+    ]
+    preagg = sql.Sql(cols, table, self.where, all_split_by)
+    util = get_preaggregated_metric_tree(util)
+    util.unit = sql.Column(util.unit).alias
+    split_by = sql.Columns(split_by).aliases
+    for m in util.traverse():
+      if isinstance(m, metrics.Metric):
+        m.extra_index = sql.Columns(m.extra_index).aliases
+        m.extra_split_by = sql.Columns(m.extra_split_by).aliases
+    if isinstance(util, Bootstrap):
+      # When each unit only has one row after preaggregation, we sample by rows.
+      if not utils.get_extra_split_by(util, True):
+        util.unit = None
+    else:
+      util.has_local_filter = any([l.where for l in leaf])
+    return util.to_sql(preagg, split_by)
+
+  def get_sql_and_with_clause(
+      self, table, split_by, global_filter, indexes, local_filter, with_data
+  ):
+    """Gets the SQL for Jackknife or Bootstrap.
+
+    The query is constructed by
+    1. Resample the table.
+    2. Compute the child Metric on the resampled data.
+    3. Compute the standard error from #2.
+    4. Compute the point estimate from original table.
+    5. sql.Join #3 and #4.
+    6. If metric has confidence level specified, we also get the degrees of
+      freedom so we can later compute the critical value of t distribution in
+      Python.
+    7. If metric only has one child and it's PercentChange or AbsoluteChange, we
+      also get the base values for comparison. They will be used in the
+      res.display().
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    # Confidence interval cannot be computed in SQL completely so the SQL
+    # generated below doesn't work correctly if self is not a root node.
+    if self.confidence and not self._is_root_node:
+      self._is_root_node = None
+      raise NotImplementedError
+    self._is_root_node = None
+
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    # global_filter has been applied in preaggregated data.
+    filters = (
+        sql.Filters(None) if self.has_been_preaggregated else global_filter
+    )
+
+    name = self.name_tmpl.format('').strip()
+    se, with_data = self.get_se_sql(
+        table,
+        split_by,
+        filters,
+        indexes,
+        with_data,
+    )
+    se_alias = with_data.merge(sql.Datasource(se, name + 'SE'))
+
+    pt_est, with_data = self.children[0].get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data
+    )
+    pt_est_alias = with_data.merge(
+        sql.Datasource(pt_est, name + 'PointEstimate')
+    )
+
+    columns = sql.Columns()
+    using = sql.Columns(se.groupby)
+    pt_est_col = []
+    for c in pt_est.columns:
+      if c in indexes.aliases:
+        using.add(c)
+      else:
+        pt_est_col.append(
+            sql.Column(f'{pt_est_alias}.{c.alias}', alias=c.alias_raw)
+        )
+    se_cols = []
+    for c in se.columns:
+      if c not in indexes.aliases:
+        se_cols.append(sql.Column(f'{se_alias}.{c.alias}', alias=c.alias_raw))
+    if self.confidence:
+      dof_cols = se_cols[1::2]
+      se_cols = se_cols[::2]
+      cols = zip(pt_est_col, se_cols, dof_cols)
+    else:
+      cols = zip(pt_est_col, se_cols)
+    columns.add(cols)
+
+    has_base_vals = False
+    if self.confidence:
+      child = self.children[0]
+      if len(self.children) == 1 and isinstance(
+          child, (PercentChange, AbsoluteChange)
+      ):
+        has_base_vals = True
+        base_metric = copy.deepcopy(child.children[0])
+        if child.where:
+          base_metric.add_where(child.where_raw)
+        base, with_data = base_metric.get_sql_and_with_clause(
+            table,
+            sql.Columns(split_by).add(child.extra_index),
+            global_filter,
+            indexes,
+            local_filter,
+            with_data,
+        )
+        base_alias = with_data.merge(
+            sql.Datasource(base, '_ShouldAlreadyExists')
+        )
+        columns.add(
+            sql.Column(f'{base_alias}.{c.alias}', alias=c.alias_raw)
+            for c in base.columns.difference(indexes)
+        )
+
+    join = 'LEFT' if using else 'CROSS'
+    from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
+    if has_base_vals:
+      from_data = from_data.join(base_alias, join=join, using=using)
+    return sql.Sql(using.add(columns), from_data), with_data
+
+  def get_se_sql(
+      self,
+      table,
+      split_by,
+      global_filter,
+      indexes,
+      with_data,
+  ):
+    """Gets the SQL query that computes the standard error and dof if needed."""
+    global_filter = sql.Filters(global_filter).add(self.where_raw)
+    self_copy = copy.deepcopy(self)  # self_copy might get modified in-place.
+    table = sql.Datasource(table)
+    if not table.is_table:
+      table.alias = table.alias or 'RawData'
+      table = with_data.add(table)
+    table, with_data = self_copy.get_resampled_data_sql(
+        table,
+        split_by,
+        global_filter,
+        indexes,
+        with_data,
+    )
+    return get_se_sql(
+        self_copy,
+        table,
+        split_by,
+        global_filter,
+        indexes,
+        with_data,
+    )
+
+  def get_resampled_data_sql(
+      self,
+      table,
+      split_by,
+      global_filter,
+      indexes,
+      with_data,
+  ):
+    raise NotImplementedError
+
+  def can_precompute(self):
+    return False
 
 
 class Jackknife(MetricWithCI):
@@ -1905,6 +2006,26 @@ class Jackknife(MetricWithCI):
         loo = loo.reorder_levels(split_by_with_unit)
       self.save_to_cache(key, loo)
 
+  def compute_children(
+      self,
+      df: pd.DataFrame,
+      split_by=None,
+      melted=False,
+      return_dataframe=True,
+      cache_key=None,
+  ):
+    if not self.can_precompute():
+      return super(Jackknife, self).compute_children(
+          df, split_by, melted, return_dataframe, cache_key
+      )
+    replicates = self.compute_child(
+        df,
+        split_by + [self.unit],
+        True,
+        cache_key=('_RESERVED', 'Jackknife', self.unit),
+    )
+    return [replicates.unstack(self.unit)]
+
   def get_samples(self, df, split_by=None, return_cache_key=False):
     """Yields leave-one-out (LOO) DataFrame with level value.
 
@@ -1940,23 +2061,6 @@ class Jackknife(MetricWithCI):
         key = ('_RESERVED', 'Jackknife', self.unit, lvl)
         yield key if return_cache_key else None, df_rest.reset_index()
 
-  def compute_children(self,
-                       df: pd.DataFrame,
-                       split_by=None,
-                       melted=False,
-                       return_dataframe=True,
-                       cache_key=None):
-    if not self.can_precompute():
-      return super(Jackknife,
-                   self).compute_children(df, split_by, melted,
-                                          return_dataframe, cache_key)
-    replicates = self.compute_child(
-        df,
-        split_by + [self.unit],
-        True,
-        cache_key=('_RESERVED', 'Jackknife', self.unit))
-    return [replicates.unstack(self.unit)]
-
   @staticmethod
   def get_stderrs(bucket_estimates):
     stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
@@ -1968,17 +2072,20 @@ class Jackknife(MetricWithCI):
     slice_and_units = sql.Sql(
         sql.Columns(split_by + [self.unit], distinct=True), table, self.where)
     slice_and_units = execute(str(slice_and_units))
+    # Columns got sanitized in SQL generation if they have special characters.
+    slice_and_units.columns = split_by + [self.unit]
     if split_by:
       slice_and_units.set_index(split_by, inplace=True)
     replicates = []
     unique_units = slice_and_units[self.unit].unique()
     if batch_size == 1:
-      loo_sql = sql.Sql(sql.Column('*', auto_alias=False), table)
+      loo_sql = sql.Sql(None, table, where=self.where)
+      where = copy.deepcopy(loo_sql.where)
       for unit in unique_units:
         loo_where = '%s != "%s"' % (self.unit, unit)
         if pd.api.types.is_numeric_dtype(slice_and_units[self.unit]):
           loo_where = '%s != %s' % (self.unit, unit)
-        loo_sql.where = sql.Filters((self.where, loo_where))
+        loo_sql.where = sql.Filters(where).add(loo_where)
         key = ('_RESERVED', 'Jackknife', self.unit, unit)
         loo = self.compute_child_sql(loo_sql, split_by, execute, False, mode,
                                      key)
@@ -1995,23 +2102,45 @@ class Jackknife(MetricWithCI):
         units = list(unique_units[i * batch_size:(i + 1) * batch_size])
         loo = sql.Sql(
             sql.Column('*', auto_alias=False),
-            sql.Datasource('UNNEST(%s)' % units, '_resample_idx').join(
-                table, on='_resample_idx != %s' % self.unit), self.where)
+            sql.Datasource('UNNEST(%s)' % units, 'resample_idx').join(
+                table, on='resample_idx != %s' % self.unit
+            ),
+            self.where,
+        )
         key = ('_RESERVED', 'Jackknife', self.unit, tuple(units))
-        loo = self.compute_child_sql(loo, split_by + ['_resample_idx'], execute,
-                                     True, mode, key)
+        loo = self.compute_child_sql(
+            loo, split_by + ['resample_idx'], execute, True, mode, key
+        )
         # If a slice doesn't have the unit in the input data, we should exclude
         # the slice in the loo.
         if split_by:
-          loo.index.set_names(self.unit, level='_resample_idx', inplace=True)
+          loo.index.set_names(self.unit, level='resample_idx', inplace=True)
           loo = slice_and_units.join(utils.unmelt(loo), how='inner')
           loo = utils.melt(loo).unstack(self.unit)
         else:
-          loo = loo.unstack('_resample_idx')
+          loo = loo.unstack('resample_idx')
         replicates.append(loo)
     return replicates
 
+  def get_resampled_data_sql(
+      self,
+      table,
+      split_by,
+      global_filter,
+      indexes,
+      with_data,
+  ):
+    """Gets the SQL query that resamples the original data."""
+    if self.has_been_preaggregated:
+      return get_jackknife_data_fast(
+          self, table, split_by, global_filter, indexes, with_data
+      )
+    return get_jackknife_data_general(
+        self, table, split_by, global_filter, with_data
+    )
+
   def can_precompute(self):
+    """If all leafs can be expressed as Sum or Count, LOO can be precomputed."""
     return self.enable_optimization and is_metric_precomputable(self)
 
 
@@ -2068,13 +2197,14 @@ class Bootstrap(MetricWithCI):
       n_replicates: int = 10000,
       confidence: Optional[float] = None,
       enable_optimization=True,
+      name_tmpl='{} Bootstrap',
       **kwargs,
   ):
     super(Bootstrap, self).__init__(
         unit,
         child,
         confidence,
-        '{} Bootstrap',
+        name_tmpl,
         additional_fingerprint_attrs=['n_replicates'],
         enable_optimization=enable_optimization,
         **kwargs,
@@ -2129,11 +2259,6 @@ class Bootstrap(MetricWithCI):
     preagg, preagg_df = get_preaggregated_data(self, df, split_by)
     return self.compute_util_metric_on(preagg, preagg_df, split_by)
 
-  def can_precompute(self):
-    return (
-        self.unit and self.enable_optimization and is_metric_precomputable(self)
-    )
-
   def get_samples(self, df, split_by=None):
     """Resamples for Bootstrap. When samples are likely to repeat, cache."""
     # If there is no extra split_by added, each unit will correspond to one row
@@ -2177,28 +2302,422 @@ class Bootstrap(MetricWithCI):
     if not sql.Datasource(table).is_table:
       table = with_data.add(sql.Datasource(table, 'BootstrapData'))
     with_data2 = copy.deepcopy(with_data)
-    _, with_data = get_bootstrap_data(util_metric, table, sql.Columns(split_by),
-                                      global_filter, sql.Filters(), with_data)
+    _, with_data = util_metric.get_resampled_data_sql(
+        table,
+        sql.Columns(split_by),
+        global_filter,
+        None,
+        with_data,
+    )
     resampled = with_data.children.popitem()[1]
     resampled.with_data = with_data
     replicates = []
     for _ in range(self.n_replicates // batch_size):
-      bst = self.children[0].compute_on_sql(resampled,
-                                            ['_resample_idx'] + split_by,
-                                            execute, True, mode)
-      replicates.append(bst.unstack('_resample_idx'))
+      bst = self.children[0].compute_on_sql(
+          resampled, ['resample_idx'] + split_by, execute, True, mode
+      )
+      replicates.append(bst.unstack('resample_idx'))
     util_metric.n_replicates = self.n_replicates % batch_size
     if util_metric.n_replicates:
-      _, with_data2 = get_bootstrap_data(util_metric, table,
-                                         sql.Columns(split_by), global_filter,
-                                         sql.Filters(), with_data2)
+      _, with_data2 = util_metric.get_resampled_data_sql(
+          table,
+          sql.Columns(split_by),
+          global_filter,
+          None,
+          with_data2,
+      )
       resampled = with_data2.children.popitem()[1]
       resampled.with_data = with_data2
-      bst = self.children[0].compute_on_sql(resampled,
-                                            ['_resample_idx'] + split_by,
-                                            execute, True, mode)
-      replicates.append(bst.unstack('_resample_idx'))
+      bst = self.children[0].compute_on_sql(
+          resampled, ['resample_idx'] + split_by, execute, True, mode
+      )
+      replicates.append(bst.unstack('resample_idx'))
     return replicates
+
+  def get_resampled_data_sql(
+      self, table, split_by, global_filter, indexes, with_data
+  ):
+    """Gets self.n_replicates bootstrap resamples."""
+    del indexes  # not used
+    if not self.unit:
+      return get_bootstrap_data_no_unit(
+          self, table, split_by, global_filter, with_data
+      )
+    return get_bootstrap_data_with_unit(
+        self,
+        table,
+        split_by,
+        global_filter,
+        with_data,
+    )
+
+  def can_precompute(self):
+    return (
+        self.unit and self.enable_optimization and is_metric_precomputable(self)
+    )
+
+
+class PoissonBootstrap(Bootstrap):
+  """Class for PoissonBootstrap estimates of standard errors.
+
+  The only difference to Bootstrap is that PoissonBootstrap uses Poisson(1)
+  instead of multinomial distribution in resampling. See
+  https://www.unofficialgoogledatascience.com/2015/08/an-introduction-to-poisson-bootstrap26.html
+  for an introduction.
+  """
+
+  def __init__(
+      self,
+      unit: Optional[Text] = None,
+      child: Optional[metrics.Metric] = None,
+      n_replicates: int = 10000,
+      confidence: Optional[float] = None,
+      enable_optimization=True,
+      **kwargs,
+  ):
+    super(PoissonBootstrap, self).__init__(
+        unit,
+        child,
+        n_replicates,
+        confidence,
+        enable_optimization,
+        '{} Poisson Bootstrap',
+        **kwargs
+    )
+
+  def get_samples(self, df, split_by=None):
+    """Resamples for PoissonBootstrap.
+
+    There are three cases here.
+    1. When no unit, then by the definition of can_precompute(), optimization is
+    off. We simply get sample weights for each row than duplicate the rows by
+    the weight.
+    2. When there is unit and optimization is disabled, then we get the sample
+    weight for each split_by + unit slice, then duplicate the slice by the
+    weight.
+    3. If there is optimization, which means df is a preaggregated data and self
+    only has Sum/Count/Max/Min as leaf nodes. The columns names in preaggregated
+    data starts with 'sum_', 'count_', 'max_' and 'min_', indicating what type
+    of Metric will consume them. For columns that starts with 'sum_' or
+    'count_', we simply multiply them by the weight, which will give us the sum
+    we need. For columns that starts with 'max_' and 'min_', no action needed.
+    If the number of unique units are less than 7, we enable caching for samples
+    we generate.
+
+    Args:
+      df: The DataFrame to compute on.
+      split_by: The columns that we use to split the data.
+
+    Yields:
+      A cache_key if it makes sense to cache otherwise None, and resampled data.
+    """
+    n_split_by = (
+        len(split_by)
+        + len([self.unit] if self.unit else [])
+        + len(utils.get_extra_split_by(self, True))
+    )
+    var_cols = df.columns[n_split_by:]
+    sum_or_ct_cols = [
+        c for c in var_cols if c.startswith('sum_') or c.startswith('count_')
+    ]
+    if self.unit:
+      grp_by = split_by + [self.unit]
+      grped = df.groupby(grp_by, observed=True)
+      idx_rows = np.array([*grped.indices.values()], dtype=object)
+      idx_vals = grped.first().index
+      n = len(grped.indices)
+      weight_col = utils.get_unique_prefix(df)
+      # Poisson(1) generates a number under 6 with >99.9% probability. The
+      # default n_replicates is 10000. We cache when n < 7 because 7^5 > 10000
+      # while 6^5 < 10000.
+      use_cache = n < 7
+      sampled = set()
+    else:
+      n = len(df)
+      df = df.reset_index()
+    for _ in range(self.n_replicates):
+      # If there is no extra split_by added, each unit will correspond to one
+      # row in the preaggregated data so we can just sample by rows.
+      if self.unit is None or (
+          self.has_been_preaggregated
+          and not utils.get_extra_split_by(self, True)
+      ):
+        weights = self.get_sample_weight(n)
+        # Make index unique and equals to row number so we can use iloc below.
+        yield None, df.iloc[df.index.repeat(weights)]
+      elif not self.has_been_preaggregated:
+        weights = self.get_sample_weight(n)
+        cache_key = None
+        if use_cache:
+          cache_key = tuple(weights)
+          if cache_key in sampled:
+            yielded = True
+            yield cache_key, None
+          else:
+            sampled.add(cache_key)
+            yielded = False
+        if not use_cache or not yielded:
+          sampled_rows = (
+              np.concatenate(idx_rows.repeat(weights, 0))
+              if weights.any()
+              else []
+          )
+          yield cache_key, df.iloc[sampled_rows]
+      else:
+        weights = self.get_sample_weight(n)
+        cache_key = None
+        if use_cache:
+          cache_key = tuple(weights)
+          if cache_key in sampled:
+            yielded = True
+            yield cache_key, None
+          else:
+            sampled.add(cache_key)
+            yielded = False
+        if not use_cache or not yielded:
+          weights = pd.Series(weights, index=idx_vals, name=weight_col)
+          selected = weights > 0
+          sampled_rows = (
+              np.concatenate(idx_rows[selected]) if selected.any() else []
+          )
+          weights = weights[selected]
+          resampled = df.iloc[sampled_rows].set_index(grp_by)
+          if not resampled.empty:
+            resampled = resampled.join(weights)
+            resampled[sum_or_ct_cols] *= resampled[[weight_col]].values
+          yield cache_key, resampled.reset_index()
+
+  def get_sample_weight(self, n):
+    return np.random.poisson(size=n)
+
+  def get_resampled_data_sql(
+      self, table, split_by, global_filter, indexes, with_data
+  ):
+    """Gets self.n_replicates Poisson bootstrap resamples.
+
+    The function makes three or four subqueries. The first one adds a uniformly
+    distributed random variable to the data. The second one uses the variable to
+    get sample weights from Poisson(1) distribution. The rest uses the weights
+    to resample the original table.
+    The first subquery looks like
+      PoissonBootstrapDataWithUniformVar AS (SELECT
+        *,
+        RAND() AS poisson_bootstrap_uniform_var
+      FROM T
+      JOIN
+      UNNEST(GENERATE_ARRAY(1, n_replicates)) AS resample_idx).
+    There are two variations. First, when we know what columns are in the table
+    because the table has been preaggregated, then we explicitly SELECT those
+    columns instead of using '*'. Second, RAND() is used when sampling by row.
+    When we need to sample by groups, we use
+    FARM_FINGERPRINT(CONCAT(CAST(grp AS STRING), CAST(resample_idx AS STRING)))
+      / 0xFFFFFFFFFFFFFFFF + 0.5
+    to get the uniformly distributed random variable. The hashing makes sure
+    same group gets the same weight.
+
+    The second query looks like
+      PoissonBootstrapDataWithPoissonWeight AS (SELECT
+        * EXCEPT(poisson_bootstrap_uniform_var),
+        CASE
+          WHEN poisson_bootstrap_uniform_var <= 0.7357588823428847 THEN 1
+          WHEN poisson_bootstrap_uniform_var <= 0.9196986029286058 THEN 2
+          WHEN poisson_bootstrap_uniform_var <= 0.9810118431238462 THEN 3
+          WHEN poisson_bootstrap_uniform_var <= 0.9963401531726563 THEN 4
+          WHEN poisson_bootstrap_uniform_var <= 0.9994058151824183 THEN 5
+          WHEN poisson_bootstrap_uniform_var <= 0.999916758850712 THEN 6
+          WHEN poisson_bootstrap_uniform_var <= 0.9999897508033253 THEN 7
+          WHEN poisson_bootstrap_uniform_var <= 0.999998874797402 THEN 8
+          WHEN poisson_bootstrap_uniform_var <= 0.9999998885745217 THEN 9
+          WHEN poisson_bootstrap_uniform_var <= 0.9999999899522336 THEN 10
+          WHEN poisson_bootstrap_uniform_var <= 0.9999999991683892 THEN 11
+          WHEN poisson_bootstrap_uniform_var <= 0.9999999999364022 THEN 12
+          WHEN poisson_bootstrap_uniform_var <= 0.9999999999954802 THEN 13
+          WHEN poisson_bootstrap_uniform_var <= 0.9999999999997 THEN 14
+          WHEN poisson_bootstrap_uniform_var <= 0.9999999999999813 THEN 15
+          WHEN poisson_bootstrap_uniform_var <= 0.9999999999999989 THEN 16
+          WHEN poisson_bootstrap_uniform_var <= 0.9999999999999999 THEN 17
+          ELSE 18
+        END AS poisson_bootstrap_weight
+      FROM PoissonBootstrapDataWithUniformVar
+      WHERE
+      poisson_bootstrap_uniform_var > 0.36787944117144245)
+    Again when we know column names, we will explicitly SELECT them instead of
+    using '*'. The cutoff values are obtained from
+    scipy.stats.poisson.cdf(range(0, 19), 1) / scipy.stats.poisson.cdf(19, 1).
+    The cutoff value for 0 is directly used in the WHERE clause.
+
+    The rest subqueries depend on if the Metric has been preaggregated. If not,
+    we use
+      PoissonBootstrapResampledData AS (SELECT
+        * EXCEPT(poisson_bootstrap_weight, poisson_bootstrap_weight_unnested)
+      FROM PoissonBootstrapDataWithPoissonWeight
+      JOIN
+      UNNEST(GENERATE_ARRAY(1, poisson_bootstrap_weight))
+        AS poisson_bootstrap_weight_unnested),
+      ResampledResults AS (SELECT
+        resample_idx,
+        SUM(x) AS sum_x
+      FROM PoissonBootstrapResampledData
+      GROUP BY resample_idx)
+    to get the resampled data.
+    If the data has been preaggregated, it means all leaf Metrics are one of
+    Sum/Count/Max/Min and the columns in the table, except for split_by, all
+    start with 'sum_', 'count_', 'max_' or 'min_'. The prefix indicates how the
+    column will be consumed. For columns starting with 'sum_' or 'count_',
+    their values will be summed so can directly multiply the weights to them.
+    For columns starting with 'max_' or 'min_' we don't need to do anything. So
+    the query looks like
+      PoissonBootstrapResampledData AS (SELECT
+        split_by,
+        unit,
+        max_x,
+        min_y,
+        sum_x * poisson_bootstrap_weight AS sum_x,
+        count_x * poisson_bootstrap_weight AS count_x,
+        resample_idx
+      FROM PoissonBootstrapDataWithPoissonWeight).
+
+    Args:
+      table: The table we want to resample.
+      split_by: The columns that we use to split the data.
+      global_filter: All the filters that applied to the Bootstrap.
+      indexes: Unused.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The alias of the table in the WITH clause that has all resampled data.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    del indexes  # unused
+    if self.has_been_preaggregated:
+      uniform_columns = sql.Columns(with_data[table].all_columns.aliases).add(
+          'resample_idx'
+      )
+    else:
+      table = sql.Datasource(table)
+      if not table.is_table:
+        table.alias = table.alias or 'RawData'
+        table = with_data.add(table)
+      uniform_columns = sql.Columns(sql.Column('*', auto_alias=False))
+    global_filter = sql.Filters(global_filter).add(self.where_raw)
+    uniform_var = sql.Column('RAND()', alias='poisson_bootstrap_uniform_var')
+    split_by_cols = (
+        split_by.aliases
+        if self.has_been_preaggregated
+        else split_by.original_columns
+    )
+    if self.unit:
+      cols = ', '.join(
+          map(
+              'CAST({} AS STRING)'.format,
+              (split_by_cols or []) + [self.unit, 'resample_idx'],
+          )
+      )
+      uniform_var = sql.Column(
+          f'FARM_FINGERPRINT(CONCAT({cols})) / 0xFFFFFFFFFFFFFFFF + 0.5',
+          alias='poisson_bootstrap_uniform_var',
+      )
+    uniform_columns.add(uniform_var)
+    replicates = sql.Datasource(
+        'UNNEST(GENERATE_ARRAY(1, %s))' % self.n_replicates, 'resample_idx'
+    )
+    table_with_uniform_var = sql.Sql(
+        uniform_columns, sql.Join(table, replicates), global_filter
+    )
+    table_with_uniform_var_alias = with_data.add(
+        sql.Datasource(
+            table_with_uniform_var, 'PoissonBootstrapDataWithUniformVar'
+        )
+    )
+
+    if self.has_been_preaggregated:
+      poisson_weight_columns = sql.Columns(uniform_columns.aliases).difference(
+          'poisson_bootstrap_uniform_var'
+      )
+    else:
+      poisson_weight_columns = sql.Columns(
+          sql.Column(
+              '* EXCEPT(poisson_bootstrap_uniform_var)', auto_alias=False
+          )
+      )
+    # The cutoff values are obtained from
+    # scipy.stats.poisson.cdf(range(0, 19), 1) / scipy.stats.poisson.cdf(19, 1).
+    # The cutoff value for 0 is not used here but used in the filter of
+    # table_with_poisson_weight below.
+    poisson_weight = sql.Column(
+        """CASE
+    WHEN poisson_bootstrap_uniform_var <= 0.7357588823428847 THEN 1
+    WHEN poisson_bootstrap_uniform_var <= 0.9196986029286058 THEN 2
+    WHEN poisson_bootstrap_uniform_var <= 0.9810118431238462 THEN 3
+    WHEN poisson_bootstrap_uniform_var <= 0.9963401531726563 THEN 4
+    WHEN poisson_bootstrap_uniform_var <= 0.9994058151824183 THEN 5
+    WHEN poisson_bootstrap_uniform_var <= 0.999916758850712 THEN 6
+    WHEN poisson_bootstrap_uniform_var <= 0.9999897508033253 THEN 7
+    WHEN poisson_bootstrap_uniform_var <= 0.999998874797402 THEN 8
+    WHEN poisson_bootstrap_uniform_var <= 0.9999998885745217 THEN 9
+    WHEN poisson_bootstrap_uniform_var <= 0.9999999899522336 THEN 10
+    WHEN poisson_bootstrap_uniform_var <= 0.9999999991683892 THEN 11
+    WHEN poisson_bootstrap_uniform_var <= 0.9999999999364022 THEN 12
+    WHEN poisson_bootstrap_uniform_var <= 0.9999999999954802 THEN 13
+    WHEN poisson_bootstrap_uniform_var <= 0.9999999999997 THEN 14
+    WHEN poisson_bootstrap_uniform_var <= 0.9999999999999813 THEN 15
+    WHEN poisson_bootstrap_uniform_var <= 0.9999999999999989 THEN 16
+    WHEN poisson_bootstrap_uniform_var <= 0.9999999999999999 THEN 17
+    ELSE 18
+  END""",
+        alias='poisson_bootstrap_weight',
+    )
+    poisson_weight_columns.add(poisson_weight)
+    table_with_poisson_weight = sql.Sql(
+        poisson_weight_columns,
+        table_with_uniform_var_alias,
+        sql.Filter('poisson_bootstrap_uniform_var > 0.36787944117144245'),
+    )
+    table_with_poisson_weight_alias = with_data.add(
+        sql.Datasource(
+            table_with_poisson_weight, 'PoissonBootstrapDataWithPoissonWeight'
+        )
+    )
+
+    if self.has_been_preaggregated:
+      poisson_sampled_columns = sql.Columns()
+      for c in poisson_weight_columns:
+        if c.alias == 'poisson_bootstrap_weight':
+          continue
+        elif c.alias in split_by.aliases or not (
+            c.alias.startswith('sum_') or c.alias.startswith('count_')
+        ):
+          poisson_sampled_columns.add(c.alias)
+        else:
+          col = c * sql.Column('poisson_bootstrap_weight')
+          poisson_sampled_columns.add(col.set_alias(c.alias))
+        poisson_sampled_table = sql.Sql(
+            poisson_sampled_columns, table_with_poisson_weight_alias
+        )
+    else:
+      poisson_sampled_columns = sql.Columns(
+          sql.Column(
+              (
+                  '* EXCEPT(poisson_bootstrap_weight,'
+                  ' poisson_bootstrap_weight_unnested)'
+              ),
+              auto_alias=False,
+          )
+      )
+      replicates = sql.Datasource(
+          'UNNEST(GENERATE_ARRAY(1, poisson_bootstrap_weight))',
+          'poisson_bootstrap_weight_unnested',
+      )
+      poisson_sampled_table = sql.Sql(
+          poisson_sampled_columns,
+          sql.Join(table_with_poisson_weight_alias, replicates),
+      )
+
+    poisson_sampled_table_alias = with_data.add(
+        sql.Datasource(poisson_sampled_table, 'PoissonBootstrapResampledData')
+    )
+    return poisson_sampled_table_alias, with_data
 
 
 def get_preaggregated_data(m, df, split_by):
@@ -2287,56 +2806,34 @@ def get_preaggregated_metric_var(m: metrics.Metric):
   }
   name = tmpl_lookup[type(m)] % m.var
   name = f'{name} where {m.where}' if m.where else name
-  name = name.replace('$', 'macro_')
-  return name if name == sql.escape_alias(name) else f'`{name}`'
+  return sql.Column(name).alias
 
 
-def get_se(metric, table, split_by, global_filter, indexes, local_filter,
-           with_data):
+def get_se_sql(
+    metric, table, split_by, global_filter, indexes, with_data
+):
   """Gets the SQL query that computes the standard error and dof if needed."""
-  if isinstance(metric, Jackknife) and metric.can_precompute():
-    util, _ = utils.get_fully_expanded_equivalent_metric_tree(metric)
-    if util != metric:
-      return get_se(util, table, split_by, global_filter, indexes, local_filter,
-                    with_data)
-
-  global_filter = sql.Filters([global_filter, local_filter]).add(metric.where)
-  local_filter = sql.Filters()
-
-  if isinstance(metric, Jackknife):
-    if metric.can_precompute():
-      metric = copy.deepcopy(metric)  # We'll modify the metric tree in-place.
-    table, with_data = get_jackknife_data(metric, table, split_by,
-                                          global_filter, indexes, local_filter,
-                                          with_data)
-  else:
-    table, with_data = get_bootstrap_data(metric, table, split_by,
-                                          global_filter, local_filter,
-                                          with_data)
-
-  if isinstance(metric, Jackknife) and metric.can_precompute():
-    split_by = adjust_indexes_for_jk_fast(split_by)
-    indexes = adjust_indexes_for_jk_fast(indexes)
-    # global_filter has been removed from all Metrics when precomputeing LOO.
-    global_filter = sql.Filters(None)
-
   samples, with_data = metric.children[0].get_sql_and_with_clause(
       table,
-      sql.Columns(split_by).add('_resample_idx'), global_filter,
-      sql.Columns(indexes).add('_resample_idx'), local_filter, with_data)
-  samples_alias, rename = with_data.merge(
-      sql.Datasource(samples, 'ResampledResults'))
+      sql.Columns(split_by).add('resample_idx'),
+      global_filter,
+      sql.Columns(indexes).add('resample_idx'),
+      sql.Filters(),
+      with_data,
+  )
+  samples_alias = with_data.merge(sql.Datasource(samples, 'ResampledResults'))
 
   columns = sql.Columns()
   groupby = sql.Columns(
-      (c.alias for c in samples.groupby if c != '_resample_idx'))
+      (c.alias for c in samples.groupby if c != 'resample_idx')
+  )
   for c in samples.columns:
-    if c == '_resample_idx':
+    if c == 'resample_idx':
       continue
     elif c in indexes.aliases:
       groupby.add(c.alias)
     else:
-      alias = rename.get(c.alias, c.alias)
+      alias = c.alias
       se = sql.Column(c.alias, 'STDDEV_SAMP({})',
                       '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, Jackknife):
@@ -2347,88 +2844,6 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
       if metric.confidence:
         columns.add(sql.Column(alias, 'COUNT({}) - 1', '%s dof' % c.alias_raw))
   return sql.Sql(columns, samples_alias, groupby=groupby), with_data
-
-
-def preaggregate_if_possible(metric, table, split_by, global_filter, indexes,
-                             with_data):
-  """Preaggregates data to make the resampled table small.
-
-  For Jackknife and Bootstrap over group, we may preaggegate the data to make
-  the query more efficient, though there are some requirements.
-  1. All leaf Metrics need to be Sum or Count. Namely, metric.can_precompute()
-    is True.
-  2. There cannot be any local filter in the metric tree, otherwise the filter
-    might need access to original rows. Technically it's still possible to
-    preaggregate when there are local filters, but we impose this requirement
-    for code simplicity.
-
-  If preaggregatable, we precompute the sum and count over all split_bys used by
-  the metric tree, clear all the local filters, and replace Count(x) with
-  Sum(preaggregated_x).
-
-  Args:
-    metric: An instance of Jackknife or Bootstrap.
-    table: The table we want to query from.
-    split_by: The columns that we use to split the data.
-    global_filter: The filters that applied to the data for resampling..
-    indexes: The columns that we shouldn't apply any arithmetic operation.
-    with_data: A global variable that contains all the WITH clauses we need.
-
-  Returns:
-    If preaggregation is possible, we return
-      Modified metric tree.
-      The alias of the preaggregated table in the with_data.
-      Modified split_by.
-      Modified indexes.
-      with_data, with preaggregated added.
-    Otherwise, they are returned untouched.
-  """
-  if not isinstance(metric, Jackknife) and not (isinstance(metric, Bootstrap)
-                                                and metric.unit):
-    return metric, table, split_by, global_filter, indexes, with_data
-  if isinstance(metric, Jackknife) and not metric.can_precompute():
-    return metric, table, split_by, global_filter, indexes, with_data
-
-  all_split_by = sql.Columns(indexes).add(utils.get_extra_split_by(metric)).add(
-      metric.unit)
-  cols = sql.Columns()
-  for m in metric.traverse():
-    if sql.Filters(m.where).remove(global_filter):
-      return metric, table, split_by, global_filter, indexes, with_data
-    if isinstance(m, metrics.Sum):
-      cols.add(sql.Column(m.var, 'SUM({})'))
-    elif isinstance(m, metrics.Count):
-      cols.add(sql.Column(m.var, 'COUNT({})'))
-
-  metric = copy.deepcopy(metric)
-  metric.unit = sql.Column(metric.unit).alias
-  todo = [metric]
-  while todo:
-    curr = todo.pop()
-    curr.where = None
-    new_children = list(curr.children)
-    for i, m in enumerate(curr.children):
-      if not isinstance(m, metrics.Metric):
-        continue
-      todo.append(m)
-      if isinstance(m, Operation):
-        m.extra_index = [sql.Column(i, alias=i).alias for i in m.extra_index]
-        m.extra_split_by = [
-            sql.Column(i, alias=i).alias for i in m.extra_split_by
-        ]
-        if isinstance(m, MH):
-          m.stratified_by = sql.Column(m.stratified_by).alias
-      elif isinstance(m, metrics.Sum):
-        m.var = sql.Column(m.var, 'SUM({})').alias
-      elif isinstance(m, metrics.Count):
-        new_children[i] = metrics.Sum(sql.Column(m.var, 'COUNT({})').alias)
-    curr.children = new_children
-
-  preagg = sql.Sql(cols, table, global_filter, all_split_by)
-  preagg_alias = with_data.add(sql.Datasource(preagg, 'Preaggregated'))
-
-  return metric, preagg_alias, sql.Columns(
-      split_by.aliases), sql.Filters(), sql.Columns(indexes.aliases), with_data
 
 
 def adjust_indexes_for_jk_fast(indexes):
@@ -2454,21 +2869,9 @@ def adjust_indexes_for_jk_fast(indexes):
   return sql.Columns(ind)
 
 
-def get_jackknife_data(metric, table, split_by, global_filter, indexes,
-                       local_filter, with_data):
-  table = sql.Datasource(table)
-  if not table.is_table:
-    table.alias = table.alias or 'RawData'
-    table = with_data.add(table)
-  if metric.can_precompute():
-    return get_jackknife_data_fast(metric, table, split_by, global_filter,
-                                   indexes, local_filter, with_data)
-  return get_jackknife_data_general(metric, table, split_by, global_filter,
-                                    local_filter, with_data)
-
-
-def get_jackknife_data_general(metric, table, split_by, global_filter,
-                               local_filter, with_data):
+def get_jackknife_data_general(
+    metric, table, split_by, global_filter, with_data
+):
   """Gets jackknife samples.
 
   If the leave-one-out estimates can be precomputed, see the doc of
@@ -2476,39 +2879,38 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
   Otherwise for general cases, the SQL is constructed as
   1. if split_by is None:
     WITH
-    Buckets AS (SELECT DISTINCT unit AS _resample_idx
+    Buckets AS (SELECT DISTINCT unit AS resample_idx
     FROM $DATA
-    WHERE filter),
+    WHERE global_filter),
     JackknifeResammpledData AS (SELECT
       *
     FROM Buckets
     CROSS JOIN
     $DATA
     WHERE
-    _resample_idx != unit AND filter)
+    resample_idx != unit AND global_filter)
 
   2. if split_by is not None:
     WITH
     Buckets AS (SELECT DISTINCT
-      split_by AS _jk_split_by,
-      unit AS _resample_idx
+      split_by AS jk_split_by,
+      unit AS resample_idx
     FROM $DATA
-    WHERE filter
-    GROUP BY _jk_split_by),
+    WHERE global_filter
+    GROUP BY jk_split_by),
     JackknifeResammpledData AS (SELECT
       *
     FROM Buckets
     JOIN
     $DATA
-    ON _jk_split_by = split_by AND _resample_idx != unit
-    WHERE filter)
+    ON jk_split_by = split_by AND resample_idx != unit
+    WHERE global_filter)
 
   Args:
     metric: An instance of Jackknife.
     table: The table we want to query from.
     split_by: The columns that we use to split the data.
     global_filter: The filters that can be applied to the whole Metric tree.
-    local_filter: The filters that have been accumulated so far.
     with_data: A global variable that contains all the WITH clauses we need.
 
   Returns:
@@ -2516,61 +2918,70 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
     The global with_data which holds all datasources we need in the WITH clause.
   """
   unit = metric.unit
-  unique_units = sql.Columns((sql.Column(unit, alias='_resample_idx')),
-                             distinct=True)
-  where = sql.Filters(global_filter).add(local_filter)
+  unique_units = sql.Columns(
+      (sql.Column(unit, alias='resample_idx')), distinct=True
+  )
   if split_by:
     groupby = sql.Columns(
-        (sql.Column(c.expression, alias='_jk_%s' % c.alias) for c in split_by))
+        (sql.Column(c.expression, alias='jk_%s' % c.alias) for c in split_by)
+    )
     cols = sql.Columns(groupby.add(unique_units), distinct=True)
-    buckets = sql.Sql(cols, table, where)
+    buckets = sql.Sql(cols, table, global_filter)
     buckets_alias = with_data.add(sql.Datasource(buckets, 'Buckets'))
     on = sql.Filters(('%s.%s = %s' % (buckets_alias, c.alias, s.expression)
                       for c, s in zip(groupby, split_by)))
-    on.add('_resample_idx != %s' % unit)
+    on.add('resample_idx != %s' % unit)
     jk_from = sql.Join(buckets_alias, table, on)
     jk_data_table = sql.Sql(
-        sql.Columns(sql.Column('*', auto_alias=False)), jk_from, where=where)
+        sql.Columns(sql.Column('*', auto_alias=False)),
+        jk_from,
+        where=global_filter,
+    )
     jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
     jk_data_table_alias = with_data.add(jk_data_table)
   else:
-    buckets = sql.Sql(unique_units, table, where=where)
+    buckets = sql.Sql(unique_units, table, where=global_filter)
     buckets_alias = with_data.add(sql.Datasource(buckets, 'Buckets'))
     jk_from = sql.Join(buckets_alias, table, join='CROSS')
     jk_data_table = sql.Sql(
         sql.Column('*', auto_alias=False),
         jk_from,
-        where=sql.Filters('_resample_idx != %s' % unit).add(where))
+        where=sql.Filters('resample_idx != %s' % unit).add(global_filter),
+    )
     jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
     jk_data_table_alias = with_data.add(jk_data_table)
 
   return jk_data_table_alias, with_data
 
 
-def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
-                            local_filter, with_data):
-  # When there is any index added by Operation, we need adjustment.
-  if split_by == sql.Columns(indexes):
-    return get_jackknife_data_fast_no_adjustment(metric, table, global_filter,
-                                                 indexes, local_filter,
-                                                 with_data)
+def get_jackknife_data_fast(
+    metric, table, split_by, global_filter, indexes, with_data
+):
+  # When there is any filter or Operation inside Jackknife, we need adjustments.
+  if getattr(metric, 'has_local_filter', False) or split_by != sql.Columns(
+      indexes
+  ):
+    return get_jackknife_data_fast_with_adjustment(
+        metric, table, split_by, global_filter, indexes, with_data
+    )
   return get_jackknife_data_fast_no_adjustment(
-      metric, table, global_filter, indexes, local_filter, with_data
+      metric, table, global_filter, indexes, with_data
   )
 
 
-def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
-                                          local_filter, with_data):
+def get_jackknife_data_fast_no_adjustment(
+    metric, table, global_filter, indexes, with_data
+):
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
   If all the leaf Metrics are Sum and/or Count, we can compute the
-  leave-one-out (LOO) estimates faster. If there is no index added by Operation,
-  then no adjustment for slices is needed. The query is just like
+  leave-one-out (LOO) estimates faster. If no adjustment for slices is needed,
+  the query will be like
   WITH
-  LOO AS (SELECT DISTINCT
+  LOO AS (SELECT
     unrenamed_split_by,
     $RenamedSplitByIfAny AS renamed_split_by,
-    unit AS _resample_idx,
+    unit AS resample_idx,
     SUM(X) OVER (PARTITION BY split_by) -
       SUM(X) OVER (PARTITION BY split_by, unit) AS `sum(X)`,
     SAFE_DIVIDE(
@@ -2580,55 +2991,50 @@ def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
         COUNT(X) OVER (PARTITION BY split_by, unit)) AS `mean(X)`
   FROM $DATA
   WHERE
-  filters),
+  global_filter),
   ResampledResults AS (SELECT
     split_by,
-    _resample_idx,
+    resample_idx,
     SUM(`sum(X)`) AS `sum(X)`,
     SUM(`mean(X)`) AS `mean(X)`
   FROM LOO
-  GROUP BY unrenamed_split_by, renamed_split_by, _resample_idx)
+  GROUP BY unrenamed_split_by, renamed_split_by, resample_idx)
 
   Args:
     metric: An instance of Jackknife.
     table: The table we want to query from.
     global_filter: The filters that can be applied to the whole Metric tree.
     indexes: The columns that we shouldn't apply any arithmetic operation.
-    local_filter: The filters that have been accumulated so far.
     with_data: A global variable that contains all the WITH clauses we need.
 
   Returns:
     The alias of the table in the WITH clause that has all resampled result.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  all_indexes = sql.Columns(indexes).add(utils.get_extra_split_by(metric))
+  all_indexes = sql.Columns(indexes).add(utils.get_extra_split_by(metric, True))
   indexes_and_unit = sql.Columns(all_indexes).add(metric.unit)
-  where = sql.Filters(global_filter).add(local_filter)
   columns = sql.Columns()
   # columns is filled in-place in modify_descendants_for_jackknife_fast.
   modified_jk = modify_descendants_for_jackknife_fast_no_adjustment(
-      metric, columns,
-      sql.Filters(global_filter).add(local_filter), sql.Filters(), all_indexes,
-      indexes_and_unit)
+      metric, columns, global_filter, all_indexes, indexes_and_unit
+  )
   metric.children = modified_jk.children
 
-  bucket = sql.Column(metric.unit, alias='_resample_idx')
+  bucket = sql.Column(metric.unit, alias='resample_idx')
   columns = sql.Columns(all_indexes).add(bucket).add(columns)
-  columns.distinct = True
   loo_table = with_data.add(
-      sql.Datasource(sql.Sql(columns, table, where=where), 'LOO'))
+      sql.Datasource(sql.Sql(columns, table, where=global_filter), 'LOO'))
   return loo_table, with_data
 
 
-def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
-                                            global_filter, indexes,
-                                            local_filter, with_data):
+def get_jackknife_data_fast_with_adjustment(
+    metric, table, split_by, global_filter, indexes, with_data
+):
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
   If all the leaf Metrics are Sum and/or Count, we can compute the
-  leave-one-out (LOO) estimates faster. If there is any index added by Operation
-  then we need to adjust the slices. See utils.adjust_slices_for_loo() for more
-  discussions. The query will look like
+  leave-one-out (LOO) estimates faster. If we need to adjust the slices, (see
+  utils.adjust_slices_for_loo() for more discussions), the query will look like
   WITH
   UnitSliceCount AS (SELECT
     split_by,
@@ -2648,7 +3054,7 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
   LOO AS (SELECT
     split_by,
     extra_index,
-    unit AS _resample_idx,
+    unit AS resample_idx,
     total.`sum(X)` - COALESCE(unit.`sum(X)`, 0) AS `sum(X)`
   FROM (SELECT DISTINCT
     split_by,
@@ -2669,27 +3075,26 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
     split_by: The columns that we use to split the data.
     global_filter: The filters that can be applied to the whole Metric tree.
     indexes: The columns that we shouldn't apply any arithmetic operation.
-    local_filter: The filters that have been accumulated so far.
     with_data: A global variable that contains all the WITH clauses we need.
 
   Returns:
     The alias of the table in the WITH clause that has all resampled result.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  all_indexes = sql.Columns(indexes).add(utils.get_extra_split_by(metric))
+  all_indexes = sql.Columns(indexes).add(utils.get_extra_split_by(metric, True))
   indexes_and_unit = sql.Columns(all_indexes).add(metric.unit)
-  where = sql.Filters(global_filter).add(local_filter)
 
   columns_to_preagg = sql.Columns(sql.Column('COUNT(*)', alias='ct'))
   columns_in_loo = sql.Columns()
   # columns_to_preagg and columns_in_loo are filled in-place.
   modified_jk = modify_descendants_for_jackknife_fast_with_adjustment(
       metric, columns_to_preagg, columns_in_loo,
-      sql.Filters(global_filter).add(local_filter), sql.Filters())
+      global_filter)
   metric.children = modified_jk.children
 
-  unit_slice_ct_table = sql.Sql(columns_to_preagg, table, where,
-                                indexes_and_unit)
+  unit_slice_ct_table = sql.Sql(
+      columns_to_preagg, table, global_filter, indexes_and_unit
+  )
   unit_slice_ct_alias = with_data.add(
       sql.Datasource(unit_slice_ct_table, 'UnitSliceCount'))
 
@@ -2718,19 +3123,19 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
       using=indexes_and_unit.aliases,
       join='LEFT')
   loo = sql.Sql(
-      sql.Columns(all_indexes.aliases).add(
-          sql.Column(sql.Column(metric.unit).alias,
-                     alias='_resample_idx')).add(columns_in_loo), loo_from,
-      'total_table.ct - COALESCE(unit_slice_table.ct, 0) > 0')
+      sql.Columns(all_indexes.aliases)
+      .add(sql.Column(sql.Column(metric.unit).alias, alias='resample_idx'))
+      .add(columns_in_loo),
+      loo_from,
+      'total_table.ct - COALESCE(unit_slice_table.ct, 0) > 0',
+  )
   loo_table = with_data.add(sql.Datasource(loo, 'LOO'))
   return loo_table, with_data
 
 
-def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
-                                                        global_filter,
-                                                        local_filter,
-                                                        all_indexes,
-                                                        indexes_and_unit):
+def modify_descendants_for_jackknife_fast_no_adjustment(
+    metric, columns, global_filter, all_indexes, indexes_and_unit
+):
   """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
 
   See the doc of get_jackknife_data_fast_no_adjustment() first. Here we
@@ -2743,7 +3148,7 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
     of Sum('X') should now become 'SUM(`sum(X)`) AS `sum(X)`'. So we replace the
     metric with Sum('sum(X)', metric.name) so it could handle it correctly.
   3. Removes filters as they have already been applied in the LOO table. Note
-    that we made a copy in get_se for metric so the removal won't affect the
+    that we made a copy in get_se_sql for metric so the removal won't affect the
     metric used in point estimate computation.
 
   We need to make a copy for the Metric or in
@@ -2758,7 +3163,6 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
     columns: A global container for all columns we need in LOO table. It's being
       added in-place.
     global_filter: The filters that can be applied to the whole Metric tree.
-    local_filter: The filters that have been accumulated so far.
     all_indexes: All columns that we need to used as the group by columns in the
       LOO table. It includes split_by, all extra_idx added by Operations, and
       the stratified_by column of MH, if exists.
@@ -2771,11 +3175,11 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
     return metric
 
   metric = copy.deepcopy(metric)
-  local_filter = sql.Filters(local_filter).add(metric.where)
+  local_filter = sql.Filters(metric.where_raw)
   metric.where = None
   if isinstance(metric, (metrics.Sum, metrics.Count)):
     filters = sql.Filters(local_filter).remove(global_filter)
-    c = metric.var
+    c = sql.Column(metric.var).alias
     op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
     total = sql.Column(c, op, filters=filters, partition=all_indexes)
     unit_sum = sql.Column(c, op, filters=filters, partition=indexes_and_unit)
@@ -2787,14 +3191,16 @@ def modify_descendants_for_jackknife_fast_no_adjustment(metric, columns,
   new_children = []
   for m in metric.children:
     modified = modify_descendants_for_jackknife_fast_no_adjustment(
-        m, columns, global_filter, local_filter, all_indexes, indexes_and_unit)
+        m, columns, global_filter, all_indexes, indexes_and_unit
+    )
     new_children.append(modified)
   metric.children = new_children
   return metric
 
 
 def modify_descendants_for_jackknife_fast_with_adjustment(
-    metric, columns_to_preagg, columns_in_loo, global_filter, local_filter):
+    metric, columns_to_preagg, columns_in_loo, global_filter
+):
   """Gets the columns for leaf Metrics and modify them for fast Jackknife SQL.
 
   See the doc of get_jackknife_data_fast_with_adjustment() first. Here we
@@ -2806,12 +3212,12 @@ def modify_descendants_for_jackknife_fast_with_adjustment(
     So the expression of Sum('X') should now become 'SUM(`sum(X)`) AS `sum(X)`'.
     Here we will replace the metric with Sum('sum(X)', metric.name).
   3. Removes filters as they have already been applied in the LOO table. Note
-    that we made a copy in get_se for metric so the removal won't affect the
+    that we made a copy in get_se_sql for metric so the removal won't affect the
     metric used in point estimate computation.
-  4. For Operations, their extra_index columns appear in indexes. If any of them
-    has forbidden character in the name, it will be renamed in LOO so we have to
-    change extra_index. For example, Distribution('$Foo') will generate a column
-    $Foo AS macro_Foo in LOO so we need to replace '$Foo' with 'macro_Foo'.
+  4. For Operations, their extra_index columns appear in indexes. Any forbidden
+    character in the name will be replaced/dropped in LOO so we have to change
+    extra_index. For example, Distribution('$Foo') will generate a column
+    '$Foo AS macro_Foo' in LOO so we need to replace '$Foo' with 'macro_Foo'.
 
   We need to make a copy for the Metric or in
   sumx = metrics.Sum('X')
@@ -2827,7 +3233,6 @@ def modify_descendants_for_jackknife_fast_with_adjustment(
     columns_in_loo: A global container for all metric columns we need in LOO
       table. It's being added in-place.
     global_filter: The filters that can be applied to the whole Metric tree.
-    local_filter: The filters that have been accumulated so far.
 
   Returns:
     The modified metric tree.
@@ -2836,12 +3241,12 @@ def modify_descendants_for_jackknife_fast_with_adjustment(
     return metric
 
   metric = copy.deepcopy(metric)
-  local_filter = sql.Filters(local_filter).add(metric.where)
+  local_filter = sql.Filters(metric.where_raw)
   metric.where = None
   tmpl = 'total_table.%s - COALESCE(unit_slice_table.%s, 0)'
   if isinstance(metric, (metrics.Sum, metrics.Count)):
     filters = sql.Filters(local_filter).remove(global_filter)
-    c = metric.var
+    c = sql.Column(metric.var).alias
     op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
     col = sql.Column(c, op, filters=filters)
     columns_to_preagg.add(col)
@@ -2858,62 +3263,123 @@ def modify_descendants_for_jackknife_fast_with_adjustment(
   new_children = []
   for m in metric.children:
     modified = modify_descendants_for_jackknife_fast_with_adjustment(
-        m, columns_to_preagg, columns_in_loo, global_filter, local_filter)
+        m, columns_to_preagg, columns_in_loo, global_filter
+    )
     new_children.append(modified)
   metric.children = new_children
   return metric
 
 
-def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
-                       with_data):
-  """Gets metric.n_replicates bootstrap resamples.
+def get_bootstrap_data_no_unit(
+    metric, table, split_by, global_filter, with_data, columns_in_table=None
+):
+  """Gets metric.n_replicates bootstrap resamples for Bootstrap without unit.
 
   The SQL is constructed as
-  1. if metric.unit is None:
     WITH
     BootstrapRandomRows AS (SELECT
-      *,
-      filter AS _bs_filter,
-      ROW_NUMBER() OVER (PARTITION BY _resample_idx, filter) AS _bs_row_number,
-      CEILING(RAND() * COUNT(*) OVER (PARTITION BY _resample_idx, filter))
-        AS _bs_random_row_number,
+      *,  # or columns_in_table and resample_idx if columns_in_table is
+      global_filter AS bs_filter,
+      ROW_NUMBER() OVER (PARTITION BY resample_idx, global_filter)
+        AS bs_row_number,
+      CEILING(RAND() * COUNT(*) OVER (PARTITION BY resample_idx, global_filter))
+        AS bs_random_row_number,
       $RenamedSplitByIfAny AS renamed_split_by,
     FROM table
     JOIN
-    UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS _resample_idx),
+    UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS resample_idx),
     BootstrapRandomChoices AS (SELECT
       b.*
     FROM (SELECT
       split_by,
-      _resample_idx,
-      _bs_filter,
-      _bs_random_row_number AS _bs_row_number
+      resample_idx,
+      bs_filter,
+      bs_random_row_number AS bs_row_number
     FROM BootstrapRandomRows) AS a
     JOIN
     BootstrapRandomRows AS b
-    USING (split_by, _resample_idx, _bs_row_number, _bs_filter)
+    USING (split_by, resample_idx, bs_row_number, bs_filter)
     WHERE
-    _bs_filter),
+    bs_filter),
   The filter parts are optional.
 
-  2. if metric.unit is not None:
+  Args:
+    metric: An instance of Bootstrap.
+    table: The table we want to resample.
+    split_by: The columns that we use to split the data.
+    global_filter: All the filters that applied to the Bootstrap.
+    with_data: A global variable that contains all the WITH clauses we need.
+    columns_in_table: All the columns we want to SELECT from `table`. If None,
+      we do SELECT * FROM table.
+
+  Returns:
+    The alias of the table in the WITH clause that has all resampled data.
+    The global with_data which holds all datasources we need in the WITH clause.
+  """
+  if columns_in_table:
+    columns = sql.Columns(columns_in_table).add('resample_idx')
+  else:
+    columns = sql.Columns(sql.Column('*', auto_alias=False))
+  partition = split_by.expressions + ['resample_idx']
+  if global_filter:
+    columns.add(sql.Column(str(global_filter), alias='bs_filter'))
+    partition.append(str(global_filter))
+  row_number = sql.Column(
+      'ROW_NUMBER()', alias='bs_row_number', partition=partition
+  )
+  length = sql.Column('COUNT(*)', partition=partition)
+  random_row_number = sql.Column('RAND()') * length
+  random_row_number = sql.Column(
+      'CEILING(%s)' % random_row_number.expression,
+      alias='bs_random_row_number',
+  )
+  columns.add((row_number, random_row_number))
+  columns.add((i for i in split_by if i != i.alias))
+  replicates = sql.Datasource(
+      'UNNEST(GENERATE_ARRAY(1, %s))' % metric.n_replicates, 'resample_idx'
+  )
+  random_choice_table = sql.Sql(columns, sql.Join(table, replicates))
+  random_choice_table_alias = with_data.add(
+      sql.Datasource(random_choice_table, 'BootstrapRandomRows'))
+
+  using = (
+      sql.Columns(partition).add('bs_row_number').difference(str(global_filter))
+  )
+  if global_filter:
+    using.add('bs_filter')
+  random_rows = sql.Sql(
+      sql.Columns(using)
+      .difference('bs_row_number')
+      .add(sql.Column('bs_random_row_number', alias='bs_row_number')),
+      random_choice_table_alias,
+  )
+  random_rows = sql.Datasource(random_rows, 'a')
+  resampled = random_rows.join(
+      sql.Datasource(random_choice_table_alias, 'b'), using=using)
+  table = sql.Sql(
+      sql.Column('b.*', auto_alias=False),
+      resampled,
+      where='bs_filter' if global_filter else None,
+  )
+  table = with_data.add(sql.Datasource(table, 'BootstrapRandomChoices'))
+  return table, with_data
+
+
+def get_bootstrap_data_with_unit(
+    metric, table, split_by, global_filter, with_data
+):
+  """Gets metric.n_replicates bootstrap resamples.
+
+  The SQL is constructed as
     WITH
     Candidates AS (SELECT
       split_by,
       ARRAY_AGG(DISTINCT unit) AS unit,
-      COUNT(DISTINCT unit) AS _bs_length
+      COUNT(DISTINCT unit) AS bs_length
     FROM table
     WHERE global_filter
     GROUP BY split_by),
-    BootstrapRandomChoices AS (SELECT
-      split_by,
-      _resample_idx,
-      unit[ORDINAL(CAST(CEILING(RAND() * _bs_length) AS INT64))] AS unit
-    FROM Candidates
-    JOIN
-    UNNEST(unit)
-    JOIN
-    UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS _resample_idx),
+    <bootstrap Candidates by rows and save to BootstrapRandomChoices>
     BootstrapResammpledData AS (SELECT
       *
     FROM BootstrapRandomChoices
@@ -2924,92 +3390,41 @@ def get_bootstrap_data(metric, table, split_by, global_filter, local_filter,
 
   Args:
     metric: An instance of Bootstrap.
-    table: The table we want to query from.
+    table: The table we want to resample.
     split_by: The columns that we use to split the data.
-    global_filter: The filters that can be applied to the whole Metric tree.
-    local_filter: The filters that have been accumulated so far.
+    global_filter: All the filters that applied to the Bootstrap.
     with_data: A global variable that contains all the WITH clauses we need.
 
   Returns:
     The alias of the table in the WITH clause that has all resampled data.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  original_table = table
-  table = sql.Datasource(table)
-  if not table.is_table:
-    table.alias = table.alias or 'RawData'
-    table = with_data.add(table)
-  replicates = sql.Datasource(
-      'UNNEST(GENERATE_ARRAY(1, %s))' % metric.n_replicates, '_resample_idx')
-  where = sql.Filters(global_filter).add(local_filter)
-  if metric.unit is None:
-    columns = sql.Columns(sql.Column('*', auto_alias=False))
-    partition = split_by.expressions + ['_resample_idx']
-    if where:
-      columns.add(sql.Column(str(where), alias='_bs_filter'))
-      partition.append(str(where))
-    row_number = sql.Column(
-        'ROW_NUMBER()', alias='_bs_row_number', partition=partition)
-    length = sql.Column('COUNT(*)', partition=partition)
-    random_row_number = sql.Column('RAND()') * length
-    random_row_number = sql.Column(
-        'CEILING(%s)' % random_row_number.expression,
-        alias='_bs_random_row_number')
-    columns.add((row_number, random_row_number))
-    columns.add((i for i in split_by if i != i.alias))
-    random_choice_table = sql.Sql(columns, sql.Join(table, replicates))
-    random_choice_table_alias = with_data.add(
-        sql.Datasource(random_choice_table, 'BootstrapRandomRows'))
+  columns = sql.Columns(split_by).add(metric.unit)
+  units = sql.Sql(columns, table, global_filter, columns)
+  units_alias = with_data.add(sql.Datasource(units, 'Candidates'))
+  resampled_grps, with_data = get_bootstrap_data_no_unit(
+      metric,
+      units_alias,
+      sql.Columns(split_by.aliases),
+      sql.Filters(),
+      with_data,
+      columns.aliases,
+  )
 
-    using = sql.Columns(partition).add('_bs_row_number').difference(str(where))
-    if where:
-      using.add('_bs_filter')
-    random_rows = sql.Sql(
-        sql.Columns(using).difference('_bs_row_number').add(
-            sql.Column('_bs_random_row_number', alias='_bs_row_number')),
-        random_choice_table_alias)
-    random_rows = sql.Datasource(random_rows, 'a')
-    resampled = random_rows.join(
-        sql.Datasource(random_choice_table_alias, 'b'), using=using)
+  renamed = [i for i in sql.Columns(split_by).add(metric.unit) if i != i.alias]
+  if renamed:
     table = sql.Sql(
-        sql.Column('b.*', auto_alias=False),
-        resampled,
-        where='_bs_filter' if where else None)
-    table = with_data.add(sql.Datasource(table, 'BootstrapRandomChoices'))
-  else:
-    unit = metric.unit
-    unit_alias = sql.Column(unit).alias
-    columns = (sql.Column('ARRAY_AGG(DISTINCT %s)' % unit, alias=unit),
-               sql.Column('COUNT(DISTINCT %s)' % unit, alias='_bs_length'))
-    units = sql.Sql(columns, table, where, split_by)
-    units_alias = with_data.add(sql.Datasource(units, 'Candidates'))
-    rand_samples = sql.Column(
-        '%s[ORDINAL(CAST(CEILING(RAND() * _bs_length) AS INT64))]' % unit_alias,
-        alias=unit_alias)
-
-    sample_table = sql.Sql(
-        sql.Columns(split_by.aliases).add('_resample_idx').add(rand_samples),
-        sql.Join(units_alias,
-                 sql.Datasource('UNNEST(%s)' % unit_alias)).join(replicates))
-    sample_table_alias = with_data.add(
-        sql.Datasource(sample_table, 'BootstrapRandomChoices'))
-
-    table = original_table
-    renamed = [i for i in sql.Columns(split_by).add(unit) if i != i.alias]
-    if renamed or unit != unit_alias:
-      table = sql.Sql(
-          sql.Columns(sql.Column('*', auto_alias=False)).add(renamed),
+        sql.Columns(sql.Column('*', auto_alias=False)).add(renamed),
+        table,
+        where=global_filter)
+  bs_data = sql.Sql(
+      sql.Column('*', auto_alias=False),
+      sql.Join(
+          resampled_grps,
           table,
-          where=where)
-    bs_data = sql.Sql(
-        sql.Column('*', auto_alias=False),
-        sql.Join(
-            sample_table_alias,
-            table,
-            join='LEFT',
-            using=sql.Columns(split_by.aliases).add(unit)),
-        where=where)
-    bs_data = sql.Datasource(bs_data, 'BootstrapResammpledData')
-    table = with_data.add(bs_data)
-
+          join='LEFT',
+          using=sql.Columns(split_by.aliases).add(metric.unit)),
+      where=global_filter)
+  bs_data = sql.Datasource(bs_data, 'BootstrapResammpledData')
+  table = with_data.add(bs_data)
   return table, with_data
