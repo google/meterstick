@@ -97,12 +97,6 @@ def to_sql(table, split_by=None):
   return lambda metric: metric.to_sql(table, split_by)
 
 
-def is_operation(m):
-  """We can't use isinstance because of loop dependency."""
-  return isinstance(m, Metric) and m.children and not isinstance(
-      m, (MetricList, CompositeMetric))
-
-
 # Classes we built so caching across instances can be enabled with confidence.
 BUILT_INS = [
     # Metrics
@@ -132,6 +126,7 @@ BUILT_INS = [
     'MH',
     'Jackknife',
     'Bootstrap',
+    'PoissonBootstrap',
     # Models
     'LinearRegression',
     'Ridge',
@@ -208,6 +203,7 @@ class Metric(object):
     extra_index: Used by Operation. See the doc there.
     name_tmpl: Used by Metrics that have children. It's applied to children's
       names in the output.
+    is_operation: If this instance is an Operation.
     cache_across_instances: If this Metric class will be cached across
       instances, namely, different instances with same attributes that matter
       can share the same place in cache. All the classes listed in BUILT_INS
@@ -246,6 +242,7 @@ class Metric(object):
                                                      str) else extra_index
     self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
     self.name_tmpl = name_tmpl
+    self.is_operation = False
     self.cache_across_instances = False
     self.cache_key = None
 
@@ -322,7 +319,7 @@ class Metric(object):
       pd.DataFrame, otherwise it could be a base type.
     """
     self.cache = {} if cache is None else cache
-    split_by = [split_by] if isinstance(split_by, str) else split_by or []
+    split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
     try:
       key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
       if self.in_cache(key):
@@ -658,7 +655,7 @@ class Metric(object):
     return self.to_series_or_number_if_not_operation(res)
 
   def to_series_or_number_if_not_operation(self, df):
-    return self.to_series_or_number(df) if not is_operation(self) else df
+    return self.to_series_or_number(df) if not self.is_operation else df
 
   def to_series_or_number(self, df):
     if not isinstance(df, pd.DataFrame):
@@ -1291,7 +1288,9 @@ class MetricList(Metric):
         clause.
     """
     utils.get_extra_idx(self)  # Check if indexes are compatible.
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     children_sql = [
         c.get_sql_and_with_clause(table, split_by, global_filter, indexes,
                                   local_filter, with_data)[0]
@@ -1519,7 +1518,9 @@ class CompositeMetric(Metric):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     op = self.op
 
     if not isinstance(self.children[0], Metric):
@@ -1672,7 +1673,9 @@ class SimpleMetric(Metric):
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     cols = self.get_sql_columns(local_filter)
     if cols:
       return sql.Sql(cols, table, global_filter, split_by), with_data

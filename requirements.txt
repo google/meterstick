@@ -2,5 +2,6 @@ absltest
 six
 numpy
 scipy
+sklearn
 pandas
 pydot
