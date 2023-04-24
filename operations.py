@@ -182,7 +182,7 @@ class Distribution(Operation):
   def __init__(self,
                over: Union[Text, List[Text]],
                child: Optional[metrics.Metric] = None,
-               name_tmpl='Distribution of {}',
+               name_tmpl: Text = 'Distribution of {}',
                **kwargs):
     super(Distribution, self).__init__(child, name_tmpl, over, **kwargs)
 
@@ -264,7 +264,7 @@ class CumulativeDistribution(Distribution):
       child: Optional[metrics.Metric] = None,
       order=None,
       ascending: bool = True,
-      name_tmpl='Cumulative Distribution of {}',
+      name_tmpl: Text = 'Cumulative Distribution of {}',
       **kwargs,
   ):
     self.order = order
@@ -517,9 +517,8 @@ class PercentChange(Comparison):
                baseline_key,
                child: Optional[metrics.Metric] = None,
                include_base: bool = False,
-               name_tmpl=None,
+               name_tmpl: Text = '{} Percent Change',
                **kwargs):
-    name_tmpl = name_tmpl or '{} Percent Change'
     super(PercentChange, self).__init__(condition_column, baseline_key, child,
                                         include_base, name_tmpl, **kwargs)
 
@@ -558,9 +557,8 @@ class AbsoluteChange(Comparison):
                baseline_key,
                child: Optional[metrics.Metric] = None,
                include_base: bool = False,
-               name_tmpl=None,
+               name_tmpl: Text = '{} Absolute Change',
                **kwargs):
-    name_tmpl = name_tmpl or '{} Absolute Change'
     super(AbsoluteChange, self).__init__(condition_column, baseline_key, child,
                                          include_base, name_tmpl, **kwargs)
 
@@ -618,6 +616,7 @@ class PrePostChange(PercentChange):
                covariates=None,
                stratified_by=None,
                include_base=False,
+               name_tmpl: Text = '{} PrePost Percent Change',
                **kwargs):
     if isinstance(covariates, (List, Tuple)):
       covariates = metrics.MetricList(covariates)
@@ -629,9 +628,14 @@ class PrePostChange(PercentChange):
                                                   str) else stratified_by or []
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
-    super(PrePostChange,
-          self).__init__(stratified_by + condition_column, baseline_key, child,
-                         include_base, '{} PrePost Percent Change', **kwargs)
+    super(PrePostChange, self).__init__(
+        stratified_by + condition_column,
+        baseline_key,
+        child,
+        include_base,
+        name_tmpl,
+        **kwargs,
+    )
     self.extra_index = condition_column
 
   def compute_children(
@@ -744,6 +748,7 @@ class CUPED(AbsoluteChange):
                covariates=None,
                stratified_by=None,
                include_base=False,
+               name_tmpl: Text = '{} CUPED Change',
                **kwargs):
     if isinstance(covariates, (List, Tuple)):
       covariates = metrics.MetricList(covariates)
@@ -755,9 +760,14 @@ class CUPED(AbsoluteChange):
                                                   str) else stratified_by or []
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
-    super(CUPED,
-          self).__init__(stratified_by + condition_column, baseline_key, child,
-                         include_base, '{} CUPED Change', **kwargs)
+    super(CUPED, self).__init__(
+        stratified_by + condition_column,
+        baseline_key,
+        child,
+        include_base,
+        name_tmpl,
+        **kwargs,
+    )
     self.extra_index = condition_column
 
   def compute_children(self,
@@ -857,6 +867,7 @@ class MH(Comparison):
                stratified_by: Union[Text, List[Text]],
                metric: Optional[metrics.Metric] = None,
                include_base: bool = False,
+               name_tmpl: Text = '{} MH Ratio',
                **kwargs):
     self.stratified_by = stratified_by if isinstance(stratified_by,
                                                      list) else [stratified_by]
@@ -867,7 +878,7 @@ class MH(Comparison):
         baseline_key,
         metric,
         include_base,
-        '{} MH Ratio',
+        name_tmpl,
         extra_index=condition_column,
         **kwargs)
 
@@ -1931,12 +1942,13 @@ class Jackknife(MetricWithCI):
                child: Optional[metrics.Metric] = None,
                confidence: Optional[float] = None,
                enable_optimization=True,
+               name_tmpl: Text = '{} Jackknife',
                **kwargs):
     super(Jackknife, self).__init__(
         unit,
         child,
         confidence,
-        '{} Jackknife',
+        name_tmpl,
         enable_optimization=enable_optimization,
         **kwargs,
     )
@@ -2241,7 +2253,7 @@ class Bootstrap(MetricWithCI):
       n_replicates: int = 10000,
       confidence: Optional[float] = None,
       enable_optimization=True,
-      name_tmpl='{} Bootstrap',
+      name_tmpl: Text = '{} Bootstrap',
       **kwargs,
   ):
     super(Bootstrap, self).__init__(
@@ -2417,6 +2429,7 @@ class PoissonBootstrap(Bootstrap):
       n_replicates: int = 10000,
       confidence: Optional[float] = None,
       enable_optimization=True,
+      name_tmpl: Text = '{} Poisson Bootstrap',
       **kwargs,
   ):
     super(PoissonBootstrap, self).__init__(
@@ -2425,8 +2438,8 @@ class PoissonBootstrap(Bootstrap):
         n_replicates,
         confidence,
         enable_optimization,
-        '{} Poisson Bootstrap',
-        **kwargs
+        name_tmpl,
+        **kwargs,
     )
 
   def get_samples(self, df, split_by=None):
