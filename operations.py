@@ -606,7 +606,7 @@ class PrePostChange(PercentChange):
                          include_base, '{} PrePost Percent Change', **kwargs)
     self.extra_index = condition_column
 
-  def compute_children(self,
+  def compute_children(self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
                        df,
                        split_by,
                        melted=False,
@@ -730,7 +730,7 @@ class CUPED(AbsoluteChange):
                          include_base, '{} CUPED Change', **kwargs)
     self.extra_index = condition_column
 
-  def compute_children(self,
+  def compute_children(self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
                        df,
                        split_by,
                        melted=False,
@@ -1390,7 +1390,7 @@ class MetricWithCI(Operation):
                                                apply_name_tmpl)
     return self.add_base_to_res(res, base) if self.confidence else res
 
-  def compute_slices(self, df, split_by):
+  def compute_slices(self, df, split_by):  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
     std = super(MetricWithCI, self).compute_slices(df, split_by)
     point_est = self.compute_child(df, split_by, melted=True)
     res = point_est.join(utils.melt(std))
@@ -1696,7 +1696,7 @@ class MetricWithCI(Operation):
           'the query being too large/complex, you can try %s' % msg
       ) from e
 
-  def compute_on_sql_sql_mode(self, table, split_by, execute):
+  def compute_on_sql_sql_mode(self, table, split_by, execute):  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
     """Computes self in a SQL query and process the result."""
     res = super(MetricWithCI,
                 self).compute_on_sql_sql_mode(table, split_by, execute)
@@ -1962,7 +1962,7 @@ class Jackknife(MetricWithCI):
     stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
     return stderrs * dof / np.sqrt(dof + 1), dof
 
-  def compute_children_sql(self, table, split_by, execute, mode, batch_size):
+  def compute_children_sql(self, table, split_by, execute, mode, batch_size):  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
     """Compute the children on leave-one-out data in SQL."""
     batch_size = batch_size or 1
     slice_and_units = sql.Sql(
@@ -2166,7 +2166,7 @@ class Bootstrap(MetricWithCI):
         else:
           yield None, df.loc[resampled].reset_index()
 
-  def compute_children_sql(self, table, split_by, execute, mode, batch_size):
+  def compute_children_sql(self, table, split_by, execute, mode, batch_size):  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
     """Compute the children on resampled data in SQL."""
     batch_size = batch_size or 1000
     global_filter = utils.get_global_filter(self)
