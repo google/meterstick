@@ -28,7 +28,7 @@ def get_name(obj):
   return getattr(obj, 'name', str(obj))
 
 
-class CacheKey():
+class CacheKey:
   """Represents a cache_key used in the computation of Metrics.
 
   During the computation of a Metric, we often use a key to cache results. It
@@ -111,8 +111,15 @@ class CacheKey():
       self.slice_val = slice_val or {}
       self.extra_info = extra_info
     self.slice_val = tuple(sorted(self.slice_val.items()))
+    # `where` accumulates the filters so far and already includes metric.where.
+    # self.metric doesn't have `where` but we cannot use it here because
+    # get_fingerprint might collect the id of metric so the original metric is
+    # needed.
+    metric_fingerprint = [
+        i for i in metric.get_fingerprint() if i[0] != 'where'
+    ]
     self.fingerprint = {
-        'metric': self.metric.get_fingerprint(),
+        'metric': tuple(metric_fingerprint),
         'key': self.key,
         'split_by': self.split_by,
         'slice_val': self.slice_val,

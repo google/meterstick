@@ -73,6 +73,43 @@ def is_operation(m):
       m, (MetricList, CompositeMetric))
 
 
+# Classes we built so caching across instances can be enabled with confidence.
+BUILT_INS = [
+    # Metrics
+    'MetricList',
+    'CompositeMetric',
+    'Ratio',
+    'Count',
+    'Sum',
+    'Dot',
+    'Mean',
+    'Max',
+    'Min',
+    'Quantile',
+    'Variance',
+    'StandardDeviation',
+    'CV',
+    'Correlation',
+    'Cov',
+    # Operations
+    'Distribution',
+    'CumulativeDistribution',
+    'PercentChange',
+    'AbsoluteChange',
+    'PrePostChange',
+    'CUPED',
+    'MH',
+    'Jackknife',
+    'Bootstrap',
+    # Models
+    'LinearRegression',
+    'Ridge',
+    'Lasso',
+    'ElasticNet',
+    'LogisticRegression',
+]
+
+
 class Metric(object):
   """Core class of Meterstick.
 
@@ -140,6 +177,15 @@ class Metric(object):
     extra_index: Used by Operation. See the doc there.
     name_tmpl: Used by Metrics that have children. It's applied to children's
       names in the output.
+    cache_across_instances: If this Metric class will be cached across
+      instances, namely, different instances with same attributes that matter
+      can share the same place in cache. All the classes listed in BUILT_INS
+      have the feature enabled. For custom Metrics, by default different
+      instances don't share the same place in cache, because we don't know what
+      attributes matter. If you want to enable the feature for a custom Metric,
+      make sure you read the 'Custom Metric' and 'Caching' sections in the demo
+      notebook and understand the `additional_fingerprint_attrs` attribute
+      before setting this attribute to True.
     cache: A dict to store the result. It's shared across the Metric tree.
     cache_key: The key currently being used in computation.
   """
@@ -169,6 +215,7 @@ class Metric(object):
                                                      str) else extra_index
     self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
     self.name_tmpl = name_tmpl
+    self.cache_across_instances = False
     self.cache_key = None
 
   @property
@@ -467,11 +514,14 @@ class Metric(object):
     """Retrieves results from a certain type of metric from cache."""
     return {k: v for k, v in self.cache.items() if k.metric.__class__ == metric}
 
-  def get_fingerprint(self):
+  def get_fingerprint(self, attr_to_exclude=()):
     """Returns attributes that uniquely identify the Metric.
 
     Metrics with the same fingerprint will compute to the same numbers on the
     same data. Note that name is not part of the fingerprint.
+
+    Args:
+      attr_to_exclude: Iterable of attributes to be excluded from fingerprint.
 
     Returns:
       A sorted tuple of (attribute, value) pairs that uniquely identify the
@@ -480,10 +530,16 @@ class Metric(object):
     fingerprint = {'class': self.__class__}
     if self.where:
       fingerprint['where'] = sorted(self.where_raw)
+    # Caching across instances is tricky so only turned on for built-ins and
+    # custom Metrics with cache_across_instances being True. Otherwise different
+    # instances of the same class are always saved under different keys.
+    if type(self).__name__ not in BUILT_INS and not self.cache_across_instances:
+      fingerprint['id'] = id(self)
     if self.children:
       fingerprint['children'] = (
-          c.get_fingerprint() if isinstance(c, Metric) else c
-          for c in self.children)
+          c.get_fingerprint(attr_to_exclude) if isinstance(c, Metric) else c
+          for c in self.children
+      )
     if self.extra_split_by:
       fingerprint['extra_split_by'] = self.extra_split_by
     if self.extra_index != self.extra_split_by:
@@ -494,9 +550,12 @@ class Metric(object):
         for kw, arg in val.items():
           fingerprint['%s:%s' % (k, kw)] = arg
       elif isinstance(val, Metric):
-        fingerprint[k] = val.get_fingerprint()
+        fingerprint[k] = val.get_fingerprint(attr_to_exclude)
       elif val is not None:
         fingerprint[k] = val
+    fingerprint = {
+        k: v for k, v in fingerprint.items() if k not in attr_to_exclude
+    }
     for k, v in fingerprint.items():
       if not isinstance(v, str) and isinstance(v, Iterable):
         fingerprint[k] = tuple(list(v))
@@ -833,7 +892,7 @@ class Metric(object):
       return False
     if self.name != other.name:
       return False
-    if self.get_fingerprint() != other.get_fingerprint():
+    if self.get_fingerprint(['id']) != other.get_fingerprint(['id']):
       return False
     # Some Metrics share fingerprints. For example, Mean has the same
     # fingerprint as Sum(x) / Count(x) so we need to further check.
@@ -1115,14 +1174,14 @@ class CompositeMetric(Metric):
     self.name = name
     return self
 
-  def get_fingerprint(self):
+  def get_fingerprint(self, attr_to_exclude=()):
     # Make Sum(x) / Count(x) indistinguishable to Mean(x) in cache.
     s = self.children[0]
     c = self.children[1]
     if isinstance(s, Sum) and isinstance(
         c, Count) and s.var == c.var and s.where == c.where and not c.distinct:
-      return Mean(s.var, where=s.where_raw).get_fingerprint()
-    return super(CompositeMetric, self).get_fingerprint()
+      return Mean(s.var, where=s.where_raw).get_fingerprint(attr_to_exclude)
+    return super(CompositeMetric, self).get_fingerprint(attr_to_exclude)
 
   def compute_children(self, df, split_by):
     if len(self.children) != 2:
@@ -1318,11 +1377,11 @@ class Ratio(CompositeMetric):
     self.denominator = denominator
     self.name = name or self.name
 
-  def get_fingerprint(self):
+  def get_fingerprint(self, attr_to_exclude=()):
     # Make the fingerprint same as the equivalent CompositeMetric for caching.
     util = self.children[0] / self.children[1]
     util.where = self.where_raw  # pytype: disable=not-writable
-    return util.get_fingerprint()
+    return util.get_fingerprint(attr_to_exclude)
 
 
 class SimpleMetric(Metric):
@@ -1462,13 +1521,13 @@ class Dot(SimpleMetric):
   def get_auxiliary_cols(self):
     return ((self.var, '*', self.var2),)
 
-  def get_fingerprint(self):
+  def get_fingerprint(self, attr_to_exclude=()):
     if str(self.var) > str(self.var2):
       util = copy.deepcopy(self)
       util.var = self.var2
       util.var2 = self.var
-      return util.get_fingerprint()
-    return super(Dot, self).get_fingerprint()
+      return util.get_fingerprint(attr_to_exclude)
+    return super(Dot, self).get_fingerprint(attr_to_exclude)
 
 
 class Mean(SimpleMetric):
@@ -1865,13 +1924,13 @@ class Correlation(SimpleMetric):
     return sql.Column((self.var, self.var2), 'CORR({}, {})', self.name,
                       local_filter)
 
-  def get_fingerprint(self):
+  def get_fingerprint(self, attr_to_exclude=()):
     if str(self.var) > str(self.var2):
       util = copy.deepcopy(self)
       util.var = self.var2
       util.var2 = self.var
-      return util.get_fingerprint()
-    return super(Correlation, self).get_fingerprint()
+      return util.get_fingerprint(attr_to_exclude)
+    return super(Correlation, self).get_fingerprint(attr_to_exclude)
 
   def get_equivalent_without_filter(self, *auxiliary_cols):
     del auxiliary_cols  # unused
@@ -1944,13 +2003,13 @@ class Cov(SimpleMetric):
                         local_filter)
     return
 
-  def get_fingerprint(self):
+  def get_fingerprint(self, attr_to_exclude=()):
     if str(self.var) > str(self.var2):
       util = copy.deepcopy(self)
       util.var = self.var2
       util.var2 = self.var
-      return util.get_fingerprint()
-    return super(Cov, self).get_fingerprint()
+      return util.get_fingerprint(attr_to_exclude)
+    return super(Cov, self).get_fingerprint(attr_to_exclude)
 
   def get_equivalent_without_filter(self, *auxiliary_cols):
     """Gets the equivalent Metric for Cov."""

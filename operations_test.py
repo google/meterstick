@@ -1819,6 +1819,35 @@ class JackknifeTests(parameterized.TestCase):
     testing.assert_frame_equal(output_html, expected_html)
     self.assertTrue(m.can_precompute())
 
+  def test_custom_operation(self):
+    df = pd.DataFrame({
+        'x': range(6),
+        'grp': ['A'] * 3 + ['B'] * 3,
+        'unit': [1, 2, 3, 1, 2, 3],
+    })
+
+    class AggregateBy(operations.Operation):
+
+      def __init__(self, agg, child):
+        super(AggregateBy, self).__init__(child, '{}', agg)
+
+      def compute_on_children(self, children, split_by):
+        return children
+
+    agg = AggregateBy('grp', metrics.Sum('x'))
+    jk1 = operations.Jackknife('unit', agg)
+    jk2 = operations.Jackknife('unit', agg, enable_optimization=False)
+
+    output1 = jk1.compute_on(df)
+    output2 = jk2.compute_on(df)
+    expected = operations.Jackknife('unit', metrics.Sum('x')).compute_on(
+        df, 'grp'
+    )
+
+    self.assertTrue(jk1.can_precompute())
+    testing.assert_frame_equal(output1, expected)
+    testing.assert_frame_equal(output2, expected)
+
   def test_integration(self):
     df = pd.DataFrame({
         'X': np.arange(0, 3, 0.5),
