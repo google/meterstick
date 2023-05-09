@@ -2554,8 +2554,8 @@ def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
     return get_jackknife_data_fast_no_adjustment(metric, table, global_filter,
                                                  indexes, local_filter,
                                                  with_data)
-  return get_jackknife_data_fast_no_adjustment(
-      metric, table, global_filter, indexes, local_filter, with_data
+  return get_jackknife_data_fast_with_adjustment(
+      metric, table, split_by, global_filter, indexes, local_filter, with_data
   )
 
 
