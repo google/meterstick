@@ -606,12 +606,14 @@ class PrePostChange(PercentChange):
                          include_base, '{} PrePost Percent Change', **kwargs)
     self.extra_index = condition_column
 
-  def compute_children(self,
-                       df,
-                       split_by,
-                       melted=False,
-                       return_dataframe=True,
-                       cache_key=None):
+  def compute_children(
+      self,
+      df,
+      split_by=None,
+      melted=False,
+      return_dataframe=True,
+      cache_key=None,
+  ):
     child, covariates = super(PrePostChange, self).compute_children(
         df, split_by, return_dataframe=False, cache_key=cache_key)
     original_split_by = [s for s in split_by if s not in self.extra_split_by]
@@ -732,7 +734,7 @@ class CUPED(AbsoluteChange):
 
   def compute_children(self,
                        df,
-                       split_by,
+                       split_by=None,
                        melted=False,
                        return_dataframe=True,
                        cache_key=None):
@@ -914,7 +916,7 @@ class MH(Comparison):
       res = res[~idx_to_match.isin([self.baseline_key])]
     return pd.DataFrame(res.sort_index(level=split_by + self.extra_index))
 
-  def compute_children_sql(self, table, split_by, execute, mode=None):
+  def compute_children_sql(self, table, split_by=None, execute=None, mode=None):
     child = self.children[0]
     self.check_is_ratio(child)
     if isinstance(child, metrics.MetricList):
@@ -1390,7 +1392,7 @@ class MetricWithCI(Operation):
                                                apply_name_tmpl)
     return self.add_base_to_res(res, base) if self.confidence else res
 
-  def compute_slices(self, df, split_by):
+  def compute_slices(self, df, split_by=None):
     std = super(MetricWithCI, self).compute_slices(df, split_by)
     point_est = self.compute_child(df, split_by, melted=True)
     res = point_est.join(utils.melt(std))
@@ -1696,7 +1698,7 @@ class MetricWithCI(Operation):
           'the query being too large/complex, you can try %s' % msg
       ) from e
 
-  def compute_on_sql_sql_mode(self, table, split_by, execute):
+  def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
     """Computes self in a SQL query and process the result."""
     res = super(MetricWithCI,
                 self).compute_on_sql_sql_mode(table, split_by, execute)
@@ -1962,7 +1964,9 @@ class Jackknife(MetricWithCI):
     stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
     return stderrs * dof / np.sqrt(dof + 1), dof
 
-  def compute_children_sql(self, table, split_by, execute, mode, batch_size):
+  def compute_children_sql(
+      self, table, split_by, execute, mode=None, batch_size=None
+  ):
     """Compute the children on leave-one-out data in SQL."""
     batch_size = batch_size or 1
     slice_and_units = sql.Sql(
@@ -2166,7 +2170,9 @@ class Bootstrap(MetricWithCI):
         else:
           yield None, df.loc[resampled].reset_index()
 
-  def compute_children_sql(self, table, split_by, execute, mode, batch_size):
+  def compute_children_sql(
+      self, table, split_by, execute, mode=None, batch_size=None
+  ):
     """Compute the children on resampled data in SQL."""
     batch_size = batch_size or 1000
     global_filter = utils.get_global_filter(self)

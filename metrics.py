@@ -303,7 +303,9 @@ class Metric(object):
       df, _ = next(self.split_data(df, split_by))
       return self.compute_with_split_by(df)
 
-  def compute_children(self, df, split_by):
+  def compute_children(
+      self, df, split_by, melted=False, return_dataframe=True, cache_key=None
+  ):
     raise NotImplementedError
 
   def compute(self, df):
@@ -1183,7 +1185,10 @@ class CompositeMetric(Metric):
       return Mean(s.var, where=s.where_raw).get_fingerprint(attr_to_exclude)
     return super(CompositeMetric, self).get_fingerprint(attr_to_exclude)
 
-  def compute_children(self, df, split_by):
+  def compute_children(
+      self, df, split_by, melted=False, return_dataframe=True, cache_key=None
+  ):
+    del melted, return_dataframe, cache_key  # not used
     if len(self.children) != 2:
       raise ValueError('CompositeMetric can only have two children.')
     if not any([isinstance(m, Metric) for m in self.children]):
