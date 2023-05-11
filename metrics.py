@@ -93,6 +93,7 @@ BUILT_INS = [
     'Cov',
     # Operations
     'Distribution',
+    'Normalize',
     'CumulativeDistribution',
     'PercentChange',
     'AbsoluteChange',

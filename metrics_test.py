@@ -18,10 +18,12 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import inspect
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from meterstick import metrics
+from meterstick import models
 from meterstick import operations
 from meterstick import utils
 import mock
@@ -888,6 +890,29 @@ class TestCaching(parameterized.TestCase):
     )
     expected = pd.DataFrame([[1, 1]], columns=['Foo'] * 2)
     testing.assert_frame_equal(output, expected)
+
+  def test_built_ins(self):
+    all_classes = (
+        inspect.getmembers(metrics, inspect.isclass)
+        + inspect.getmembers(operations, inspect.isclass)
+        + inspect.getmembers(models, inspect.isclass)
+    )
+    all_classes = set(
+        (c[0] for c in all_classes if issubclass(c[1], metrics.Metric))
+    )
+    self.assertEqual(
+        all_classes.difference(metrics.BUILT_INS),
+        # Base classes are excluded in the BUILT_INS.
+        set((
+            'Metric',
+            'SimpleMetric',
+            'Operation',
+            'Comparison',
+            'MetricWithCI',
+            'Model',
+        )),
+    )
+    self.assertEmpty(set(metrics.BUILT_INS).difference(all_classes))
 
 
 if __name__ == '__main__':
