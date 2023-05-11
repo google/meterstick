@@ -1520,7 +1520,44 @@ class MetricWithCI(Operation):
       raise NotImplementedError
     # If self is not root, this function won't be called.
     self._is_root_node = True
-    return super(MetricWithCI, self).to_sql(table, split_by)
+    if self.has_been_preaggregated or not self.can_precompute():
+      if not self.where:
+        return super(MetricWithCI, self).to_sql(table, split_by)
+      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
+      self_no_filter = copy.deepcopy(self)
+      self_no_filter.where = None
+      return self_no_filter.to_sql(table, split_by)
+
+    expanded, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
+    if self != expanded:
+      return expanded.to_sql(table, split_by)
+
+    expanded.where = None  # The filter has been taken care of in preaggregation
+    expanded = utils.push_filters_to_leaf(expanded)
+    split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
+    all_split_by = (
+        split_by + list(utils.get_extra_split_by(expanded)) + [expanded.unit]
+    )
+    leaf = utils.get_leaf_metrics(expanded)
+    cols = [
+        l.get_sql_columns(l.where).set_alias(get_preaggregated_metric_var(l))
+        for l in leaf
+    ]
+    preagg = sql.Sql(cols, table, self.where, all_split_by)
+    equiv = get_preaggregated_metric_tree(expanded)
+    equiv.unit = sql.Column(equiv.unit).alias
+    split_by = sql.Columns(split_by).aliases
+    for m in equiv.traverse():
+      if isinstance(m, metrics.Metric):
+        m.extra_index = sql.Columns(m.extra_index).aliases
+        m.extra_split_by = sql.Columns(m.extra_split_by).aliases
+    if isinstance(equiv, Bootstrap):
+      # When each unit only has one row after preaggregation, we sample by rows.
+      if not utils.get_extra_split_by(equiv):
+        equiv.unit = None
+    else:
+      equiv.has_local_filter = any([l.where for l in leaf])
+    return equiv.to_sql(preagg, split_by)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -2355,88 +2392,6 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
   return sql.Sql(columns, samples_alias, groupby=groupby), with_data
 
 
-def preaggregate_if_possible(metric, table, split_by, global_filter, indexes,
-                             with_data):
-  """Preaggregates data to make the resampled table small.
-
-  For Jackknife and Bootstrap over group, we may preaggegate the data to make
-  the query more efficient, though there are some requirements.
-  1. All leaf Metrics need to be Sum or Count. Namely, metric.can_precompute()
-    is True.
-  2. There cannot be any local filter in the metric tree, otherwise the filter
-    might need access to original rows. Technically it's still possible to
-    preaggregate when there are local filters, but we impose this requirement
-    for code simplicity.
-
-  If preaggregatable, we precompute the sum and count over all split_bys used by
-  the metric tree, clear all the local filters, and replace Count(x) with
-  Sum(preaggregated_x).
-
-  Args:
-    metric: An instance of Jackknife or Bootstrap.
-    table: The table we want to query from.
-    split_by: The columns that we use to split the data.
-    global_filter: The filters that applied to the data for resampling..
-    indexes: The columns that we shouldn't apply any arithmetic operation.
-    with_data: A global variable that contains all the WITH clauses we need.
-
-  Returns:
-    If preaggregation is possible, we return
-      Modified metric tree.
-      The alias of the preaggregated table in the with_data.
-      Modified split_by.
-      Modified indexes.
-      with_data, with preaggregated added.
-    Otherwise, they are returned untouched.
-  """
-  if not isinstance(metric, Jackknife) and not (isinstance(metric, Bootstrap)
-                                                and metric.unit):
-    return metric, table, split_by, global_filter, indexes, with_data
-  if isinstance(metric, Jackknife) and not metric.can_precompute():
-    return metric, table, split_by, global_filter, indexes, with_data
-
-  all_split_by = sql.Columns(indexes).add(utils.get_extra_split_by(metric)).add(
-      metric.unit)
-  cols = sql.Columns()
-  for m in metric.traverse():
-    if sql.Filters(m.where).remove(global_filter):
-      return metric, table, split_by, global_filter, indexes, with_data
-    if isinstance(m, metrics.Sum):
-      cols.add(sql.Column(m.var, 'SUM({})'))
-    elif isinstance(m, metrics.Count):
-      cols.add(sql.Column(m.var, 'COUNT({})'))
-
-  metric = copy.deepcopy(metric)
-  metric.unit = sql.Column(metric.unit).alias
-  todo = [metric]
-  while todo:
-    curr = todo.pop()
-    curr.where = None
-    new_children = list(curr.children)
-    for i, m in enumerate(curr.children):
-      if not isinstance(m, metrics.Metric):
-        continue
-      todo.append(m)
-      if isinstance(m, Operation):
-        m.extra_index = [sql.Column(i, alias=i).alias for i in m.extra_index]
-        m.extra_split_by = [
-            sql.Column(i, alias=i).alias for i in m.extra_split_by
-        ]
-        if isinstance(m, MH):
-          m.stratified_by = sql.Column(m.stratified_by).alias
-      elif isinstance(m, metrics.Sum):
-        m.var = sql.Column(m.var, 'SUM({})').alias
-      elif isinstance(m, metrics.Count):
-        new_children[i] = metrics.Sum(sql.Column(m.var, 'COUNT({})').alias)
-    curr.children = new_children
-
-  preagg = sql.Sql(cols, table, global_filter, all_split_by)
-  preagg_alias = with_data.add(sql.Datasource(preagg, 'Preaggregated'))
-
-  return metric, preagg_alias, sql.Columns(
-      split_by.aliases), sql.Filters(), sql.Columns(indexes.aliases), with_data
-
-
 def adjust_indexes_for_jk_fast(indexes):
   """For the indexes that get renamed, only keep the alias.
 
@@ -2555,13 +2510,15 @@ def get_jackknife_data_general(metric, table, split_by, global_filter,
 
 def get_jackknife_data_fast(metric, table, split_by, global_filter, indexes,
                             local_filter, with_data):
-  # When there is any index added by Operation, we need adjustment.
-  if split_by == sql.Columns(indexes):
-    return get_jackknife_data_fast_no_adjustment(metric, table, global_filter,
-                                                 indexes, local_filter,
-                                                 with_data)
-  return get_jackknife_data_fast_with_adjustment(
-      metric, table, split_by, global_filter, indexes, local_filter, with_data
+  # When there is any filter or Operation inside Jackknife, we need adjustments.
+  if getattr(metric, 'has_local_filter', False) or split_by != sql.Columns(
+      indexes
+  ):
+    return get_jackknife_data_fast_with_adjustment(
+        metric, table, split_by, global_filter, indexes, local_filter, with_data
+    )
+  return get_jackknife_data_fast_no_adjustment(
+      metric, table, global_filter, indexes, local_filter, with_data
   )
 
 
@@ -2570,10 +2527,10 @@ def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
   If all the leaf Metrics are Sum and/or Count, we can compute the
-  leave-one-out (LOO) estimates faster. If there is no index added by Operation,
-  then no adjustment for slices is needed. The query is just like
+  leave-one-out (LOO) estimates faster. If no adjustment for slices is needed,
+  the query will be like
   WITH
-  LOO AS (SELECT DISTINCT
+  LOO AS (SELECT
     unrenamed_split_by,
     $RenamedSplitByIfAny AS renamed_split_by,
     unit AS _resample_idx,
@@ -2620,7 +2577,6 @@ def get_jackknife_data_fast_no_adjustment(metric, table, global_filter, indexes,
 
   bucket = sql.Column(metric.unit, alias='_resample_idx')
   columns = sql.Columns(all_indexes).add(bucket).add(columns)
-  columns.distinct = True
   loo_table = with_data.add(
       sql.Datasource(sql.Sql(columns, table, where=where), 'LOO'))
   return loo_table, with_data
@@ -2632,9 +2588,8 @@ def get_jackknife_data_fast_with_adjustment(metric, table, split_by,
   """Gets jackknife samples in a fast way for precomputable Jackknife.
 
   If all the leaf Metrics are Sum and/or Count, we can compute the
-  leave-one-out (LOO) estimates faster. If there is any index added by Operation
-  then we need to adjust the slices. See utils.adjust_slices_for_loo() for more
-  discussions. The query will look like
+  leave-one-out (LOO) estimates faster. If we need to adjust the slices, (see
+  utils.adjust_slices_for_loo() for more discussions), the query will look like
   WITH
   UnitSliceCount AS (SELECT
     split_by,
