@@ -566,6 +566,16 @@ class TestCompositeMetric(absltest.TestCase):
     expected = pd.DataFrame(unweightd.values / weightd.values, columns=columns)
     testing.assert_frame_equal(output, expected)
 
+  def test_duplicate_column_names(self):
+    df = pd.DataFrame({'g': ['a', 'b'], 'x': [1, 3]})
+    a = metrics.Sum('x', where='g == "a"')
+    b = metrics.Sum('x', where='g == "b"')
+    output = (metrics.MetricList((a, b)) / (a + b)).compute_on(df)
+    expected = pd.DataFrame(
+        [[0.25, 0.75]], columns=['sum(x) / sum(x) + sum(x)'] * 2
+    )
+    testing.assert_frame_equal(output, expected)
+
 
 class TestMetricList(absltest.TestCase):
 

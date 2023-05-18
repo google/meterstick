@@ -1244,16 +1244,16 @@ class CompositeMetric(Metric):
         a.columns = columns
         b.columns = columns
     elif isinstance(a, pd.DataFrame):
-      for col in a.columns:
-        a[col] = self.op(a[col], b)
+      for i in range(len(a.columns)):
+        a.iloc[:, i] = self.op(a.iloc[:, i], b)
       res = a
       columns = [
           self.name_tmpl.format(c, getattr(m2, 'name', m2)) for c in res.columns
       ]
       res.columns = columns
     elif isinstance(b, pd.DataFrame):
-      for col in b.columns:
-        b[col] = self.op(a, b[col])
+      for i in range(len(b.columns)):
+        b.iloc[:, i] = self.op(a, b.iloc[:, i])
       res = b
       columns = [
           self.name_tmpl.format(getattr(m1, 'name', m1), c) for c in res.columns
