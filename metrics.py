@@ -713,14 +713,8 @@ class Metric(object):
     columns = [a.alias_raw for a in query.groupby.add(query.columns)]
     columns[:len(indexes)] = indexes
     res.columns = columns
-    # We replace '$' with 'macro_' in the generated SQL. To recover the names,
-    # we cannot just replace 'macro_' with '$' because 'macro_' might be in the
-    # original names. We can get the index names so we can recover them but
-    # unfortunately it's not as easy to recover metric/column names, so for the
-    # metrics we just replace 'macro_' with '$'.
     if indexes:
       res.set_index(indexes, inplace=True)
-    res.columns = [c.replace('macro_', '$') for c in res.columns]
     if split_by:  # Use a stable sort.
       res.sort_values(split_by, kind='mergesort', inplace=True)
     return res

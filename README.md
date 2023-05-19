@@ -290,8 +290,8 @@ gives
 ```sql
 SELECT
   grp,
-  SUM(IF(Y > 0, X, NULL)) AS `sum(X)`,
-  SUM(X) AS `sum(X)_1`
+  SUM(IF(Y > 0, X, NULL)) AS sum_X,
+  SUM(X) AS sum_X_1
 FROM table
 GROUP BY grp
 ```

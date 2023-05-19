@@ -71,19 +71,38 @@ def get_alias(c):
 
 
 def escape_alias(alias):
-  if alias is None:
-    return None
-  # Macro still gets parsed inside backquotes.
-  if alias and '$' in alias:
-    alias = alias.replace('$', 'macro_')
-  alias = alias.replace('`', '')
-  if alias and set(r""" `~!@#$%^&*()-=+[]{}\|;:'",.<>/?""").intersection(alias):
-    return '`%s`' % alias.replace('\\', '\\\\')
-  return alias
+  """Replaces special characters in SQL column name alias."""
+  special = set(r""" `~!@#$%^&*()-=+[]{}\|;:'",.<>/?""")
+  if not alias or not special.intersection(alias):
+    return alias
+  escape = {c: '_' for c in special}
+  escape.update({
+      '!': '_not_',
+      '$': '_macro_',
+      '@': '_at_',
+      '%': '_pct_',
+      '^': '_to_the_power_',
+      '*': '_times_',
+      ')': '',
+      '-': '_minus_',
+      '=': '_equals_',
+      '+': '_plus_',
+      '.': '_point_',
+      '/': '_divides_',
+      '>': '_greater_than_',
+      '<': '_smaller_than_',
+  })
+  res = (
+      ''.join(escape.get(c, c) for c in alias)
+      .strip('_')
+      .strip(' ')
+      .replace('__', '_')
+  )
+  return 'col_' + res if res[0].isdigit() else res
 
 
 @functools.total_ordering
-class SqlComponent():
+class SqlComponent:
   """Base class for a SQL component like column, tabel and filter."""
 
   def __eq__(self, other):

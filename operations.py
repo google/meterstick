@@ -2330,8 +2330,7 @@ def get_preaggregated_metric_var(m: metrics.Metric):
   }
   name = tmpl_lookup[type(m)] % m.var
   name = f'{name} where {m.where}' if m.where else name
-  name = name.replace('$', 'macro_')
-  return name if name == sql.escape_alias(name) else f'`{name}`'
+  return sql.Column(name).alias
 
 
 def get_se(metric, table, split_by, global_filter, indexes, local_filter,
@@ -2645,10 +2644,10 @@ def modify_descendants_for_jackknife_fast(
   3. Removes filters as they have already been applied in the LOO table. Note
     that we made a copy in get_se for metric so the removal won't affect the
     metric used in point estimate computation.
-  4. For Operations, their extra_index columns appear in indexes. If any of them
-    has forbidden character in the name, it will be renamed in LOO so we have to
-    change extra_index. For example, Distribution('$Foo') will generate a column
-    $Foo AS macro_Foo in LOO so we need to replace '$Foo' with 'macro_Foo'.
+  4. For Operations, their extra_index columns appear in indexes. Any forbidden
+    character in the name will be replaced/dropped in LOO so we have to change
+    extra_index. For example, Distribution('$Foo') will generate a column
+    '$Foo AS macro_Foo' in LOO so we need to replace '$Foo' with 'macro_Foo'.
 
   We need to make a copy for the Metric or in
   sumx = metrics.Sum('X')
@@ -2683,7 +2682,7 @@ def modify_descendants_for_jackknife_fast(
     tmpl = 'total_table.%s - unit_slice_table.%s'
   if isinstance(metric, (metrics.Sum, metrics.Count)):
     filters = sql.Filters(local_filter).remove(global_filter)
-    c = metric.var
+    c = sql.Column(metric.var).alias
     op = 'COUNT({})' if isinstance(metric, metrics.Count) else 'SUM({})'
     col = sql.Column(c, op, filters=filters)
     columns_to_preagg.add(col)
