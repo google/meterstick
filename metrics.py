@@ -698,7 +698,7 @@ class Metric(object):
     if not mode:
       try:
         return self.compute_on_sql_sql_mode(table, split_by, execute)
-      except Exception:  # pylint: disable=broad-except
+      except NotImplementedError:
         pass
     if self.where:
       table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
@@ -984,9 +984,7 @@ class MetricList(Metric):
     1. Get the query for every children metric.
     2. If all children queries are compatible, we just collect all the columns
       from the children and use the WHERE and GROUP BY clauses from any
-      children. The FROM clause is more complex. We use the largest FROM clause
-      in children.
-      See the doc of is_compatible() for its meaning.
+      children.
       If any pair of children queries are incompatible, we merge the compatible
       children as much as possible then add the merged SQLs to with_data, join
       them on indexes, and SELECT *.
@@ -1322,7 +1320,7 @@ class CompositeMetric(Metric):
           query0.columns) != len(query1.columns):
         raise ValueError('Children Metrics have different shapes!')
 
-      compatible, larger_from = sql.is_compatible(query0, query1)
+      compatible = sql.is_compatible(query0, query1)
       if compatible:
         col0_col1 = zip(itertools.cycle(query0.columns), query1.columns)
         if len(query1.columns) == 1:
@@ -1336,7 +1334,6 @@ class CompositeMetric(Metric):
             columns.add(op(c0, c1).set_alias(alias))
         query = query0
         query.columns = columns
-        query.from_data = larger_from
       else:
         tbl0 = with_data.add(sql.Datasource(query0, 'CompositeMetricTable0'))
         tbl1 = with_data.add(sql.Datasource(query1, 'CompositeMetricTable1'))
