@@ -728,13 +728,18 @@ class Sql(SqlComponent):
 
   def __str__(self):
     with_clause = 'WITH\n%s' % self.with_data if self.with_data else None
-    tmpl = 'SELECT DISTINCT\n%s' if self.columns.distinct else 'SELECT\n%s'
-    select_clause = tmpl % Columns(self.groupby).add(self.columns)
+    select_clause = 'SELECT\n%s' % Columns(self.groupby).add(self.columns)
     from_clause = ('FROM %s'
                    if self.from_data.is_table else 'FROM\n%s') % self.from_data
     where_clause = 'WHERE\n%s' % self.where if self.where else None
-    groupby_clause = 'GROUP BY %s' % self.groupby.as_groupby(
-    ) if self.groupby else None
+    if self.columns.distinct:
+      if self.groupby:
+        raise ValueError('GROUP BY cannot exist with DISTINCT')
+      groupby_clause = 'GROUP BY %s' % self.columns.as_groupby()
+    else:
+      groupby_clause = (
+          'GROUP BY %s' % self.groupby.as_groupby() if self.groupby else None
+      )
     orderby_clause = 'ORDER BY %s' % self.orderby.as_groupby(
     ) if self.orderby else None
     clauses = [
