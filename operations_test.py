@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1872,15 +1872,20 @@ class JackknifeTests(parameterized.TestCase):
     m = operations.Jackknife('cookie', metrics.Sum('X', where='X > 0.5'), 0.9)
     res = m.compute_on(df)
     output = res.display(return_formatted_df=True)
-    expected = pd.DataFrame({
-        'sum(X)': [
-            '<div class="ci-display-good-change ci-display-cell"><div>'
-            '<span class="ci-display-ratio">7.0000</span>'
-            '<div class="ci-display-flex-line-break"></div>'
-            '<span class="ci-display-ci-range">[3.4906, 10.5094]</span>'
-            '</div></div>'
-        ]
-    })
+    expected = pd.DataFrame(
+        {
+            'sum(X)': (
+                (
+                    '<div class="ci-display-good-change'
+                    ' ci-display-cell"><div><span'
+                    ' class="ci-display-ratio">7.0000</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[3.4906,'
+                    ' 10.5094]</span></div></div>'
+                ),
+            )
+        }
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
@@ -1896,23 +1901,33 @@ class JackknifeTests(parameterized.TestCase):
     expected = pd.DataFrame(
         {
             'Dimensions': [
-                '<div><div><span class="ci-display-dimension">A</span></div>'
-                '</div>',
-                '<div><div><span class="ci-display-dimension">B</span></div>'
-                '</div>'
+                (
+                    '<div><div><span'
+                    ' class="ci-display-dimension">A</span></div></div>'
+                ),
+                (
+                    '<div><div><span'
+                    ' class="ci-display-dimension">B</span></div></div>'
+                ),
             ],
             'sum(X)': [
-                '<div class="ci-display-cell"><div>'
-                '<span class="ci-display-ratio">2.5000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[-5.3922, 10.3922]</span>'
-                '</div></div>', '<div class="ci-display-cell"><div>'
-                '<span class="ci-display-ratio">5.0000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[-1.3138, 11.3138]</span>'
-                '</div></div>'
-            ]
-        },)
+                (
+                    '<div class="ci-display-cell"><div><span'
+                    ' class="ci-display-ratio">2.5000</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[-5.3922,'
+                    ' 10.3922]</span></div></div>'
+                ),
+                (
+                    '<div class="ci-display-cell"><div><span'
+                    ' class="ci-display-ratio">5.0000</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[-1.3138,'
+                    ' 11.3138]</span></div></div>'
+                ),
+            ],
+        },
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
@@ -1929,21 +1944,29 @@ class JackknifeTests(parameterized.TestCase):
     expected = pd.DataFrame(
         {
             'Dimensions': [
-                '<div><div><span class="ci-display-experiment-id">A</span>'
-                '</div></div>',
-                '<div><div><span class="ci-display-experiment-id">B</span>'
-                '</div></div>'
+                (
+                    '<div><div><span class="ci-display-experiment-id">A</span>'
+                    '</div></div>'
+                ),
+                (
+                    '<div><div><span class="ci-display-experiment-id">B</span>'
+                    '</div></div>'
+                ),
             ],
             'sum(X)': [
                 '<div class="ci-display-cell">6.0000</div>',
-                '<div class="ci-display-good-change ci-display-cell">'
-                '<div>300.0000<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ratio">4900.00%</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[357.80, 9442.20] %</span>'
-                '</div></div>'
-            ]
-        },)
+                (
+                    '<div class="ci-display-good-change'
+                    ' ci-display-cell"><div>300.0000<div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ratio">4900.00%</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[357.80, 9442.20]'
+                    ' %</span></div></div>'
+                ),
+            ],
+        },
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
@@ -1961,35 +1984,54 @@ class JackknifeTests(parameterized.TestCase):
     expected = pd.DataFrame(
         {
             'Dimensions': [
-                '<div><div><span class="ci-display-experiment-id">foo</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-dimension">A</span></div></div>',
-                '<div><div><span class="ci-display-experiment-id">bar</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-dimension">A</span></div></div>',
-                '<div><div><span class="ci-display-experiment-id">foo</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-dimension">B</span></div></div>',
-                '<div><div><span class="ci-display-experiment-id">bar</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-dimension">B</span></div></div>'
+                (
+                    '<div><div><span'
+                    ' class="ci-display-experiment-id">foo</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-dimension">A</span></div></div>'
+                ),
+                (
+                    '<div><div><span'
+                    ' class="ci-display-experiment-id">bar</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-dimension">A</span></div></div>'
+                ),
+                (
+                    '<div><div><span'
+                    ' class="ci-display-experiment-id">foo</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-dimension">B</span></div></div>'
+                ),
+                (
+                    '<div><div><span'
+                    ' class="ci-display-experiment-id">bar</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-dimension">B</span></div></div>'
+                ),
             ],
             'sum(X)': [
                 '<div class="ci-display-cell">6.0000</div>',
-                '<div class="ci-display-good-change ci-display-cell">'
-                '<div>1001.0000<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ratio">995.0000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[988.6862, 1001.3138]</span>'
-                '</div></div>', '<div class="ci-display-cell">4.0000</div>',
-                '<div class="ci-display-cell">'
-                '<div>3005.0000<div class="ci-display-flex-line-break">'
-                '</div><span class="ci-display-ratio">3001.0000</span>'
-                '<div class="ci-display-flex-line-break"></div>'
-                '<span class="ci-display-ci-range">[-380.8246, 6382.8246]'
-                '</span></div></div>'
-            ]
-        },)
+                (
+                    '<div class="ci-display-good-change'
+                    ' ci-display-cell"><div>1001.0000<div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ratio">995.0000</span><div'
+                    ' class="ci-display-flex-line-break"></div><span'
+                    ' class="ci-display-ci-range">[988.6862,'
+                    ' 1001.3138]</span></div></div>'
+                ),
+                '<div class="ci-display-cell">4.0000</div>',
+                (
+                    '<div class="ci-display-cell">'
+                    '<div>3005.0000<div class="ci-display-flex-line-break">'
+                    '</div><span class="ci-display-ratio">3001.0000</span>'
+                    '<div class="ci-display-flex-line-break"></div>'
+                    '<span class="ci-display-ci-range">[-380.8246, 6382.8246]'
+                    '</span></div></div>'
+                ),
+            ],
+        },
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 

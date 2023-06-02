@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -879,7 +879,7 @@ class Metric(object):
 
   def get_equivalent(self, *auxiliary_cols):
     """Gets a Metric that is equivalent to self."""
-    res = self.get_equivalent_without_filter(*auxiliary_cols)
+    res = self.get_equivalent_without_filter(*auxiliary_cols)  # pylint: disable=assignment-from-none
     if res:
       res.name = self.name
       res.where = self.where_raw
