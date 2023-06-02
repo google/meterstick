@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import datetime
 import itertools
 from typing import Any, Iterable, List, Optional, Sequence, Text, Union
 
@@ -40,6 +41,7 @@ def compute_on(df,
   # pylint: enable=g-long-lambda
 
 
+# pylint: disable=g-long-lambda
 def compute_on_sql(
     table,
     split_by=None,
@@ -50,7 +52,6 @@ def compute_on_sql(
     cache=None,
     **kwargs):
   """A wrapper that metric | compute_on_sql() === metric.compute_on_sql()."""
-  # pylint: disable=g-long-lambda
   return lambda m: m.compute_on_sql(
       table,
       split_by,
@@ -60,7 +61,25 @@ def compute_on_sql(
       cache_key,
       cache=cache,
       **kwargs)
-  # pylint: enable=g-long-lambda
+
+
+def compute_on_beam(
+    table,
+    split_by=None,
+    execute=None,
+    melted=False,
+    mode=None,
+    cache_key=None,
+    cache=None,
+    **kwargs,
+):
+  """A wrapper for metric.compute_on_beam()."""
+  return lambda m: m.compute_on_beam(
+      table, split_by, execute, melted, mode, cache_key, cache=cache, **kwargs
+  )
+
+
+# pylint: enable=g-long-lambda
 
 
 def to_sql(table, split_by=None):
@@ -790,6 +809,67 @@ class Metric(object):
             c.compute_on_sql(table, split_by + self.extra_split_by, execute,
                              False, mode, self.cache_key, self.cache))
     return children[0] if len(self.children) == 1 else children
+
+  def compute_on_beam(
+      self,
+      pcol,
+      split_by=None,
+      execute=None,
+      melted=False,
+      mode=None,
+      cache_key=None,
+      cache=None,
+      **kwargs,
+  ):
+    """Computes on an Apache Beam PCollection input.
+
+    Args:
+      pcol: An apache_beam.pvalue.PCollection instance we want to compute on. It
+        needs to have a schema so it's queryable.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes PCollection with a SqlTransform and
+        returns a DataFrame.
+      melted: Whether to transform the result to long format.
+      mode: Similar to the one in compute_on_sql(). `None` maximizes Beam usage
+        while 'mixed' minimizes the usage.
+      cache_key: What key to use to cache the result. You can use anything that
+        can be a key of a dict except '_RESERVED' and tuples like ('_RESERVED',
+        ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
+      **kwargs: Other kwargs passed to compute_on_sql.
+
+    Returns:
+      A pandas DataFrame.
+    """
+    # pylint: disable=g-import-not-at-top
+    from apache_beam import pvalue
+    from apache_beam.transforms import sql as beam_sql
+
+    if not isinstance(pcol, pvalue.PCollection):
+      raise ValueError(
+          'The input must be a PCollection but got %s!' % type(pcol)
+      )
+
+    def e(q):
+      label = f'Meterstick at {datetime.datetime.now()} runs {q}'
+      res = execute(pcol | label >> beam_sql.SqlTransform(str(q)))
+      return res
+
+    # pylint: disable=g-import-not-at-top
+
+    try:
+      return self.compute_on_sql(
+          'PCOLLECTION', split_by, e, melted, mode, cache_key, cache, **kwargs
+      )
+    except Exception as e:  # pylint: disable=broad-except
+      if not mode:
+        raise ValueError(
+            "Please see the root cause of the failure above. If it's caused by "
+            'the SQL query not being supported, try '
+            "compute_on_beam(..., mode='mixed')."
+        ) from e
+      raise
 
   def compute_equivalent(self, df, split_by=None):
     equiv, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)

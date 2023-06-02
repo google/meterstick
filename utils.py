@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,9 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import datetime
+import glob
+import os
 from typing import Iterable, List, Optional, Text, Union
 
 from meterstick import sql
@@ -642,3 +645,38 @@ def get_global_filter(metric) -> sql.Filters:
     shared_filter = set.intersection(*children_filters)
     global_filter.add(shared_filter)
   return global_filter
+
+
+def pcollection_to_df_via_file_io(
+    pcol, pipeline, output_dir: str, cleanup=False
+) -> pd.DataFrame:
+  """Evaluates a PCollection, saves result, reads back to a DataFrame.
+
+  Args:
+    pcol: A PCollection instance for evaluation.
+    pipeline: An Apache Beam pipeline that holds pcol. We assume pipeline.run()
+      will execute the pipeline.
+    output_dir: A folder where we saves the result of pcol.
+    cleanup: If to delete the files we create when done.
+
+  Returns:
+    The result of pcol.
+  """
+  # pylint: disable=g-import-not-at-top
+  from apache_beam.dataframe import convert
+  from apache_beam.dataframe import io
+  # pylint: enable=g-import-not-at-top
+
+  now = datetime.datetime.now()
+  filename = f'Meterstick pcollection_to_df_via_file_io at {now}'
+  output_path = os.path.join(output_dir, filename)
+  pcol = convert.to_dataframe(pcol, label=f'to df at {now}')
+  pcol = io.to_csv(pcol, output_path, f'to csv at {now}', index=False)
+  pipeline.run()
+
+  res = []
+  for f in glob.glob(f'{output_path}-*'):  # output is sharded
+    res.append(pd.read_csv(f))
+    if cleanup:
+      os.remove(f)
+  return pd.concat(res, ignore_index=True)
