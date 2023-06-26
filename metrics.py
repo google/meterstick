@@ -1114,13 +1114,15 @@ class MetricList(Metric):
     columns = sql.Columns(indexes.aliases)
     for i, (alias, table) in enumerate(incompatible_sqls.children.items()):
       data = sql.Datasource(table, alias)
-      alias, rename = with_data.merge(data)
+      alias = with_data.merge(data)
       for c in table.columns:
         if c not in columns:
           columns.add(
               sql.Column(
-                  '%s.%s' % (alias, rename.get(c.alias, c.alias)),
-                  alias=name_tmpl.format(c.alias_raw)))
+                  '%s.%s' % (alias, c.alias),
+                  alias=name_tmpl.format(c.alias_raw),
+              )
+          )
       if i == 0:
         from_data = alias
       else:
@@ -1426,8 +1428,8 @@ class CompositeMetric(Metric):
         query = query0
         query.columns = columns
       else:
-        tbl0 = with_data.add(sql.Datasource(query0, 'CompositeMetricTable0'))
-        tbl1 = with_data.add(sql.Datasource(query1, 'CompositeMetricTable1'))
+        tbl0 = with_data.merge(sql.Datasource(query0, 'CompositeMetricTable0'))
+        tbl1 = with_data.merge(sql.Datasource(query1, 'CompositeMetricTable1'))
         join = 'FULL' if indexes else 'CROSS'
         from_data = sql.Join(tbl0, tbl1, join=join, using=indexes)
         columns = sql.Columns()

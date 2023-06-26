@@ -59,7 +59,7 @@ def get_data(m, table, split_by, execute, normalize=False):
   data = m.children[0].to_sql(table, split_by + m.group_by)
   with_data = data.with_data
   data.with_data = None
-  table, _ = with_data.merge(sql.Datasource(data, 'DataToFit'))
+  table = with_data.merge(sql.Datasource(data, 'DataToFit'))
   y = data.columns[-m.k - 1].alias
   xs_cols = sql.Columns(data.columns[-m.k :])
   if not normalize:
@@ -84,14 +84,11 @@ def get_data(m, table, split_by, execute, normalize=False):
     centered = sql.Column(x) - sql.Column(x, 'AVG({})', partition=split_by)
     centered.alias = x
     table_with_centered_x.add(centered)
-  table, rename = with_data.merge(
+  table = with_data.merge(
       sql.Datasource(sql.Sql(table_with_centered_x, table), 'DataCentered')
   )
 
-  norms = [
-      sql.Column('SQRT(SUM(POWER(%s, 2)))' % rename.get(x, x), alias=x)
-      for x in xs
-  ]
+  norms = [sql.Column(f'SQRT(SUM(POWER({x}, 2)))', alias=x) for x in xs]
   norms = sql.Sql(
       sql.Columns(split_by).add(norms),
       table,

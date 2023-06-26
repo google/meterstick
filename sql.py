@@ -149,11 +149,11 @@ class SqlComponents(SqlComponent):
 
   def add(self, children):
     if not isinstance(children, str) and isinstance(children, abc.Iterable):
-      for c in children:
+      for c in list(children):
         self.add(c)
     else:
       if children and children not in self.children:
-        self.children.append(copy.deepcopy(children))
+        self.children.append(children)
     return self
 
   def __iter__(self):
@@ -240,15 +240,17 @@ class Column(SqlComponent):
   4. Alias will be sanitized and auto-added if necessary.
   """
 
-  def __init__(self,
-               column=None,
-               fn: Text = '{}',
-               alias: Optional[Text] = None,
-               filters=None,
-               partition=None,
-               order=None,
-               window_frame=None,
-               auto_alias=True):
+  def __init__(
+      self,
+      column,
+      fn: Text = '{}',
+      alias: Optional[Text] = None,
+      filters=None,
+      partition=None,
+      order=None,
+      window_frame=None,
+      auto_alias=True,
+  ):
     super(Column, self).__init__()
     self.column = [column] if isinstance(column, str) else column or []
     self.fn = fn
@@ -415,7 +417,7 @@ class Columns(SqlComponents):
   def get_alias(self, expression):
     res = [c for c in self if c.expression == expression]
     if res:
-      return res[0].alias
+      return res[0].alias_raw
     return None
 
   def get_column(self, alias):
@@ -499,7 +501,11 @@ class Datasource(SqlComponent):
       self.table = table.table
       self.alias = alias or table.alias
     self.alias = escape_alias(self.alias)
-    self.is_table = not str(self.table).strip().upper().startswith('SELECT')
+    self.is_table = (
+        not str(self.table).strip().upper().startswith('SELECT')
+        and 'WITH ' not in str(self.table).upper()
+        and 'WITH\n' not in str(self.table).upper()
+    )
 
   def get_expression(self, form='FROM'):
     """Gets the expression that can be used in a FROM or WITH clause."""
@@ -568,7 +574,7 @@ class Datasources(SqlComponents):
   def datasources(self):
     return (Datasource(v, k) for k, v in self.children.items())
 
-  def merge(self, new_child: Datasource):
+  def merge(self, new_child: Union[Datasource, 'Datasources', 'Sql']):
     """Merges a datasource if possible.
 
     The difference between merge() and add() is that in add() we skip only when
@@ -595,6 +601,12 @@ class Datasources(SqlComponents):
     Returns:
       The alias of the Datasource we eventually add.
     """
+    if isinstance(new_child, Sql):
+      new_child = Datasource(new_child)
+    if isinstance(new_child, Datasources):
+      for d in new_child.datasources:
+        self.merge(d)
+      return
     if not isinstance(new_child, Datasource):
       raise ValueError(
           '%s is a %s, not a Datasource! You can try .add() instead.' %
@@ -604,19 +616,19 @@ class Datasources(SqlComponents):
     if alias in self.children:
       target = self.children[alias]
       if isinstance(target, Sql):
-        merged, rename = target.merge(table)
+        merged = target.merge(table)
         if merged:
-          return alias, rename
+          return alias
     for a, t in self.children.items():
       if a == alias or not isinstance(t, Sql):
         continue
-      merged, rename = t.merge(table)
+      merged = t.merge(table)
       if merged:
-        return a, rename
+        return a
     while new_child.alias in self.children:
       new_child.alias = add_suffix(new_child.alias)
     self.children[new_child.alias] = table
-    return new_child.alias, {}
+    return new_child.alias
 
   def add(self, children: Union[Datasource, Iterable[Datasource]]):
     """Adds a datasource if not existing.
@@ -705,6 +717,10 @@ class Sql(SqlComponent):
       from_data = Datasource(from_data)
     self.from_data = from_data
 
+  @property
+  def all_columns(self):
+    return Columns(self.groupby).add(self.columns)
+
   def add(self, attr, values):
     getattr(self, attr).add(values)
     return self
@@ -724,14 +740,11 @@ class Sql(SqlComponent):
     if not isinstance(other, Sql):
       raise ValueError('Expected a Sql instance but got %s!' % type(other))
     if self == other:
-      return True, {}
-    compatible = is_compatible(self, other)
-    if not compatible:
-      return False, {}
-    curr_aliases = other.columns.aliases
+      return True
+    if not is_compatible(self, other):
+      return False
     self.columns.add(other.columns)
-    return True, dict(
-        [i for i in zip(curr_aliases, other.columns.aliases) if i[0] != i[1]])
+    return True
 
   def __str__(self):
     with_clause = 'WITH\n%s' % self.with_data if self.with_data else None

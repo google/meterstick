@@ -634,7 +634,7 @@ def get_global_filter(metric) -> sql.Filters:
   """Collects the filters that can be applied globally to the Metric tree."""
   global_filter = sql.Filters()
   if metric.where:
-    global_filter.add(metric.where)
+    global_filter.add(metric.where_raw)
   # Filters inside resampling Operations shound not be considered global.
   if type(metric).__name__ in ('Jackknife', 'Bootstrap'):
     return global_filter

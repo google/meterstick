@@ -215,15 +215,15 @@ class Distribution(Operation):
     child_sql, with_data = self.children[0].get_sql_and_with_clause(
         table, indexes, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'DistributionRaw')
-    child_table_alias, rename = with_data.merge(child_table)
+    child_table_alias = with_data.merge(child_table)
     groupby = sql.Columns(indexes.aliases)
     columns = sql.Columns()
     for c in child_sql.columns:
       if c.alias in groupby:
         continue
-      alias = rename.get(c.alias, c.alias)
-      col = sql.Column(alias) / sql.Column(
-          alias, 'SUM({})', partition=split_by.aliases)
+      col = sql.Column(c.alias) / sql.Column(
+          c.alias, 'SUM({})', partition=split_by.aliases
+      )
       col.set_alias('Distribution of %s' % c.alias_raw)
       columns.add(col)
     return sql.Sql(groupby.add(columns), child_table_alias), with_data
@@ -307,7 +307,7 @@ class CumulativeDistribution(Operation):
     child_sql, with_data = util_metric.get_sql_and_with_clause(
         table, split_by, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'CumulativeDistributionRaw')
-    child_table_alias, rename = with_data.merge(child_table)
+    child_table_alias = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
     order = list(utils.get_extra_idx(self))
     order = [
@@ -319,11 +319,12 @@ class CumulativeDistribution(Operation):
         continue
 
       col = sql.Column(
-          rename.get(c.alias, c.alias),
+          c.alias,
           'SUM({})',
           partition=split_by.aliases,
           order=order,
-          window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')
+          window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW',
+      )
       col.set_alias('Cumulative %s' % c.alias_raw)
       columns.add(col)
     return sql.Sql(columns, child_table_alias), with_data
@@ -428,11 +429,10 @@ class Comparison(Operation):
     child = self.children[0]
     cond_cols = sql.Columns(self.extra_split_by)
     groupby = sql.Columns(split_by).add(cond_cols)
-    alias_tmpl = self.name_tmpl
     raw_table_sql, with_data = child.get_sql_and_with_clause(
         table, groupby, global_filter, indexes, local_filter, with_data)
     raw_table = sql.Datasource(raw_table_sql, 'ChangeRaw')
-    raw_table_alias, rename = with_data.merge(raw_table)
+    raw_table_alias = with_data.merge(raw_table)
 
     base = self.baseline_key if isinstance(self.baseline_key,
                                            tuple) else [self.baseline_key]
@@ -440,16 +440,13 @@ class Comparison(Operation):
                  for c, b in zip(cond_cols.aliases, base))
     base_cond = ' AND '.join(base_cond)
     cols = sql.Columns(raw_table_sql.groupby.aliases)
-    cols.add((rename.get(a, a) for a in raw_table_sql.columns.aliases))
+    cols.add(raw_table_sql.columns.aliases)
     base_value = sql.Sql(
         cols.difference(cond_cols.aliases), raw_table_alias, base_cond)
     base_table = sql.Datasource(base_value, 'ChangeBase')
-    base_table_alias, rename = with_data.merge(base_table)
+    base_table_alias = with_data.merge(base_table)
 
-    exclude_base_condition = ('%s != %s' % (c, _format_to_condition(b))
-                              for c, b in zip(cond_cols.aliases, base))
-    exclude_base_condition = ' OR '.join(exclude_base_condition)
-    cond = None if self.include_base else sql.Filters([exclude_base_condition])
+    cond = None if self.include_base else sql.Filters([f'NOT ({base_cond})'])
     if isinstance(self, AbsoluteChange):
       col_tmp = f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'
     else:
@@ -461,12 +458,14 @@ class Comparison(Operation):
           + ' * 100 - 100'
       )
     columns = sql.Columns()
-    for c in raw_table_sql.columns.difference(indexes.aliases):
-      raw_table_col = rename.get(c.alias, c.alias)
-      base_table_col = rename.get(c.alias, c.alias)
+    val_col_len = len(raw_table_sql.all_columns) - len(indexes)
+    for r, b in zip(
+        raw_table_sql.all_columns[-val_col_len:],
+        base_value.columns[-val_col_len:],
+    ):
       col = sql.Column(
-          col_tmp % {'r': raw_table_col, 'b': base_table_col},
-          alias=alias_tmpl.format(c.alias_raw),
+          col_tmp % {'r': r.alias, 'b': b.alias},
+          alias=self.name_tmpl.format(r.alias_raw),
       )
       columns.add(col)
     using = indexes.difference(cond_cols)
@@ -1025,7 +1024,7 @@ class MH(Comparison):
         table, groupby, global_filter, util_indexes, local_filter, with_data)
 
     raw_table = sql.Datasource(raw_table_sql, 'MHRaw')
-    raw_table_alias, _ = with_data.merge(raw_table)
+    raw_table_alias = with_data.merge(raw_table)
 
     base = self.baseline_key if isinstance(self.baseline_key,
                                            tuple) else [self.baseline_key]
@@ -1037,7 +1036,7 @@ class MH(Comparison):
             raw_table_sql.columns.aliases).difference(cond_cols.aliases),
         raw_table_alias, base_cond)
     base_table = sql.Datasource(base_value, 'MHBase')
-    base_table_alias, _ = with_data.merge(base_table)
+    base_table_alias = with_data.merge(base_table)
 
     exclude_base_condition = ('%s != %s' % (c, _format_to_condition(b))
                               for c, b in zip(cond_cols.aliases, base))
@@ -1616,12 +1615,13 @@ class MetricWithCI(Operation):
     self_copy = copy.deepcopy(self)
     se, with_data = get_se(self_copy, table, split_by, global_filter, indexes,
                            local_filter, with_data)
-    se_alias, se_rename = with_data.merge(sql.Datasource(se, name + 'SE'))
+    se_alias = with_data.merge(sql.Datasource(se, name + 'SE'))
 
     pt_est, with_data = self.children[0].get_sql_and_with_clause(
         table, split_by, global_filter, indexes, local_filter, with_data)
-    pt_est_alias, pt_est_rename = with_data.merge(
-        sql.Datasource(pt_est, name + 'PointEstimate'))
+    pt_est_alias = with_data.merge(
+        sql.Datasource(pt_est, name + 'PointEstimate')
+    )
 
     columns = sql.Columns()
     using = sql.Columns(se.groupby)
@@ -1631,16 +1631,12 @@ class MetricWithCI(Operation):
         using.add(c)
       else:
         pt_est_col.append(
-            sql.Column(
-                '%s.%s' % (pt_est_alias, pt_est_rename.get(c.alias, c.alias)),
-                alias=c.alias_raw))
+            sql.Column(f'{pt_est_alias}.{c.alias}', alias=c.alias_raw)
+        )
     se_cols = []
     for c in se.columns:
       if c not in indexes.aliases:
-        se_cols.append(
-            sql.Column(
-                '%s.%s' % (se_alias, se_rename.get(c.alias, c.alias)),
-                alias=c.alias_raw))
+        se_cols.append(sql.Column(f'{se_alias}.{c.alias}', alias=c.alias_raw))
     if self.confidence:
       dof_cols = se_cols[1::2]
       se_cols = se_cols[::2]
@@ -1666,12 +1662,13 @@ class MetricWithCI(Operation):
             local_filter,
             with_data,
         )
-        base_alias, base_rename = with_data.merge(
-            sql.Datasource(base, '_ShouldAlreadyExists'))
+        base_alias = with_data.merge(
+            sql.Datasource(base, '_ShouldAlreadyExists')
+        )
         columns.add(
-            sql.Column(
-                '%s.%s' % (base_alias, base_rename.get(c.alias, c.alias)),
-                alias=c.alias_raw) for c in base.columns.difference(indexes))
+            sql.Column(f'{base_alias}.{c.alias}', alias=c.alias_raw)
+            for c in base.columns.difference(indexes)
+        )
 
     join = 'LEFT' if using else 'CROSS'
     from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
@@ -2392,8 +2389,7 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
       local_filter,
       with_data,
   )
-  samples_alias, rename = with_data.merge(
-      sql.Datasource(samples, 'ResampledResults'))
+  samples_alias = with_data.merge(sql.Datasource(samples, 'ResampledResults'))
 
   columns = sql.Columns()
   groupby = sql.Columns(
@@ -2405,7 +2401,7 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
     elif c in indexes.aliases:
       groupby.add(c.alias)
     else:
-      alias = rename.get(c.alias, c.alias)
+      alias = c.alias
       se = sql.Column(c.alias, 'STDDEV_SAMP({})',
                       '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, Jackknife):
