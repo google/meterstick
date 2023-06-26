@@ -450,16 +450,24 @@ class Comparison(Operation):
                               for c, b in zip(cond_cols.aliases, base))
     exclude_base_condition = ' OR '.join(exclude_base_condition)
     cond = None if self.include_base else sql.Filters([exclude_base_condition])
-    col_tmp = '%s.{r} - %s.{b}' if isinstance(
-        self, AbsoluteChange) else 'SAFE_DIVIDE(%s.{r}, (%s.{b})) * 100 - 100'
+    if isinstance(self, AbsoluteChange):
+      col_tmp = f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'
+    else:
+      col_tmp = (
+          sql.SAFE_DIVIDE.format(
+              numer=f'{raw_table_alias}.%(r)s',
+              denom=f'{base_table_alias}.%(b)s',
+          )
+          + ' * 100 - 100'
+      )
     columns = sql.Columns()
     for c in raw_table_sql.columns.difference(indexes.aliases):
       raw_table_col = rename.get(c.alias, c.alias)
       base_table_col = rename.get(c.alias, c.alias)
       col = sql.Column(
-          col_tmp.format(r=raw_table_col, b=base_table_col) %
-          (raw_table_alias, base_table_alias),
-          alias=alias_tmpl.format(c.alias_raw))
+          col_tmp % {'r': raw_table_col, 'b': base_table_col},
+          alias=alias_tmpl.format(c.alias_raw),
+      )
       columns.add(col)
     using = indexes.difference(cond_cols)
     join = '' if using else 'CROSS'
@@ -1035,14 +1043,17 @@ class MH(Comparison):
                               for c, b in zip(cond_cols.aliases, base))
     exclude_base_condition = ' OR '.join(exclude_base_condition)
     cond = None if self.include_base else sql.Filters([exclude_base_condition])
-    col_tmpl = """100 * SAFE_DIVIDE(
-      COALESCE(SUM(SAFE_DIVIDE(
-        {raw}.%(numer)s * {base}.%(denom)s,
-        {base}.%(denom)s + {raw}.%(denom)s)), 0),
-      COALESCE(SUM(SAFE_DIVIDE(
-        {base}.%(numer)s * {raw}.%(denom)s,
-        {base}.%(denom)s + {raw}.%(denom)s)), 0)) - 100"""
-    col_tmpl = col_tmpl.format(raw=raw_table_alias, base=base_table_alias)
+    numerator = sql.SAFE_DIVIDE.format(
+        numer=f'{raw_table_alias}.%(numer)s * {base_table_alias}.%(denom)s',
+        denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
+    )
+    denominator = sql.SAFE_DIVIDE.format(
+        numer=f'{base_table_alias}.%(numer)s * {raw_table_alias}.%(denom)s',
+        denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
+    )
+    col_tmpl = f"""100 * {sql.SAFE_DIVIDE.format(
+      numer=f'COALESCE(SUM({numerator}), 0)',
+      denom=f'COALESCE(SUM({denominator}), 0)')} - 100"""
     columns = sql.Columns()
     alias_tmpl = self.name_tmpl
     # The columns might get consolidated and have different aliases. We need to
@@ -2399,7 +2410,10 @@ def get_se(metric, table, split_by, global_filter, indexes, local_filter,
                       '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, Jackknife):
         adjustment = sql.Column(
-            'SAFE_DIVIDE((COUNT({c}) - 1), SQRT(COUNT({c})))'.format(c=alias))
+            sql.SAFE_DIVIDE.format(
+                numer='COUNT({c}) - 1', denom='SQRT(COUNT({c}))'
+            ).format(c=alias)
+        )
         se = (se * adjustment).set_alias('%s Jackknife SE' % c.alias_raw)
       columns.add(se)
       if metric.confidence:

@@ -71,11 +71,20 @@ def compute_on_beam(
     mode=None,
     cache_key=None,
     cache=None,
+    sql_transform_kwargs=None,
     **kwargs,
 ):
   """A wrapper for metric.compute_on_beam()."""
   return lambda m: m.compute_on_beam(
-      table, split_by, execute, melted, mode, cache_key, cache=cache, **kwargs
+      table,
+      split_by,
+      execute,
+      melted,
+      mode,
+      cache_key,
+      cache=cache,
+      sql_transform_kwargs=sql_transform_kwargs,
+      **kwargs,
   )
 
 
@@ -819,6 +828,7 @@ class Metric(object):
       mode=None,
       cache_key=None,
       cache=None,
+      sql_transform_kwargs=None,
       **kwargs,
   ):
     """Computes on an Apache Beam PCollection input.
@@ -837,6 +847,9 @@ class Metric(object):
         ..).
       cache: The cache the whole Metric tree shares during one round of
         computation. If it's None, we initiate an empty dict.
+      sql_transform_kwargs: A dict that holds the kwargs to be passed to
+        SqlTransform defined in
+        https://beam.apache.org/releases/pydoc/2.30.0/apache_beam.transforms.sql.html.
       **kwargs: Other kwargs passed to compute_on_sql.
 
     Returns:
@@ -853,7 +866,11 @@ class Metric(object):
 
     def e(q):
       label = f'Meterstick at {datetime.datetime.now()} runs {q}'
-      res = execute(pcol | label >> beam_sql.SqlTransform(str(q)))
+      res = execute(
+          pcol
+          | label
+          >> beam_sql.SqlTransform(str(q), **(sql_transform_kwargs or {}))
+      )
       return res
 
     # pylint: disable=g-import-not-at-top

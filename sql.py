@@ -25,6 +25,9 @@ import re
 from typing import Iterable, Optional, Text, Union
 
 
+SAFE_DIVIDE = 'IF(({denom}) = 0, NULL, ({numer}) / ({denom}))'
+
+
 def is_compatible(sql0, sql1):
   """Checks if two datasources are compatible so their columns can be merged.
 
@@ -344,9 +347,11 @@ class Column(SqlComponent):
 
   def __div__(self, other):
     return Column(
-        'SAFE_DIVIDE({}, {})'.format(self.expression,
-                                     getattr(other, 'expression', other)),
-        alias='%s / %s' % (self.alias_raw, get_alias(other)))
+        SAFE_DIVIDE.format(
+            numer=self.expression, denom=getattr(other, 'expression', other)
+        ),
+        alias='%s / %s' % (self.alias_raw, get_alias(other)),
+    )
 
   def __truediv__(self, other):
     return self.__div__(other)
@@ -354,9 +359,11 @@ class Column(SqlComponent):
   def __rdiv__(self, other):
     alias = '%s / %s' % (get_alias(other), self.alias_raw)
     return Column(
-        'SAFE_DIVIDE({}, {})'.format(
-            getattr(other, 'expression', other), self.expression),
-        alias=alias)
+        SAFE_DIVIDE.format(
+            numer=getattr(other, 'expression', other), denom=self.expression
+        ),
+        alias=alias,
+    )
 
   def __rtruediv__(self, other):
     return self.__rdiv__(other)
