@@ -168,10 +168,10 @@ Built-in standard errors include:
     `confidence` in (0,1) represents the level of the confidence interval;
     optional
 
-+   `Bootstrap(unit, num_replicates, confidence)` : Computes a bootstrap
-    estimate of the standard error.
++   `Bootstrap(unit, n_replicates, confidence)` : Computes a bootstrap estimate
+    of the standard error.
 
-    `num_replicates` is the number of bootstrap replicates, default is 10000.
+    `n_replicates` is the number of bootstrap replicates, default is 10000.
 
     `unit` is a string for the variable whose unique values will be resampled;
     if `unit` is not supplied the rows will be the unit.
