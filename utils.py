@@ -362,7 +362,8 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
     else:
       if len(res.columns.names) > 1:
         res.columns = res.columns.set_levels(
-            map(name_tmpl.format, res.columns.levels[0]), 0)
+            map(name_tmpl.format, res.columns.levels[0]), level=0
+        )
       else:
         res.columns = map(name_tmpl.format, res.columns)
   return res
