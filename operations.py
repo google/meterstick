@@ -1533,7 +1533,7 @@ class MetricWithCI(Operation):
     if self.has_been_preaggregated or not self.can_precompute():
       if not self.where:
         return super(MetricWithCI, self).to_sql(table, split_by)
-      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
+      table = sql.Sql(None, table, self.where)
       self_no_filter = copy.deepcopy(self)
       self_no_filter.where = None
       return self_no_filter.to_sql(table, split_by)
@@ -2022,12 +2022,13 @@ class Jackknife(MetricWithCI):
     replicates = []
     unique_units = slice_and_units[self.unit].unique()
     if batch_size == 1:
-      loo_sql = sql.Sql(sql.Column('*', auto_alias=False), table)
+      loo_sql = sql.Sql(None, table, where=self.where)
+      where = copy.deepcopy(loo_sql.where)
       for unit in unique_units:
         loo_where = '%s != "%s"' % (self.unit, unit)
         if pd.api.types.is_numeric_dtype(slice_and_units[self.unit]):
           loo_where = '%s != %s' % (self.unit, unit)
-        loo_sql.where = sql.Filters((self.where, loo_where))
+        loo_sql.where = sql.Filters(where).add(loo_where)
         key = ('_RESERVED', 'Jackknife', self.unit, unit)
         loo = self.compute_child_sql(loo_sql, split_by, execute, False, mode,
                                      key)

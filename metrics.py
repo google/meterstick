@@ -729,7 +729,7 @@ class Metric(object):
       except NotImplementedError:
         pass
     if self.where:
-      table = sql.Sql(sql.Column('*', auto_alias=False), table, self.where)
+      table = sql.Sql(None, table, self.where)
     return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
 
   def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):

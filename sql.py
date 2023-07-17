@@ -19,7 +19,6 @@ from __future__ import print_function
 
 import collections
 from collections import abc
-import copy
 import functools
 import re
 from typing import Iterable, Optional, Text, Union
@@ -694,28 +693,44 @@ class Datasources(SqlComponents):
 class Sql(SqlComponent):
   """Represents a SQL query."""
 
-  def __init__(self,
-               columns,
-               from_data,
-               where=None,
-               groupby=None,
-               with_data=None,
-               orderby=None):
+  def __init__(
+      self,
+      columns,
+      from_data: Union[str, 'Sql', Datasource],
+      where=None,
+      groupby=None,
+      with_data=None,
+      orderby=None,
+  ):
     super(Sql, self).__init__()
     self.columns = Columns(columns)
     self.where = Filters(where)
     self.groupby = Columns(groupby)
     self.orderby = Columns(orderby)
     self.with_data = Datasources(with_data)
-    if isinstance(from_data, Sql) and from_data.with_data:
-      from_data = copy.deepcopy(from_data)
-      with_data_to_merge = from_data.with_data
-      from_data.with_data = None
-      from_data = with_data_to_merge.add(Datasource(from_data, 'NoNameTable'))
-      self.with_data.extend(with_data_to_merge)
     if not isinstance(from_data, Datasource):
       from_data = Datasource(from_data)
     self.from_data = from_data
+    from_data_table = from_data.table
+    if isinstance(from_data_table, Sql) and not self.from_data.is_table:
+      if from_data_table.with_data:
+        with_data_to_merge = from_data_table.with_data
+        from_data_table.with_data = None
+        self.from_data = Datasource(
+            with_data_to_merge.add(Datasource(from_data, 'NoNameTable'))
+        )
+        self.with_data.extend(with_data_to_merge)
+      if not self.columns:
+        # Consolidate outer and inner Sql if the outer Sql doesn't have columns.
+        self.columns = from_data_table.columns
+        self.where = Filters(from_data_table.where).add(self.where)
+        self.groupby = from_data_table.groupby
+        self.orderby = from_data_table.orderby
+        self.from_data = from_data_table.from_data
+      elif not from_data_table.columns:
+        # Consolidate outer and inner Sql if the inner Sql doesn't have columns.
+        self.where = Filters(from_data_table.where).add(self.where)
+        self.from_data = from_data_table.from_data
 
   @property
   def all_columns(self):
@@ -748,7 +763,8 @@ class Sql(SqlComponent):
 
   def __str__(self):
     with_clause = 'WITH\n%s' % self.with_data if self.with_data else None
-    select_clause = 'SELECT\n%s' % Columns(self.groupby).add(self.columns)
+    all_columns = self.all_columns or '*'
+    select_clause = f'SELECT\n{all_columns}'
     from_clause = ('FROM %s'
                    if self.from_data.is_table else 'FROM\n%s') % self.from_data
     where_clause = 'WHERE\n%s' % self.where if self.where else None
