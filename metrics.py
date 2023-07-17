@@ -436,11 +436,13 @@ class Metric(object):
     del melted, return_dataframe, split_by, df  # Useful in derived classes.
     return res
 
-  def manipulate(self,
-                 res: pd.Series,
-                 melted: bool = False,
-                 return_dataframe: bool = True,
-                 apply_name_tmpl=None):
+  def manipulate(
+      self,
+      res,
+      melted: bool = False,
+      return_dataframe: bool = True,
+      apply_name_tmpl=None,
+  ):
     """Common adhoc data manipulation.
 
     It does
@@ -471,8 +473,6 @@ class Metric(object):
       res = self.to_dataframe(res)
     if melted:
       res = utils.melt(res)
-    if apply_name_tmpl is None and is_operation(self):
-      apply_name_tmpl = True
     if apply_name_tmpl:
       res = utils.apply_name_tmpl(self.name_tmpl, res, melted)
     return utils.remove_empty_level(res)

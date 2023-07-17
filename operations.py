@@ -98,7 +98,6 @@ class Operation(metrics.Metric):
           self).__init__(name, child or (), where, name_tmpl, extra_split_by,
                          extra_index, additional_fingerprint_attrs, **kwargs)
     self.precomputable_in_jk_bs = True
-    self.apply_name_tmpl = True
 
   def split_data(self, df, split_by=None):
     """Splits the DataFrame returned by the children."""
@@ -151,6 +150,18 @@ class Operation(metrics.Metric):
     res = super(Operation,
                 self).compute_on_sql_mixed_mode(table, split_by, execute, mode)
     return utils.apply_name_tmpl(self.name_tmpl, res)
+
+  def manipulate(
+      self,
+      res,
+      melted: bool = False,
+      return_dataframe: bool = True,
+      apply_name_tmpl=None,
+  ):
+    apply_name_tmpl = True if apply_name_tmpl is None else apply_name_tmpl
+    return super(Operation, self).manipulate(
+        res, melted, return_dataframe, apply_name_tmpl
+    )
 
   def __call__(self, child: metrics.Metric):
     op = copy.deepcopy(self) if self.children else self
@@ -1323,7 +1334,6 @@ class MetricWithCI(Operation):
         name_tmpl,
         additional_fingerprint_attrs=additional_fingerprint_attrs,
         **kwargs)
-    self.apply_name_tmpl = False
     self.prefix = prefix
     self.sql_batch_size = sql_batch_size
     if not self.prefix and self.name_tmpl:
@@ -1380,11 +1390,9 @@ class MetricWithCI(Operation):
     bucket_estimates = pd.concat(children, axis=1, sort=False)
     return self.get_stderrs_or_ci_half_width(bucket_estimates)
 
-  def manipulate(self,
-                 res,
-                 melted=False,
-                 return_dataframe=True,
-                 apply_name_tmpl=False):
+  def manipulate(
+      self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
+  ):
     """Saves and restores the base in addition when has confidence."""
     if self.confidence:
       key = self.wrap_cache_key(self.cache_key)
@@ -1398,8 +1406,9 @@ class MetricWithCI(Operation):
         # have been computed already so base has been saved in cache.
         base = self.get_cached(key)
     # Don't add suffix like "Jackknife" because point_est won't have it.
-    res = super(MetricWithCI, self).manipulate(res, melted, return_dataframe,
-                                               apply_name_tmpl)
+    res = super(MetricWithCI, self).manipulate(
+        res, melted, return_dataframe, apply_name_tmpl or False
+    )
     return self.add_base_to_res(res, base) if self.confidence else res
 
   def compute_slices(self, df, split_by=None):
