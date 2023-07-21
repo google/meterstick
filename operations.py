@@ -1413,7 +1413,7 @@ class MetricWithCI(Operation):
 
   def compute_slices(self, df, split_by=None):
     std = super(MetricWithCI, self).compute_slices(df, split_by)
-    point_est = self.compute_child(df, split_by, melted=True)
+    point_est = self.compute_point_estimate(df, split_by)
     res = point_est.join(utils.melt(std))
     if self.confidence:
       res[self.prefix +
@@ -1424,6 +1424,9 @@ class MetricWithCI(Operation):
       return res
     base = self.compute_change_base(df, split_by)
     return self.add_base_to_res(res, base)
+
+  def compute_point_estimate(self, df, split_by):
+    return self.compute_child(df, split_by, melted=True)
 
   def compute_change_base(self,
                           df,
@@ -1437,7 +1440,6 @@ class MetricWithCI(Operation):
     if len(self.children) != 1 or not isinstance(
         self.children[0], (PercentChange, AbsoluteChange)):
       return None
-    base = None
     change = self.children[0]
     util_metric = change.children[0]
     if isinstance(self.children[0], (PrePostChange, CUPED)):
