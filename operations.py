@@ -903,7 +903,7 @@ class MH(Comparison):
           self.compute_mh(c, d, split_by)
           for c, d in zip(child.children, children)
       ]
-      return pd.concat(res, 1, sort=False)
+      return pd.concat(res, axis=1, sort=False)
     return self.compute_mh(child, children, split_by)
 
   def compute_mh(self, child, df_all, split_by):
@@ -1805,7 +1805,7 @@ class MetricWithCI(Operation):
         sub_df.columns = ['Value', self.prefix + ' SE']
         sub_dfs.append(sub_df)
 
-    res = pd.concat((sub_dfs), 1, keys=metric_names, names=['Metric'])
+    res = pd.concat((sub_dfs), axis=1, keys=metric_names, names=['Metric'])
     return self.add_base_to_res(res, base)
 
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
