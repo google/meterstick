@@ -283,7 +283,7 @@ class LogisticRegressionTest(absltest.TestCase):
                                   prefix + 'sum(X2) for class %s' % cl
                               ])
       res.append(expected)
-    expected = pd.concat(res, 1)
+    expected = pd.concat(res, axis=1)
     pd.testing.assert_frame_equal(output, expected)
 
   def test_logistic_regression_multi_classes_no_intercept(self):
