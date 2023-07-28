@@ -29,252 +29,6 @@ import pandas as pd
 from sklearn import linear_model
 
 
-def get_data(m, table, split_by, execute, normalize=False):
-  """Retrieves the data that the model will be fit on.
-
-  We compute a Model by first computing its children, and then fitting
-  the model on it. This function retrieves the necessary variables to compute
-  the children.
-
-  Args:
-    m: A Model instance.
-    table: The table we want to query from.
-    split_by: The columns that we use to split the data.
-    execute: A function that can executes a SQL query and returns a DataFrame.
-    normalize: If the Model normalizes x.
-
-  Returns:
-    table: A string representing the table name which we can query from. The
-      table has columns `split_by`, y, x1, x2, .... If normalize is True, x
-      columns are centered then normalized.
-    with_data: The WITH clause that holds all necessary subqueries so we can
-      query the `table`.
-    xs_cols: A list of the sql.Columns of x1, x2, ...
-    y: The column name of the y column.
-    avgs: Nonempty only when normalize is True. A pd.DataFrame which holds the
-      average of all x and y columns.
-    norms: Nonempty only when normalize is True. A pd.DataFrame which holds the
-      l2-norm values of all centered-x columns.
-  """
-  data = m.children[0].to_sql(table, split_by + m.group_by)
-  with_data = data.with_data
-  data.with_data = None
-  table = with_data.merge(sql.Datasource(data, 'DataToFit'))
-  y = data.columns[-m.k - 1].alias
-  xs_cols = sql.Columns(data.columns[-m.k :])
-  if not normalize:
-    return table, with_data, xs_cols, y, pd.DataFrame(), pd.DataFrame()
-
-  xs = xs_cols.aliases
-  split_by = sql.Columns(split_by).aliases
-  avgs = [sql.Column(f'AVG({x})', alias=x) for x in xs]
-  avgs.append(sql.Column(f'AVG({y})', alias=y))
-  avgs = execute(
-      str(
-          sql.Sql(
-              sql.Columns(split_by).add(avgs),
-              table,
-              groupby=split_by,
-              with_data=with_data,
-          )
-      )
-  )
-  table_with_centered_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
-  for x in xs:
-    centered = sql.Column(x) - sql.Column(x, 'AVG({})', partition=split_by)
-    centered.alias = x
-    table_with_centered_x.add(centered)
-  table = with_data.merge(
-      sql.Datasource(sql.Sql(table_with_centered_x, table), 'DataCentered')
-  )
-
-  norms = [sql.Column(f'SQRT(SUM(POWER({x}, 2)))', alias=x) for x in xs]
-  norms = sql.Sql(
-      sql.Columns(split_by).add(norms),
-      table,
-      groupby=split_by,
-      with_data=with_data,
-  )
-  norms = execute(str(norms))
-  table_with_normalized_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
-  for x in xs:
-    normalized = (
-        sql.Column(x)
-        / sql.Column(x, 'SUM(POWER({}, 2))', partition=split_by) ** 0.5
-    )
-    normalized.alias = x
-    table_with_normalized_x.add(normalized)
-  table = with_data.add(
-      sql.Datasource(sql.Sql(table_with_normalized_x, table), 'DataNormalized')
-  )
-  return table, with_data, xs_cols, y, avgs, norms
-
-
-def apply_algorithm_to_sufficient_stats_elements(
-    sufficient_stats_elements, split_by, algorithm, *args, **kwargs
-):
-  """Applies algorithm to sufficient stats to get the coefficients of Models.
-
-  Args:
-    sufficient_stats_elements: Contains the elements to construct sufficient
-      stats. It's one of the return of get_sufficient_stats_elements().
-    split_by: The columns that we use to split the data.
-    algorithm: A function that can take the sufficient_stats_elements of a slice
-      of data and computes the coefficients of the Model.
-    *args: Additional args passed to the algorithm.
-    **kwargs: Additional kwargs passed to the algorithm.
-
-  Returns:
-    The coefficients of the Model.
-  """
-  fn = lambda row: algorithm(row, *args, **kwargs)
-  if split_by:
-    # Special characters in split_by got escaped during SQL execution.
-    sufficient_stats_elements.columns = (
-        split_by + list(sufficient_stats_elements.columns)[len(split_by) :]
-    )
-    return sufficient_stats_elements.groupby(split_by, observed=True).apply(fn)
-  return fn(sufficient_stats_elements)
-
-
-def get_sufficient_stats_elements(
-    m,
-    table,
-    split_by,
-    execute,
-    fit_intercept=None,
-    normalize=None,
-    include_n_obs=False,
-):
-  """Computes the elements of X'X and X'y.
-
-  Args:
-    m: A Model instance.
-    table: The table we want to query from.
-    split_by: The columns that we use to split the data.
-    execute: A function that can executes a SQL query and returns a DataFrame.
-    fit_intercept: If to include intercept in the model.
-    normalize: If to normalize the X. Note that only has effect when
-      m.fit_intercept is True, which is consistent to sklearn.
-    include_n_obs: If to include the number of observations in the return.
-
-  Returns:
-    xs: A list of the column names of x1, x2, ...
-    sufficient_stats_elements: A DataFrame holding all unique elements of
-      sufficient stats. Each row corresponds to one slice in split_by. The
-      columns are
-        split_by,
-        avg(x0), avg(x1), ...,  # if fit_intercept
-        avg(x0 * x0), avg(x0 * x1), avg(x0 * x2), avg(x1 * x2), ...,
-        avg(y),  # if fit_intercept
-        avg(x0 * y), avg(x1 * y), ...,
-        n_observation  # if include_n_obs.
-      The column are named as
-        split_by, x0, x1,..., x0x0, x0x1,..., y, x0y, x1y,..., n_obs.
-    avg_x: Nonempty only when normalize. A pd.DataFrame which holds the
-      avg(x0), avg(x1), ... of the UNNORMALIZED x.
-      Don't confuse it with the ones in the sufficient_stats_elements, which are
-      the average of normalized x, which are just 0s.
-    norms: Nonempty only when normalize. A pd.DataFrame which holds the l2-norm
-      values of all centered-x columns.
-  """
-  fit_intercept = m.fit_intercept if fit_intercept is None else fit_intercept
-  if normalize is None:
-    normalize = m.normalize and m.fit_intercept
-  table, with_data, xs_cols, y, avg_x, norms = get_data(
-      m, table, split_by, execute, normalize
-  )
-  xs = xs_cols.aliases
-  x_t_x = []
-  x_t_y = []
-  if m.fit_intercept:
-    if not normalize:
-      x_t_x = [sql.Column(f'AVG({x})', alias=f'x{i}') for i, x in enumerate(xs)]
-    x_t_y = [sql.Column(f'AVG({y})', alias='y')]
-  for i, x1 in enumerate(xs):
-    for j, x2 in enumerate(xs[i:]):
-      x_t_x.append(sql.Column(f'AVG({x1} * {x2})', alias=f'x{i}x{i + j}'))
-  x_t_y += [
-      sql.Column(f'AVG({x} * {y})', alias=f'x{i}y') for i, x in enumerate(xs)
-  ]
-  cols = sql.Columns(x_t_x + x_t_y)
-  if include_n_obs:
-    cols.add(sql.Column('COUNT(*)', alias='n_obs'))
-  sufficient_stats_elements = sql.Sql(
-      cols, table, groupby=sql.Columns(split_by).aliases, with_data=with_data
-  )
-  sufficient_stats_elements = execute(str(sufficient_stats_elements))
-  if normalize:
-    col_names = list(sufficient_stats_elements.columns)
-    avg_x_names = [f'x{i}' for i in range(len(xs))]
-    sufficient_stats_elements[avg_x_names] = 0
-    sufficient_stats_elements = sufficient_stats_elements[
-        col_names[: len(split_by)] + avg_x_names + col_names[len(split_by) :]
-    ]
-  return xs_cols, sufficient_stats_elements, avg_x, norms
-
-
-def construct_matrix_from_elements(sufficient_stats_elements, fit_intercept):
-  """Constructs matries X'X and X'y from the elements.
-
-  Args:
-    sufficient_stats_elements: A DataFrame holding all unique elements of
-      sufficient stats. See the doc of get_sufficient_stats_elements() for its
-      shape and content.
-    fit_intercept: If the model includes an intercept.
-
-  Returns:
-    x_t_x: X'X / n_observations in a numpy array.
-    x_t_y: X'y / n_observations in a numpy array.
-  """
-  if isinstance(sufficient_stats_elements, pd.DataFrame):
-    if len(sufficient_stats_elements) > 1:
-      raise ValueError('Only support 1D input!')
-    sufficient_stats_elements = sufficient_stats_elements.iloc[0]
-  elif not isinstance(sufficient_stats_elements, pd.Series):
-    raise ValueError('The input must be a panda Series!')
-  xny = (
-      sufficient_stats_elements.index[-2]
-      if sufficient_stats_elements.index[-1] == 'n_obs'
-      else sufficient_stats_elements.index[-1]
-  )
-  n = int(xny[1:-1]) + 1
-  x_t_x_cols = []
-  x_t_y_cols = []
-  if fit_intercept:
-    x_t_x_cols = [f'x{i}' for i in range(n)]
-    x_t_y_cols = ['y']
-  for i in range(n):
-    for j in range(i, n):
-      x_t_x_cols.append(f'x{i}x{j}')
-  x_t_y_cols += [f'x{i}y' for i in range(n)]
-  x_t_x_elements = list(sufficient_stats_elements[x_t_x_cols])
-  if fit_intercept:
-    x_t_x_elements = [1] + x_t_x_elements
-  x_t_y = sufficient_stats_elements[x_t_y_cols]
-  x_t_x = symmetrize_triangular(x_t_x_elements)
-  return x_t_x, np.array(x_t_y)
-
-
-def symmetrize_triangular(tril_elements):
-  """Converts a list of upper triangular matrix to a symmetric matrix.
-
-  For example, [1, 2, 3] -> [[1, 2], [2, 3]].
-
-  Args:
-    tril_elements: A list that can form a triangular matrix.
-
-  Returns:
-    A symmetric matrix whose upper triangular part is formed from tril_elements.
-  """
-  n = int(np.floor((2 * len(tril_elements)) ** 0.5))
-  if n * (n + 1) / 2 != len(tril_elements):
-    raise ValueError('The elements cannot form a symmetric matrix!')
-  sym = np.zeros([n, n])
-  sym[np.triu_indices(n)] = tril_elements
-  return sym + sym.T - np.diag(sym.diagonal())
-
-
 class Model(operations.Operation):
   """Base class for model fitting."""
 
@@ -416,6 +170,31 @@ class Model(operations.Operation):
     return model
 
 
+def count_features(m: metrics.Metric):
+  """Gets the width of the result of m.compute_on()."""
+  if not m:
+    return 0
+  if isinstance(m, Model):
+    return m.k
+  if isinstance(m, metrics.MetricList):
+    return sum([count_features(i) for i in m])
+  if isinstance(m, operations.MetricWithCI):
+    return (
+        count_features(m.children[0]) * 3
+        if m.confidence
+        else count_features(m.children[0]) * 2
+    )
+  if isinstance(m, operations.Operation):
+    return count_features(m.children[0])
+  if isinstance(m, metrics.CompositeMetric):
+    return max([count_features(i) for i in m.children])
+  if isinstance(m, metrics.Quantile):
+    if m.one_quantile:
+      return 1
+    return len(m.quantile)
+  return 1
+
+
 class LinearRegression(Model):
   """A class that can fit a linear regression."""
 
@@ -506,6 +285,191 @@ class Ridge(Model):
     )
 
 
+def get_sufficient_stats_elements(
+    m,
+    table,
+    split_by,
+    execute,
+    fit_intercept=None,
+    normalize=None,
+    include_n_obs=False,
+):
+  """Computes the elements of X'X and X'y.
+
+  Args:
+    m: A Model instance.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    execute: A function that can executes a SQL query and returns a DataFrame.
+    fit_intercept: If to include intercept in the model.
+    normalize: If to normalize the X. Note that only has effect when
+      m.fit_intercept is True, which is consistent to sklearn.
+    include_n_obs: If to include the number of observations in the return.
+
+  Returns:
+    xs: A list of the column names of x1, x2, ...
+    sufficient_stats_elements: A DataFrame holding all unique elements of
+      sufficient stats. Each row corresponds to one slice in split_by. The
+      columns are
+        split_by,
+        avg(x0), avg(x1), ...,  # if fit_intercept
+        avg(x0 * x0), avg(x0 * x1), avg(x0 * x2), avg(x1 * x2), ...,
+        avg(y),  # if fit_intercept
+        avg(x0 * y), avg(x1 * y), ...,
+        n_observation  # if include_n_obs.
+      The column are named as
+        split_by, x0, x1,..., x0x0, x0x1,..., y, x0y, x1y,..., n_obs.
+    avg_x: Nonempty only when normalize. A pd.DataFrame which holds the
+      avg(x0), avg(x1), ... of the UNNORMALIZED x.
+      Don't confuse it with the ones in the sufficient_stats_elements, which are
+      the average of normalized x, which are just 0s.
+    norms: Nonempty only when normalize. A pd.DataFrame which holds the l2-norm
+      values of all centered-x columns.
+  """
+  fit_intercept = m.fit_intercept if fit_intercept is None else fit_intercept
+  if normalize is None:
+    normalize = m.normalize and m.fit_intercept
+  table, with_data, xs_cols, y, avg_x, norms = get_data(
+      m, table, split_by, execute, normalize
+  )
+  xs = xs_cols.aliases
+  x_t_x = []
+  x_t_y = []
+  if m.fit_intercept:
+    if not normalize:
+      x_t_x = [sql.Column(f'AVG({x})', alias=f'x{i}') for i, x in enumerate(xs)]
+    x_t_y = [sql.Column(f'AVG({y})', alias='y')]
+  for i, x1 in enumerate(xs):
+    for j, x2 in enumerate(xs[i:]):
+      x_t_x.append(sql.Column(f'AVG({x1} * {x2})', alias=f'x{i}x{i + j}'))
+  x_t_y += [
+      sql.Column(f'AVG({x} * {y})', alias=f'x{i}y') for i, x in enumerate(xs)
+  ]
+  cols = sql.Columns(x_t_x + x_t_y)
+  if include_n_obs:
+    cols.add(sql.Column('COUNT(*)', alias='n_obs'))
+  sufficient_stats_elements = sql.Sql(
+      cols, table, groupby=sql.Columns(split_by).aliases, with_data=with_data
+  )
+  sufficient_stats_elements = execute(str(sufficient_stats_elements))
+  if normalize:
+    col_names = list(sufficient_stats_elements.columns)
+    avg_x_names = [f'x{i}' for i in range(len(xs))]
+    sufficient_stats_elements[avg_x_names] = 0
+    sufficient_stats_elements = sufficient_stats_elements[
+        col_names[: len(split_by)] + avg_x_names + col_names[len(split_by) :]
+    ]
+  return xs_cols, sufficient_stats_elements, avg_x, norms
+
+
+def get_data(m, table, split_by, execute, normalize=False):
+  """Retrieves the data that the model will be fit on.
+
+  We compute a Model by first computing its children, and then fitting
+  the model on it. This function retrieves the necessary variables to compute
+  the children.
+
+  Args:
+    m: A Model instance.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    execute: A function that can executes a SQL query and returns a DataFrame.
+    normalize: If the Model normalizes x.
+
+  Returns:
+    table: A string representing the table name which we can query from. The
+      table has columns `split_by`, y, x1, x2, .... If normalize is True, x
+      columns are centered then normalized.
+    with_data: The WITH clause that holds all necessary subqueries so we can
+      query the `table`.
+    xs_cols: A list of the sql.Columns of x1, x2, ...
+    y: The column name of the y column.
+    avgs: Nonempty only when normalize is True. A pd.DataFrame which holds the
+      average of all x and y columns.
+    norms: Nonempty only when normalize is True. A pd.DataFrame which holds the
+      l2-norm values of all centered-x columns.
+  """
+  data = m.children[0].to_sql(table, split_by + m.group_by)
+  with_data = data.with_data
+  data.with_data = None
+  table = with_data.merge(sql.Datasource(data, 'DataToFit'))
+  y = data.columns[-m.k - 1].alias
+  xs_cols = sql.Columns(data.columns[-m.k :])
+  if not normalize:
+    return table, with_data, xs_cols, y, pd.DataFrame(), pd.DataFrame()
+
+  xs = xs_cols.aliases
+  split_by = sql.Columns(split_by).aliases
+  avgs = [sql.Column(f'AVG({x})', alias=x) for x in xs]
+  avgs.append(sql.Column(f'AVG({y})', alias=y))
+  avgs = execute(
+      str(
+          sql.Sql(
+              sql.Columns(split_by).add(avgs),
+              table,
+              groupby=split_by,
+              with_data=with_data,
+          )
+      )
+  )
+  table_with_centered_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
+  for x in xs:
+    centered = sql.Column(x) - sql.Column(x, 'AVG({})', partition=split_by)
+    centered.alias = x
+    table_with_centered_x.add(centered)
+  table = with_data.merge(
+      sql.Datasource(sql.Sql(table_with_centered_x, table), 'DataCentered')
+  )
+
+  norms = [sql.Column(f'SQRT(SUM(POWER({x}, 2)))', alias=x) for x in xs]
+  norms = sql.Sql(
+      sql.Columns(split_by).add(norms),
+      table,
+      groupby=split_by,
+      with_data=with_data,
+  )
+  norms = execute(str(norms))
+  table_with_normalized_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
+  for x in xs:
+    normalized = (
+        sql.Column(x)
+        / sql.Column(x, 'SUM(POWER({}, 2))', partition=split_by) ** 0.5
+    )
+    normalized.alias = x
+    table_with_normalized_x.add(normalized)
+  table = with_data.add(
+      sql.Datasource(sql.Sql(table_with_normalized_x, table), 'DataNormalized')
+  )
+  return table, with_data, xs_cols, y, avgs, norms
+
+
+def apply_algorithm_to_sufficient_stats_elements(
+    sufficient_stats_elements, split_by, algorithm, *args, **kwargs
+):
+  """Applies algorithm to sufficient stats to get the coefficients of Models.
+
+  Args:
+    sufficient_stats_elements: Contains the elements to construct sufficient
+      stats. It's one of the return of get_sufficient_stats_elements().
+    split_by: The columns that we use to split the data.
+    algorithm: A function that can take the sufficient_stats_elements of a slice
+      of data and computes the coefficients of the Model.
+    *args: Additional args passed to the algorithm.
+    **kwargs: Additional kwargs passed to the algorithm.
+
+  Returns:
+    The coefficients of the Model.
+  """
+  fn = lambda row: algorithm(row, *args, **kwargs)
+  if split_by:
+    # Special characters in split_by got escaped during SQL execution.
+    sufficient_stats_elements.columns = (
+        split_by + list(sufficient_stats_elements.columns)[len(split_by) :]
+    )
+    return sufficient_stats_elements.groupby(split_by, observed=True).apply(fn)
+  return fn(sufficient_stats_elements)
+
+
 def compute_ridge_coefs(sufficient_stats, xs, m):
   """Computes coefficients of linear/ridge regression from sufficient_stats."""
   if isinstance(sufficient_stats, pd.DataFrame):
@@ -568,6 +532,67 @@ def compute_coef_for_normalize_ridge(sufficient_stats, xs, m):
   coef = [intercept] + list(coef)
   xs = ['intercept'] + xs
   return pd.DataFrame([coef], columns=xs)
+
+
+def symmetrize_triangular(tril_elements):
+  """Converts a list of upper triangular matrix to a symmetric matrix.
+
+  For example, [1, 2, 3] -> [[1, 2], [2, 3]].
+
+  Args:
+    tril_elements: A list that can form a triangular matrix.
+
+  Returns:
+    A symmetric matrix whose upper triangular part is formed from tril_elements.
+  """
+  n = int(np.floor((2 * len(tril_elements)) ** 0.5))
+  if n * (n + 1) / 2 != len(tril_elements):
+    raise ValueError('The elements cannot form a symmetric matrix!')
+  sym = np.zeros([n, n])
+  sym[np.triu_indices(n)] = tril_elements
+  return sym + sym.T - np.diag(sym.diagonal())
+
+
+def construct_matrix_from_elements(sufficient_stats_elements, fit_intercept):
+  """Constructs matries X'X and X'y from the elements.
+
+  Args:
+    sufficient_stats_elements: A DataFrame holding all unique elements of
+      sufficient stats. See the doc of get_sufficient_stats_elements() for its
+      shape and content.
+    fit_intercept: If the model includes an intercept.
+
+  Returns:
+    x_t_x: X'X / n_observations in a numpy array.
+    x_t_y: X'y / n_observations in a numpy array.
+  """
+  if isinstance(sufficient_stats_elements, pd.DataFrame):
+    if len(sufficient_stats_elements) > 1:
+      raise ValueError('Only support 1D input!')
+    sufficient_stats_elements = sufficient_stats_elements.iloc[0]
+  elif not isinstance(sufficient_stats_elements, pd.Series):
+    raise ValueError('The input must be a panda Series!')
+  xny = (
+      sufficient_stats_elements.index[-2]
+      if sufficient_stats_elements.index[-1] == 'n_obs'
+      else sufficient_stats_elements.index[-1]
+  )
+  n = int(xny[1:-1]) + 1
+  x_t_x_cols = []
+  x_t_y_cols = []
+  if fit_intercept:
+    x_t_x_cols = [f'x{i}' for i in range(n)]
+    x_t_y_cols = ['y']
+  for i in range(n):
+    for j in range(i, n):
+      x_t_x_cols.append(f'x{i}x{j}')
+  x_t_y_cols += [f'x{i}y' for i in range(n)]
+  x_t_x_elements = list(sufficient_stats_elements[x_t_x_cols])
+  if fit_intercept:
+    x_t_x_elements = [1] + x_t_x_elements
+  x_t_y = sufficient_stats_elements[x_t_y_cols]
+  x_t_x = symmetrize_triangular(x_t_x_elements)
+  return x_t_x, np.array(x_t_y)
 
 
 class Lasso(Model):
@@ -1371,28 +1396,3 @@ def newtons_method(coef, grads, hess, tol, max_iter, conds):
         np.array(conds)[~converged],
     )
   return coef
-
-
-def count_features(m: metrics.Metric):
-  """Gets the width of the result of m.compute_on()."""
-  if not m:
-    return 0
-  if isinstance(m, Model):
-    return m.k
-  if isinstance(m, metrics.MetricList):
-    return sum([count_features(i) for i in m])
-  if isinstance(m, operations.MetricWithCI):
-    return (
-        count_features(m.children[0]) * 3
-        if m.confidence
-        else count_features(m.children[0]) * 2
-    )
-  if isinstance(m, operations.Operation):
-    return count_features(m.children[0])
-  if isinstance(m, metrics.CompositeMetric):
-    return max([count_features(i) for i in m.children])
-  if isinstance(m, metrics.Quantile):
-    if m.one_quantile:
-      return 1
-    return len(m.quantile)
-  return 1

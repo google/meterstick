@@ -99,13 +99,6 @@ class Operation(metrics.Metric):
                          extra_index, additional_fingerprint_attrs, **kwargs)
     self.precomputable_in_jk_bs = True
 
-  def split_data(self, df, split_by=None):
-    """Splits the DataFrame returned by the children."""
-    for k, idx in df.groupby(split_by, observed=True).indices.items():
-      # split_by will be added back later during the concatenation.
-      # Use iloc rather than loc because indexes can have duplicates.
-      yield df.iloc[idx].droplevel(split_by), k
-
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     try:
       children = self.compute_children(df, split_by + self.extra_split_by)
@@ -150,6 +143,13 @@ class Operation(metrics.Metric):
     res = super(Operation,
                 self).compute_on_sql_mixed_mode(table, split_by, execute, mode)
     return utils.apply_name_tmpl(self.name_tmpl, res)
+
+  def split_data(self, df, split_by=None):
+    """Splits the DataFrame returned by the children."""
+    for k, idx in df.groupby(split_by, observed=True).indices.items():
+      # split_by will be added back later during the concatenation.
+      # Use iloc rather than loc because indexes can have duplicates.
+      yield df.iloc[idx].droplevel(split_by), k
 
   def manipulate(
       self,
@@ -1343,74 +1343,6 @@ class MetricWithCI(Operation):
     self.has_been_preaggregated = False
     self._is_root_node = None
 
-  def compute_on_samples(self,
-                         keyed_samples: Iterable[Tuple[Any, pd.DataFrame]],
-                         split_by=None):
-    """Iters through sample DataFrames and collects results.
-
-    Args:
-      keyed_samples: A tuple. The first element is the cache_key and the second
-        is the corresponding DataFrame. Remember a key should correspond to the
-        same data.
-      split_by: Something can be passed into DataFrame.group_by().
-
-    Returns:
-      List of results from samples.
-    """
-    estimates = []
-    for keyed_sample in keyed_samples:
-      try:
-        cache_key, sample = keyed_sample
-        if cache_key is None:
-          # If samples are unlikely to repeat, don't save res to self.cache.
-          res = self.children[0].compute_on(sample, split_by, melted=True)
-        else:
-          res = self.compute_child(
-              sample, split_by, melted=True, cache_key=cache_key)
-        estimates.append(res)
-      except Exception as e:  # pylint: disable=broad-except
-        print(
-            'Warning: Failed on%s sample data for reason %s. If you see many '
-            'such failures, your data might be too sparse.'
-            % (self.name_tmpl.format(''), repr(e))
-        )
-    return estimates
-
-  def compute_children(self,
-                       df: pd.DataFrame,
-                       split_by=None,
-                       melted=False,
-                       return_dataframe=True,
-                       cache_key=None):
-    del melted, return_dataframe, cache_key  # unused
-    return self.compute_on_samples(self.get_samples(df, split_by), split_by)
-
-  def compute_on_children(self, children, split_by):
-    del split_by  # unused
-    bucket_estimates = pd.concat(children, axis=1, sort=False)
-    return self.get_stderrs_or_ci_half_width(bucket_estimates)
-
-  def manipulate(
-      self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
-  ):
-    """Saves and restores the base in addition when has confidence."""
-    if self.confidence:
-      key = self.wrap_cache_key(self.cache_key)
-      key.add_extra_info('base')
-      if hasattr(res, 'meterstick_change_base'):
-        # If res is computed from input data, it will have the attribute.
-        base = res.meterstick_change_base
-        self.save_to_cache(key, base)
-      else:
-        # If res is read from cache, it won't have the attribute, but it must
-        # have been computed already so base has been saved in cache.
-        base = self.get_cached(key)
-    # Don't add suffix like "Jackknife" because point_est won't have it.
-    res = super(MetricWithCI, self).manipulate(
-        res, melted, return_dataframe, apply_name_tmpl or False
-    )
-    return self.add_base_to_res(res, base) if self.confidence else res
-
   def compute_slices(self, df, split_by=None):
     std = super(MetricWithCI, self).compute_slices(df, split_by)
     point_est = self.compute_point_estimate(df, split_by)
@@ -1466,6 +1398,102 @@ class MetricWithCI(Operation):
       res.meterstick_change_base = base
     return res
 
+  def compute_children(
+      self,
+      df: pd.DataFrame,
+      split_by=None,
+      melted=False,
+      return_dataframe=True,
+      cache_key=None,
+  ):
+    del melted, return_dataframe, cache_key  # unused
+    return self.compute_on_samples(self.get_samples(df, split_by), split_by)
+
+  def get_samples(self, df, split_by=None):
+    raise NotImplementedError
+
+  def compute_on_samples(
+      self, keyed_samples: Iterable[Tuple[Any, pd.DataFrame]], split_by=None
+  ):
+    """Iters through sample DataFrames and collects results.
+
+    Args:
+      keyed_samples: A tuple. The first element is the cache_key and the second
+        is the corresponding DataFrame. Remember a key should correspond to the
+        same data.
+      split_by: Something can be passed into DataFrame.group_by().
+
+    Returns:
+      List of results from samples.
+    """
+    estimates = []
+    for keyed_sample in keyed_samples:
+      try:
+        cache_key, sample = keyed_sample
+        if cache_key is None:
+          # If samples are unlikely to repeat, don't save res to self.cache.
+          res = self.children[0].compute_on(sample, split_by, melted=True)
+        else:
+          res = self.compute_child(
+              sample, split_by, melted=True, cache_key=cache_key
+          )
+        estimates.append(res)
+      except Exception as e:  # pylint: disable=broad-except
+        print(
+            'Warning: Failed on%s sample data for reason %s. If you see many '
+            'such failures, your data might be too sparse.'
+            % (self.name_tmpl.format(''), repr(e))
+        )
+    return estimates
+
+  def compute_on_children(self, children, split_by):
+    del split_by  # unused
+    bucket_estimates = pd.concat(children, axis=1, sort=False)
+    return self.get_stderrs_or_ci_half_width(bucket_estimates)
+
+  def get_stderrs_or_ci_half_width(self, bucket_estimates):
+    """Returns confidence interval information in an unmelted DataFrame."""
+    stderrs, dof = self.get_stderrs(bucket_estimates)
+    if self.confidence:
+      res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
+      res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']
+    else:
+      res = pd.DataFrame(stderrs, columns=[self.prefix + ' SE'])
+    res = utils.unmelt(res)
+    return res
+
+  @staticmethod
+  def get_stderrs(bucket_estimates):
+    dof = bucket_estimates.count(axis=1) - 1
+    return bucket_estimates.std(1), dof
+
+  def get_ci_width(self, stderrs, dof):
+    """You can return asymmetrical confidence interval."""
+    dof = dof.fillna(0).astype(int)  # Scipy might not recognize the Int64 type.
+    half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)
+    return half_width, half_width
+
+  def manipulate(
+      self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
+  ):
+    """Saves and restores the base in addition when has confidence."""
+    if self.confidence:
+      key = self.wrap_cache_key(self.cache_key)
+      key.add_extra_info('base')
+      if hasattr(res, 'meterstick_change_base'):
+        # If res is computed from input data, it will have the attribute.
+        base = res.meterstick_change_base
+        self.save_to_cache(key, base)
+      else:
+        # If res is read from cache, it won't have the attribute, but it must
+        # have been computed already so base has been saved in cache.
+        base = self.get_cached(key)
+    # Don't add suffix like "Jackknife" because point_est won't have it.
+    res = super(MetricWithCI, self).manipulate(
+        res, melted, return_dataframe, apply_name_tmpl or False
+    )
+    return self.add_base_to_res(res, base) if self.confidence else res
+
   def final_compute(self,
                     res,
                     melted: bool = False,
@@ -1507,185 +1535,6 @@ class MetricWithCI(Operation):
     res.display = fn.__get__(res)  # pytype: disable=attribute-error
     # pylint: enable=no-value-for-parameter
     return res
-
-  @staticmethod
-  def get_stderrs(bucket_estimates):
-    dof = bucket_estimates.count(axis=1) - 1
-    return bucket_estimates.std(1), dof
-
-  def get_ci_width(self, stderrs, dof):
-    """You can return asymmetrical confidence interval."""
-    dof = dof.fillna(0).astype(int)  # Scipy might not recognize the Int64 type.
-    half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)
-    return half_width, half_width
-
-  def get_stderrs_or_ci_half_width(self, bucket_estimates):
-    """Returns confidence interval information in an unmelted DataFrame."""
-    stderrs, dof = self.get_stderrs(bucket_estimates)
-    if self.confidence:
-      res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
-      res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']
-    else:
-      res = pd.DataFrame(stderrs, columns=[self.prefix + ' SE'])
-    res = utils.unmelt(res)
-    return res
-
-  def get_samples(self, df, split_by=None):
-    raise NotImplementedError
-
-  def can_precompute(self):
-    return False
-
-  def to_sql(self, table, split_by=None):
-    if not isinstance(self, (Jackknife, Bootstrap)):
-      raise NotImplementedError
-    # If self is not root, this function won't be called.
-    self._is_root_node = True
-    if self.has_been_preaggregated or not self.can_precompute():
-      if not self.where:
-        return super(MetricWithCI, self).to_sql(table, split_by)
-      table = sql.Sql(None, table, self.where)
-      self_no_filter = copy.deepcopy(self)
-      self_no_filter.where = None
-      return self_no_filter.to_sql(table, split_by)
-
-    expanded, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
-    if self != expanded:
-      return expanded.to_sql(table, split_by)
-
-    expanded.where = None  # The filter has been taken care of in preaggregation
-    expanded = utils.push_filters_to_leaf(expanded)
-    split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
-    all_split_by = (
-        split_by + list(utils.get_extra_split_by(expanded)) + [expanded.unit]
-    )
-    leaf = utils.get_leaf_metrics(expanded)
-    cols = [
-        l.get_sql_columns(l.where).set_alias(get_preaggregated_metric_var(l))
-        for l in leaf
-    ]
-    preagg = sql.Sql(cols, table, self.where, all_split_by)
-    equiv = get_preaggregated_metric_tree(expanded)
-    equiv.unit = sql.Column(equiv.unit).alias
-    split_by = sql.Columns(split_by).aliases
-    for m in equiv.traverse():
-      if isinstance(m, metrics.Metric):
-        m.extra_index = sql.Columns(m.extra_index).aliases
-        m.extra_split_by = sql.Columns(m.extra_split_by).aliases
-    if isinstance(equiv, Bootstrap):
-      # When each unit only has one row after preaggregation, we sample by rows.
-      if not utils.get_extra_split_by(equiv):
-        equiv.unit = None
-    else:
-      equiv.has_local_filter = any([l.where for l in leaf])
-    return equiv.to_sql(preagg, split_by)
-
-  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
-                              local_filter, with_data):
-    """Gets the SQL for Jackknife or Bootstrap.
-
-    The query is constructed by
-    1. Resample the table.
-    2. Compute the child Metric on the resampled data.
-    3. Compute the standard error from #2.
-    4. Compute the point estimate from original table.
-    5. sql.Join #3 and #4.
-    6. If metric has confidence level specified, we also get the degrees of
-      freedom so we can later compute the critical value of t distribution in
-      Python.
-    7. If metric only has one child and it's PercentChange or AbsoluteChange, we
-      also get the base values for comparison. They will be used in the
-      res.display().
-
-    Args:
-      table: The table we want to query from.
-      split_by: The columns that we use to split the data.
-      global_filter: The sql.Filters that can be applied to the whole Metric
-        tree.
-      indexes: The columns that we shouldn't apply any arithmetic operation.
-      local_filter: The sql.Filters that have been accumulated so far.
-      with_data: A global variable that contains all the WITH clauses we need.
-
-    Returns:
-      The SQL instance for metric, without the WITH clause component.
-      The global with_data which holds all datasources we need in the WITH
-        clause.
-    """
-    if not isinstance(self, (Jackknife, Bootstrap)):
-      raise NotImplementedError
-    # Confidence interval cannot be computed in SQL completely so the SQL
-    # generated below doesn't work correctly if self is not a root node.
-    if self.confidence and not self._is_root_node:
-      self._is_root_node = None
-      raise NotImplementedError
-    self._is_root_node = None
-
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
-
-    name = 'Jackknife' if isinstance(self, Jackknife) else 'Bootstrap'
-    self_copy = copy.deepcopy(self)
-    se, with_data = get_se(self_copy, table, split_by, global_filter, indexes,
-                           local_filter, with_data)
-    se_alias = with_data.merge(sql.Datasource(se, name + 'SE'))
-
-    pt_est, with_data = self.children[0].get_sql_and_with_clause(
-        table, split_by, global_filter, indexes, local_filter, with_data)
-    pt_est_alias = with_data.merge(
-        sql.Datasource(pt_est, name + 'PointEstimate')
-    )
-
-    columns = sql.Columns()
-    using = sql.Columns(se.groupby)
-    pt_est_col = []
-    for c in pt_est.columns:
-      if c in indexes.aliases:
-        using.add(c)
-      else:
-        pt_est_col.append(
-            sql.Column(f'{pt_est_alias}.{c.alias}', alias=c.alias_raw)
-        )
-    se_cols = []
-    for c in se.columns:
-      if c not in indexes.aliases:
-        se_cols.append(sql.Column(f'{se_alias}.{c.alias}', alias=c.alias_raw))
-    if self.confidence:
-      dof_cols = se_cols[1::2]
-      se_cols = se_cols[::2]
-      cols = zip(pt_est_col, se_cols, dof_cols)
-    else:
-      cols = zip(pt_est_col, se_cols)
-    columns.add(cols)
-
-    has_base_vals = False
-    if self.confidence:
-      child = self.children[0]
-      if len(self.children) == 1 and isinstance(
-          child, (PercentChange, AbsoluteChange)):
-        has_base_vals = True
-        base_metric = copy.deepcopy(child.children[0])
-        if child.where:
-          base_metric.add_where(child.where_raw)
-        base, with_data = base_metric.get_sql_and_with_clause(
-            table,
-            sql.Columns(split_by).add(child.extra_index),
-            global_filter,
-            indexes,
-            local_filter,
-            with_data,
-        )
-        base_alias = with_data.merge(
-            sql.Datasource(base, '_ShouldAlreadyExists')
-        )
-        columns.add(
-            sql.Column(f'{base_alias}.{c.alias}', alias=c.alias_raw)
-            for c in base.columns.difference(indexes)
-        )
-
-    join = 'LEFT' if using else 'CROSS'
-    from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
-    if has_base_vals:
-      from_data = from_data.join(base_alias, join=join, using=using)
-    return sql.Sql(using.add(columns), from_data), with_data
 
   def compute_on_sql(
       self,
@@ -1834,6 +1683,170 @@ class MetricWithCI(Operation):
     """The return should be similar to compute_children()."""
     raise NotImplementedError
 
+  def to_sql(self, table, split_by=None):
+    if not isinstance(self, (Jackknife, Bootstrap)):
+      raise NotImplementedError
+    # If self is not root, this function won't be called.
+    self._is_root_node = True
+    if self.has_been_preaggregated or not self.can_precompute():
+      if not self.where:
+        return super(MetricWithCI, self).to_sql(table, split_by)
+      table = sql.Sql(None, table, self.where)
+      self_no_filter = copy.deepcopy(self)
+      self_no_filter.where = None
+      return self_no_filter.to_sql(table, split_by)
+
+    expanded, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
+    if self != expanded:
+      return expanded.to_sql(table, split_by)
+
+    expanded.where = None  # The filter has been taken care of in preaggregation
+    expanded = utils.push_filters_to_leaf(expanded)
+    split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
+    all_split_by = (
+        split_by + list(utils.get_extra_split_by(expanded)) + [expanded.unit]
+    )
+    leaf = utils.get_leaf_metrics(expanded)
+    cols = [
+        l.get_sql_columns(l.where).set_alias(get_preaggregated_metric_var(l))
+        for l in leaf
+    ]
+    preagg = sql.Sql(cols, table, self.where, all_split_by)
+    equiv = get_preaggregated_metric_tree(expanded)
+    equiv.unit = sql.Column(equiv.unit).alias
+    split_by = sql.Columns(split_by).aliases
+    for m in equiv.traverse():
+      if isinstance(m, metrics.Metric):
+        m.extra_index = sql.Columns(m.extra_index).aliases
+        m.extra_split_by = sql.Columns(m.extra_split_by).aliases
+    if isinstance(equiv, Bootstrap):
+      # When each unit only has one row after preaggregation, we sample by rows.
+      if not utils.get_extra_split_by(equiv):
+        equiv.unit = None
+    else:
+      equiv.has_local_filter = any([l.where for l in leaf])
+    return equiv.to_sql(preagg, split_by)
+
+  def get_sql_and_with_clause(
+      self, table, split_by, global_filter, indexes, local_filter, with_data
+  ):
+    """Gets the SQL for Jackknife or Bootstrap.
+
+    The query is constructed by
+    1. Resample the table.
+    2. Compute the child Metric on the resampled data.
+    3. Compute the standard error from #2.
+    4. Compute the point estimate from original table.
+    5. sql.Join #3 and #4.
+    6. If metric has confidence level specified, we also get the degrees of
+      freedom so we can later compute the critical value of t distribution in
+      Python.
+    7. If metric only has one child and it's PercentChange or AbsoluteChange, we
+      also get the base values for comparison. They will be used in the
+      res.display().
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    if not isinstance(self, (Jackknife, Bootstrap)):
+      raise NotImplementedError
+    # Confidence interval cannot be computed in SQL completely so the SQL
+    # generated below doesn't work correctly if self is not a root node.
+    if self.confidence and not self._is_root_node:
+      self._is_root_node = None
+      raise NotImplementedError
+    self._is_root_node = None
+
+    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+
+    name = 'Jackknife' if isinstance(self, Jackknife) else 'Bootstrap'
+    self_copy = copy.deepcopy(self)
+    se, with_data = get_se(
+        self_copy,
+        table,
+        split_by,
+        global_filter,
+        indexes,
+        local_filter,
+        with_data,
+    )
+    se_alias = with_data.merge(sql.Datasource(se, name + 'SE'))
+
+    pt_est, with_data = self.children[0].get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data
+    )
+    pt_est_alias = with_data.merge(
+        sql.Datasource(pt_est, name + 'PointEstimate')
+    )
+
+    columns = sql.Columns()
+    using = sql.Columns(se.groupby)
+    pt_est_col = []
+    for c in pt_est.columns:
+      if c in indexes.aliases:
+        using.add(c)
+      else:
+        pt_est_col.append(
+            sql.Column(f'{pt_est_alias}.{c.alias}', alias=c.alias_raw)
+        )
+    se_cols = []
+    for c in se.columns:
+      if c not in indexes.aliases:
+        se_cols.append(sql.Column(f'{se_alias}.{c.alias}', alias=c.alias_raw))
+    if self.confidence:
+      dof_cols = se_cols[1::2]
+      se_cols = se_cols[::2]
+      cols = zip(pt_est_col, se_cols, dof_cols)
+    else:
+      cols = zip(pt_est_col, se_cols)
+    columns.add(cols)
+
+    has_base_vals = False
+    if self.confidence:
+      child = self.children[0]
+      if len(self.children) == 1 and isinstance(
+          child, (PercentChange, AbsoluteChange)
+      ):
+        has_base_vals = True
+        base_metric = copy.deepcopy(child.children[0])
+        if child.where:
+          base_metric.add_where(child.where_raw)
+        base, with_data = base_metric.get_sql_and_with_clause(
+            table,
+            sql.Columns(split_by).add(child.extra_index),
+            global_filter,
+            indexes,
+            local_filter,
+            with_data,
+        )
+        base_alias = with_data.merge(
+            sql.Datasource(base, '_ShouldAlreadyExists')
+        )
+        columns.add(
+            sql.Column(f'{base_alias}.{c.alias}', alias=c.alias_raw)
+            for c in base.columns.difference(indexes)
+        )
+
+    join = 'LEFT' if using else 'CROSS'
+    from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
+    if has_base_vals:
+      from_data = from_data.join(base_alias, join=join, using=using)
+    return sql.Sql(using.add(columns), from_data), with_data
+
+  def can_precompute(self):
+    return False
+
 
 class Jackknife(MetricWithCI):
   """Class for Jackknife estimates of standard errors.
@@ -1963,6 +1976,26 @@ class Jackknife(MetricWithCI):
         loo = loo.reorder_levels(split_by_with_unit)
       self.save_to_cache(key, loo)
 
+  def compute_children(
+      self,
+      df: pd.DataFrame,
+      split_by=None,
+      melted=False,
+      return_dataframe=True,
+      cache_key=None,
+  ):
+    if not self.can_precompute():
+      return super(Jackknife, self).compute_children(
+          df, split_by, melted, return_dataframe, cache_key
+      )
+    replicates = self.compute_child(
+        df,
+        split_by + [self.unit],
+        True,
+        cache_key=('_RESERVED', 'Jackknife', self.unit),
+    )
+    return [replicates.unstack(self.unit)]
+
   def get_samples(self, df, split_by=None, return_cache_key=False):
     """Yields leave-one-out (LOO) DataFrame with level value.
 
@@ -1997,23 +2030,6 @@ class Jackknife(MetricWithCI):
           df_rest = df_rest[df_rest.index.isin(unique_slice_val)]
         key = ('_RESERVED', 'Jackknife', self.unit, lvl)
         yield key if return_cache_key else None, df_rest.reset_index()
-
-  def compute_children(self,
-                       df: pd.DataFrame,
-                       split_by=None,
-                       melted=False,
-                       return_dataframe=True,
-                       cache_key=None):
-    if not self.can_precompute():
-      return super(Jackknife,
-                   self).compute_children(df, split_by, melted,
-                                          return_dataframe, cache_key)
-    replicates = self.compute_child(
-        df,
-        split_by + [self.unit],
-        True,
-        cache_key=('_RESERVED', 'Jackknife', self.unit))
-    return [replicates.unstack(self.unit)]
 
   @staticmethod
   def get_stderrs(bucket_estimates):
@@ -2084,6 +2100,7 @@ class Jackknife(MetricWithCI):
     return replicates
 
   def can_precompute(self):
+    """LOO can be precomputed if all leaves can be expressed as Sum or Count."""
     return self.enable_optimization and is_metric_precomputable(self)
 
 
@@ -2201,11 +2218,6 @@ class Bootstrap(MetricWithCI):
     preagg, preagg_df = get_preaggregated_data(self, df, split_by)
     return self.compute_util_metric_on(preagg, preagg_df, split_by)
 
-  def can_precompute(self):
-    return (
-        self.unit and self.enable_optimization and is_metric_precomputable(self)
-    )
-
   def get_samples(self, df, split_by=None):
     """Resamples for Bootstrap. When samples are likely to repeat, cache."""
     # If there is no extra split_by added, each unit will correspond to one row
@@ -2273,6 +2285,11 @@ class Bootstrap(MetricWithCI):
       )
       replicates.append(bst.unstack('meterstick_resample_idx'))
     return replicates
+
+  def can_precompute(self):
+    return (
+        self.unit and self.enable_optimization and is_metric_precomputable(self)
+    )
 
 
 def get_preaggregated_data(m, df, split_by):
