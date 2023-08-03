@@ -98,6 +98,7 @@ class Operation(metrics.Metric):
           self).__init__(name, child or (), where, name_tmpl, extra_split_by,
                          extra_index, additional_fingerprint_attrs, **kwargs)
     self.precomputable_in_jk_bs = True
+    self.is_operation = True
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     try:
@@ -1371,9 +1372,7 @@ class MetricWithCI(Operation):
     point_est = self.compute_point_estimate(df, split_by)
     res = point_est.join(utils.melt(std))
     if self.confidence:
-      res[self.prefix +
-          ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
-      res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
+      res = self.compute_ci(res)
     res = utils.unmelt(res)
     if not self.confidence:
       return res
@@ -1382,6 +1381,29 @@ class MetricWithCI(Operation):
 
   def compute_point_estimate(self, df, split_by):
     return self.compute_child(df, split_by, melted=True)
+
+  def compute_ci(self, res):
+    """Constructs the confidence interval.
+
+    Args:
+      res: A three-column DataFrame. The 1st column are the point estimates
+        returned by compute_point_estimate. The 2nd and 3rd columns are called
+        `{self.prefix} CI-lower` and `{self.prefix} CI-upper`, but actually what
+        they stored are half CI widths from get_ci_width().
+
+    Returns:
+      The input res with the 2nd and 3rd columns modified in-place. The columns
+      now actually contain CI bounds. By default we add/minus CI half width from
+      the point estimate to get the bounds. If you want to construct CI without
+      using the point estimates, for example, using percentiles from bootstrap
+      instead, you can overwrite get_ci_width() to directly store the bounds
+      then make this function a no-op.
+    """
+    res[self.prefix + ' CI-lower'] = (
+        res.iloc[:, 0] - res[self.prefix + ' CI-lower']
+    )
+    res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
+    return res
 
   def compute_change_base(self,
                           df,
