@@ -1546,6 +1546,7 @@ class MetricWithCI(Operation):
       cache_key=None,
       cache=None,
       batch_size=None,
+      return_dataframe=True,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
 
@@ -1573,10 +1574,12 @@ class MetricWithCI(Operation):
         initiate an empty dict.
       batch_size: The number of resamples to compute in one SQL run. It only has
         effect in the 'mixed' mode. It precedes self.batch_size.
+      return_dataframe: Not used. MetricWithCI always returns a DataFrame.
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
+    del return_dataframe  # not used
     self._runtime_batch_size = batch_size
     try:
       return super(MetricWithCI,

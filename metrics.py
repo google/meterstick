@@ -50,6 +50,7 @@ def compute_on_sql(
     mode=None,
     cache_key=None,
     cache=None,
+    return_dataframe=True,
     **kwargs):
   """A wrapper that metric | compute_on_sql() === metric.compute_on_sql()."""
   return lambda m: m.compute_on_sql(
@@ -60,6 +61,7 @@ def compute_on_sql(
       mode,
       cache_key,
       cache=cache,
+      return_dataframe=return_dataframe,
       **kwargs)
 
 
@@ -273,33 +275,47 @@ class Metric(object):
       self.where = tuple(set(list(self.where_raw) + where))
     return self
 
-  def compute_on(
+  def _compute_with_caching_and_postprocessing(
       self,
-      df: pd.DataFrame,
-      split_by: Optional[Union[Text, List[Text]]] = None,
-      melted: bool = False,
-      return_dataframe: bool = True,
-      cache_key: Any = None,
-      cache=None,
+      compute_fn,
+      df,
+      split_by,
+      melted,
+      return_dataframe,
+      apply_name_tmpl,
+      cache_key,
+      cache,
+      *args,
+      **kwargs,
   ):
-    """Key API of Metric.
+    """Wraps computation logic with caching and common postprocessing.
 
-    Wraps computing logic with caching. This is what you should call to use
-    Metric. It's compute_through + final_compute + caching. As caching is the
-    shared part of Metric, we suggest you NOT to overwrite this method.
-    Overwriting compute_slices and/or final_compute should be enough. If not,
-    contact us with your use cases.
+    This function does:
+    1. Initializes a cache if it doesn't eixst.
+    2. Reads from cache if possible.
+    3. Otherwise calls compute_fn(df, split_by, *args, **kwargs).
+    4. Postprocesses the result like melting and converting to pandas DataFrame.
+    5. Cleans up cache if needed.
 
     Args:
+      compute_fn: A function that compute_fn(df, split_by, *args, **kwargs)
+        returns a number, pd.Series or a melted DataFrame. See compute_through
+        and compute_through_sql for examples.
       df: The DataFrame to compute on.
       split_by: The columns that we use to split the data.
       melted: Whether to transform the result to long format.
       return_dataframe: Whether to convert the result to DataFrame if it's not.
         If False, it could still return a DataFrame.
+      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
+        Distribution('country', Sum('X')).compute_on(df), we first compute
+        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
+        the name_tmpl 'Distribution of {}' to all column names.
       cache_key: What key to use to cache the df. You can use anything that can
         be a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ..).
       cache: The cache the whole Metric tree shares during one round of
         computation. If it's None, we initiate an empty dict.
+      *args: Args passed to compute_fn.
+      **kwargs: Args passed to compute_fn.
 
     Returns:
       Final result returned to user. If split_by, it's a pd.Series or a
@@ -313,10 +329,10 @@ class Metric(object):
         raw_res = self.get_cached(key)
       else:
         self.cache_key = key
-        raw_res = self.compute_through(df, split_by)
+        raw_res = compute_fn(df, split_by, *args, **kwargs)
         self.save_to_cache(key, raw_res)
 
-      res = self.manipulate(raw_res, melted, return_dataframe)
+      res = self.manipulate(raw_res, melted, return_dataframe, apply_name_tmpl)
       return self.final_compute(res, melted, return_dataframe, split_by, df)
     finally:
       if cache_key is None:  # Only root metric can have None as cache_key
@@ -347,6 +363,116 @@ class Metric(object):
   def find_all_in_cache_by_metric_type(self, metric):
     """Retrieves results from a certain type of metric from cache."""
     return {k: v for k, v in self.cache.items() if k.metric.__class__ == metric}
+
+  def manipulate(
+      self,
+      res,
+      melted: bool = False,
+      return_dataframe: bool = True,
+      apply_name_tmpl=None,
+  ):
+    """Common adhoc data manipulation.
+
+    It does
+    1. Converts res to a DataFrame if asked.
+    2. Melts res to long format if asked.
+    3. Removes redundant index levels in res.
+    4. Apply self.name_tmpl to the output name or columns if asked.
+
+    Args:
+      res: Returned by compute_through(). Usually a DataFrame, but could be a
+        pd.Series or a base type.
+      melted: Whether to transform the result to long format.
+      return_dataframe: Whether to convert the result to DataFrame if it's not.
+        If False, it could still return a DataFrame if the input is already a
+        DataFrame.
+      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
+        Distribution('country', Sum('X')).compute_on(df), we first compute
+        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
+        the name_tmpl 'Distribution of {}' to all column names.
+
+    Returns:
+      Final result returned to user. If split_by, it's a pd.Series or a
+      pd.DataFrame, otherwise it could be a base type.
+    """
+    if isinstance(res, pd.Series):
+      res.name = self.name
+    if not isinstance(res, pd.DataFrame) and return_dataframe:
+      res = self.to_dataframe(res)
+    if melted:
+      res = utils.melt(res)
+    if apply_name_tmpl:
+      res = utils.apply_name_tmpl(self.name_tmpl, res, melted)
+    return utils.remove_empty_level(res)
+
+  def to_dataframe(self, res):
+    if isinstance(res, pd.DataFrame):
+      return res
+    elif isinstance(res, pd.Series):
+      return pd.DataFrame(res)
+    return pd.DataFrame({self.name: [res]})
+
+  def final_compute(self, res, melted, return_dataframe, split_by, df):
+    del melted, return_dataframe, split_by, df  # Useful in derived classes.
+    return res
+
+  def clean_up_cache(self):
+    """Flushes the cache when a Metric tree has been computed.
+
+    A Metric and all the descendants form a tree. When a computation is started
+    from a MetricList or CompositeMetric, we know the input DataFrame is not
+    going to change in the computation. So even if user doesn't ask for caching,
+    we still enable it, but we need to clean things up when done. As the results
+    need to be cached until all Metrics in the tree have been computed, we
+    should only clean up at the end of the computation of the entry/top Metric.
+    We recognize the top Metric by looking at the cache_key. All descendants
+    will have it assigned as RESERVED_KEY but the entry Metric's will be None.
+    """
+    self.cache.clear()
+    for m in self.traverse():
+      m.cache_key = None
+
+  def compute_on(
+      self,
+      df: pd.DataFrame,
+      split_by: Optional[Union[Text, List[Text]]] = None,
+      melted: bool = False,
+      return_dataframe: bool = True,
+      cache_key: Any = None,
+      cache=None,
+  ):
+    """Key API of Metric.
+
+    This is what you should call to use Metric. As caching is the shared part of
+    Metric, we suggest you NOT to overwrite this method. Overwriting
+    compute_slices and/or final_compute should be enough. If not, contact us
+    with your use cases.
+
+    Args:
+      df: The DataFrame to compute on.
+      split_by: The columns that we use to split the data.
+      melted: Whether to transform the result to long format.
+      return_dataframe: Whether to convert the result to DataFrame if it's not.
+        If False, it could still return a DataFrame.
+      cache_key: What key to use to cache the df. You can use anything that can
+        be a key of a dict except '_RESERVED' and tuples like ('_RESERVED', ..).
+      cache: The cache the whole Metric tree shares during one round of
+        computation. If it's None, we initiate an empty dict.
+
+    Returns:
+      Final result returned to user. If split_by, it's a pd.Series or a
+      pd.DataFrame, otherwise it could be a base type.
+    """
+    return self._compute_with_caching_and_postprocessing(
+        self.compute_through,
+        df,
+        split_by,
+        melted,
+        return_dataframe,
+        None,
+        cache_key,
+        cache,
+    )
 
   def compute_through(self, df, split_by: Optional[List[Text]] = None):
     """Precomputes df -> split df and apply compute() -> postcompute."""
@@ -459,74 +585,6 @@ class Metric(object):
   def compute(self, df):
     raise NotImplementedError
 
-  def manipulate(
-      self,
-      res,
-      melted: bool = False,
-      return_dataframe: bool = True,
-      apply_name_tmpl=None,
-  ):
-    """Common adhoc data manipulation.
-
-    It does
-    1. Converts res to a DataFrame if asked.
-    2. Melts res to long format if asked.
-    3. Removes redundant index levels in res.
-    4. Apply self.name_tmpl to the output name or columns if asked.
-
-    Args:
-      res: Returned by compute_through(). Usually a DataFrame, but could be a
-        pd.Series or a base type.
-      melted: Whether to transform the result to long format.
-      return_dataframe: Whether to convert the result to DataFrame if it's not.
-        If False, it could still return a DataFrame if the input is already a
-        DataFrame.
-      apply_name_tmpl: If to apply name_tmpl to the result. For example, in
-        Distribution('country', Sum('X')).compute_on(df), we first compute
-        Sum('X').compute_on(df, 'country'), then normalize, and finally apply
-        the name_tmpl 'Distribution of {}' to all column names.
-
-    Returns:
-      Final result returned to user. If split_by, it's a pd.Series or a
-      pd.DataFrame, otherwise it could be a base type.
-    """
-    if isinstance(res, pd.Series):
-      res.name = self.name
-    if not isinstance(res, pd.DataFrame) and return_dataframe:
-      res = self.to_dataframe(res)
-    if melted:
-      res = utils.melt(res)
-    if apply_name_tmpl:
-      res = utils.apply_name_tmpl(self.name_tmpl, res, melted)
-    return utils.remove_empty_level(res)
-
-  def to_dataframe(self, res):
-    if isinstance(res, pd.DataFrame):
-      return res
-    elif isinstance(res, pd.Series):
-      return pd.DataFrame(res)
-    return pd.DataFrame({self.name: [res]})
-
-  def final_compute(self, res, melted, return_dataframe, split_by, df):
-    del melted, return_dataframe, split_by, df  # Useful in derived classes.
-    return res
-
-  def clean_up_cache(self):
-    """Flushes the cache when a Metric tree has been computed.
-
-    A Metric and all the descendants form a tree. When a computation is started
-    from a MetricList or CompositeMetric, we know the input DataFrame is not
-    going to change in the computation. So even if user doesn't ask for caching,
-    we still enable it, but we need to clean things up when done. As the results
-    need to be cached until all Metrics in the tree have been computed, we
-    should only clean up at the end of the computation of the entry/top Metric.
-    We recognize the top Metric by looking at the cache_key. All descendants
-    will have it assigned as RESERVED_KEY but the entry Metric's will be None.
-    """
-    self.cache.clear()
-    for m in self.traverse():
-      m.cache_key = None
-
   def compute_on_sql(
       self,
       table,
@@ -536,6 +594,7 @@ class Metric(object):
       mode=None,
       cache_key=None,
       cache=None,
+      return_dataframe=True,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
 
@@ -561,47 +620,52 @@ class Metric(object):
         ..).
       cache: The cache the whole Metric tree shares during one round of
         computation. If it's None, we initiate an empty dict.
+      return_dataframe: If False, result of simple Metric will be a number or
+        pd.Series (when has split_by).
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
     """
-    self.cache = {} if cache is None else cache
-    split_by = [split_by] if isinstance(split_by, str) else split_by or []
-    try:
-      key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
-      if self.in_cache(key):
-        res = self.get_cached(key)
-      else:
-        self.cache_key = key
-        raw_res = self.compute_through_sql(table, split_by, execute, mode)
-        res = raw_res
-        # For simple metrics we save a pd.Series to be consistent with
-        # compute_on().
-        if isinstance(
-            raw_res,
-            pd.DataFrame) and raw_res.shape[1] == 1 and not is_operation(self):
-          raw_res = raw_res.iloc[:, 0]
-        self.save_to_cache(key, raw_res)
-      res = self.manipulate(res, melted, apply_name_tmpl=False)
-      return self.final_compute(res, melted, True, split_by, table)
-    finally:
-      if cache_key is None:  # Only root metric can have None as cache_key
-        self.clean_up_cache()
+    return self._compute_with_caching_and_postprocessing(
+        self.compute_through_sql,
+        table,
+        split_by,
+        melted,
+        return_dataframe,
+        False,
+        cache_key,
+        cache,
+        execute,
+        mode,
+    )
 
   def compute_through_sql(self, table, split_by, execute, mode):
     """Delegeates the computation to different modes."""
     if mode not in (None, 'mixed', 'magic'):
       raise ValueError('Mode %s is not supported!' % mode)
     if not self.children:
-      return self.compute_on_sql_sql_mode(table, split_by, execute)
+      res = self.compute_on_sql_sql_mode(table, split_by, execute)
+      return self.to_series_or_number_if_not_operation(res)
     if not mode:
       try:
-        return self.compute_on_sql_sql_mode(table, split_by, execute)
+        res = self.compute_on_sql_sql_mode(table, split_by, execute)
+        return self.to_series_or_number_if_not_operation(res)
       except NotImplementedError:
         pass
     if self.where:
       table = sql.Sql(None, table, self.where)
-    return self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+    res = self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+    return self.to_series_or_number_if_not_operation(res)
+
+  def to_series_or_number_if_not_operation(self, df):
+    return self.to_series_or_number(df) if not is_operation(self) else df
+
+  def to_series_or_number(self, df):
+    if not isinstance(df, pd.DataFrame):
+      return df
+    df = df.squeeze(axis=1)
+    df = df.squeeze() if isinstance(df, pd.Series) and not df.index.name else df
+    return df
 
   def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
     """Executes the query from to_sql() and process the result."""
@@ -688,8 +752,10 @@ class Metric(object):
         children.append(c)
       else:
         children.append(
-            c.compute_on_sql(table, split_by + self.extra_split_by, execute,
-                             False, mode, self.cache_key, self.cache))
+            self.compute_util_metric_on_sql(
+                c, table, split_by + self.extra_split_by, execute, False, mode
+            )
+        )
     return children[0] if len(self.children) == 1 else children
 
   def compute_on_beam(
@@ -791,11 +857,19 @@ class Metric(object):
       melted=False,
       mode=None,
       cache_key=None,
+      return_dataframe=True,
   ):
     """Computes a util metric with caching and filtering handled correctly."""
     cache_key = self.wrap_cache_key(cache_key, split_by)
     return metric.compute_on_sql(
-        table, split_by, execute, melted, mode, cache_key, self.cache
+        table,
+        split_by,
+        execute,
+        melted,
+        mode,
+        cache_key,
+        self.cache,
+        return_dataframe,
     )
 
   def get_equivalent(self, *auxiliary_cols):
@@ -1322,12 +1396,10 @@ class CompositeMetric(Metric):
     """
     a, b = children[0], children[1]
     m1, m2 = self.children[0], self.children[1]
-    if isinstance(a, pd.DataFrame) and a.shape[1] == 1:
-      a = a.squeeze(axis=1)
-      a = a if is_operation(m1) else a.squeeze()
-    if isinstance(b, pd.DataFrame) and b.shape[1] == 1:
-      b = b.squeeze(axis=1)
-      b = b if is_operation(m2) else b.squeeze()
+    if isinstance(m1, Metric):
+      a = m1.to_series_or_number(a)
+    if isinstance(m2, Metric):
+      b = m2.to_series_or_number(b)
     res = None
     if isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
       if len(a.columns) == len(b.columns):
