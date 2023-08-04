@@ -607,7 +607,7 @@ class Metric(object):
     """Executes the query from to_sql() and process the result."""
     query = self.to_sql(table, split_by)
     res = execute(str(query))
-    extra_idx = list(utils.get_extra_idx(self))
+    extra_idx = list(utils.get_extra_idx(self, return_superset=True))
     indexes = split_by + extra_idx if split_by else extra_idx
     columns = [a.alias_raw for a in query.groupby.add(query.columns)]
     columns[:len(indexes)] = indexes
@@ -621,7 +621,9 @@ class Metric(object):
   def to_sql(self, table, split_by: Optional[Union[Text, List[Text]]] = None):
     """Generates SQL query for the metric."""
     global_filter = utils.get_global_filter(self)
-    indexes = sql.Columns(split_by).add(utils.get_extra_idx(self))
+    indexes = sql.Columns(split_by).add(
+        utils.get_extra_idx(self, return_superset=True)
+    )
     with_data = sql.Datasources()
     if isinstance(table, sql.Sql) and table.with_data:
       table = copy.deepcopy(table)
@@ -1159,6 +1161,7 @@ class MetricList(Metric):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
+    utils.get_extra_idx(self)  # Check if indexes are compatible.
     local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
     children_sql = [
         c.get_sql_and_with_clause(table, split_by, global_filter, indexes,
@@ -1320,9 +1323,11 @@ class CompositeMetric(Metric):
     a, b = children[0], children[1]
     m1, m2 = self.children[0], self.children[1]
     if isinstance(a, pd.DataFrame) and a.shape[1] == 1:
-      a = a.iloc[:, 0]
+      a = a.squeeze(axis=1)
+      a = a if is_operation(m1) else a.squeeze()
     if isinstance(b, pd.DataFrame) and b.shape[1] == 1:
-      b = b.iloc[:, 0]
+      b = b.squeeze(axis=1)
+      b = b if is_operation(m2) else b.squeeze()
     res = None
     if isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
       if len(a.columns) == len(b.columns):
@@ -1407,40 +1412,71 @@ class CompositeMetric(Metric):
           table, split_by, global_filter, indexes, local_filter, with_data)
       query1, with_data = self.children[1].get_sql_and_with_clause(
           table, split_by, global_filter, indexes, local_filter, with_data)
-      if len(query0.columns) != 1 and len(query1.columns) != 1 and len(
-          query0.columns) != len(query1.columns):
+      idx_aliases = sql.Columns(indexes).aliases
+      val_cols0 = [c for c in query0.columns if c.alias not in idx_aliases]
+      val_cols1 = [c for c in query1.columns if c.alias not in idx_aliases]
+      if (
+          len(val_cols0) != 1
+          and len(val_cols1) != 1
+          and len(val_cols0) != len(val_cols1)
+      ):
         raise ValueError('Children Metrics have different shapes!')
 
+      # Index columns can be in `groupby` or the first part of `columns`.
+      idx0 = (
+          sql.Columns(query0.groupby)
+          .add(query0.columns[:-len(val_cols0)])
+          .aliases
+      )
+      idx1 = (
+          sql.Columns(query1.groupby)
+          .add(query1.columns[:-len(val_cols1)])
+          .aliases
+      )
+      has_same_idx = set(idx0) == set(idx1)
+      if not has_same_idx:
+        # If one index set is a subset of the other, we JOIN on the smaller set.
+        shared_idx = idx0 if len(idx0) < len(idx1) else idx1
+        if set(idx0).difference(idx1) and set(idx1).difference(idx0):
+          raise ValueError(
+              f'Indexes {idx0} and {idx1} are incompatible in'
+              ' CompositeMetric!'
+          )
+      using = indexes if has_same_idx else shared_idx
+
       compatible = sql.is_compatible(query0, query1)
-      if compatible:
+      # If two queries are compatible, merge them into one.
+      if compatible and has_same_idx:
         col0_col1 = zip(itertools.cycle(query0.columns), query1.columns)
         if len(query1.columns) == 1:
           col0_col1 = zip(query0.columns, itertools.cycle(query1.columns))
         columns = sql.Columns()
         for c0, c1 in col0_col1:
-          if c0 in indexes.aliases:
+          if c0.alias in idx_aliases:
             columns.add(c0)
           else:
             alias = self.name_tmpl.format(c0.alias_raw, c1.alias_raw)
             columns.add(op(c0, c1).set_alias(alias))
-        query = query0
+        query = copy.deepcopy(query0)
         query.columns = columns
+      # If incompatible, add both queries to with_data and SELECT from the JOIN
+      # of both.
       else:
         tbl0 = with_data.merge(sql.Datasource(query0, 'CompositeMetricTable0'))
         tbl1 = with_data.merge(sql.Datasource(query1, 'CompositeMetricTable1'))
-        join = 'FULL' if indexes else 'CROSS'
-        from_data = sql.Join(tbl0, tbl1, join=join, using=indexes)
-        columns = sql.Columns()
-        col0_col1 = zip(itertools.cycle(query0.columns), query1.columns)
-        if len(query1.columns) == 1:
-          col0_col1 = zip(query0.columns, itertools.cycle(query1.columns))
+        join = 'FULL' if using else 'CROSS'
+        from_data = sql.Join(tbl0, tbl1, join=join, using=using)
+        columns = sql.Columns(idx_aliases)
+        col0_col1 = zip(itertools.cycle(val_cols0), val_cols1)
+        if len(val_cols1) == 1:
+          col0_col1 = zip(val_cols0, itertools.cycle(val_cols1))
         for c0, c1 in col0_col1:
-          if c0 not in indexes.aliases:
+          if c0.alias not in idx_aliases:
             col = op(
                 sql.Column('%s.%s' % (tbl0, c0.alias), alias=c0.alias_raw),
                 sql.Column('%s.%s' % (tbl1, c1.alias), alias=c1.alias_raw))
             columns.add(col)
-        query = sql.Sql(sql.Columns(indexes.aliases).add(columns), from_data)
+        query = sql.Sql(columns, from_data)
 
     if len(query.columns.difference(indexes)) == 1:
       query.columns[-1].set_alias(self.name)
