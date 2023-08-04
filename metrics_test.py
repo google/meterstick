@@ -484,6 +484,15 @@ class TestCompositeMetric(absltest.TestCase):
     expected.columns = ['%s - %s' % (c, c) for c in expected.columns]
     testing.assert_frame_equal(output, expected)
 
+  def test_between_operations_splitby(self):
+    df = pd.DataFrame({'exp': ['c', 't'], 'grp': ['A'] * 2, 'x': [1, 2]})
+    s = metrics.Sum('x')
+    pct = operations.PercentChange('exp', 'c')
+    output = (pct(s) - pct(s)).compute_on(df, 'grp')
+    expected = pct(s).compute_on(df) - pct(s).compute_on(df, 'grp')
+    expected.columns = ['%s - %s' % (c, c) for c in expected.columns]
+    testing.assert_frame_equal(output, expected)
+
   def test_between_operations_where(self):
     df = pd.DataFrame({
         'X': [1, 2, 3, 4, 5, 6],

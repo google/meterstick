@@ -663,8 +663,13 @@ class Metric(object):
   def to_series_or_number(self, df):
     if not isinstance(df, pd.DataFrame):
       return df
-    df = df.squeeze(axis=1)
-    df = df.squeeze() if isinstance(df, pd.Series) and not df.index.name else df
+    df = df.squeeze(axis=1)  # squeeze to a Series if possible
+    if (
+        isinstance(df, pd.Series)
+        and len(df.index.names) == 1
+        and not df.index.name
+    ):  # squeeze to a number if applicable
+      df = df.squeeze()
     return df
 
   def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
