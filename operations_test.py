@@ -794,7 +794,7 @@ class PrePostChangeTests(absltest.TestCase):
     expected2 = operations.PrePostChange('condition', 0, metrics.Sum('Y'),
                                          self.sum_prex,
                                          'cookie').compute_on(self.df)
-    expected = pd.concat((expected1, expected2), 1)
+    expected = pd.concat((expected1, expected2), axis=1)
     testing.assert_frame_equal(output, expected)
 
   def test_multiple_covariates(self):
@@ -1002,7 +1002,7 @@ class CUPEDTests(absltest.TestCase):
                                  'cookie').compute_on(self.df)
     expected2 = operations.CUPED('condition', 0, metrics.Sum('Y'),
                                  self.sum_prex, 'cookie').compute_on(self.df)
-    expected = pd.concat((expected1, expected2), 1)
+    expected = pd.concat((expected1, expected2), axis=1)
     testing.assert_frame_equal(output, expected)
 
   def test_multiple_covariates(self):
@@ -1778,7 +1778,7 @@ class JackknifeTests(parameterized.TestCase):
     ab = operations.AbsoluteChange('grp', 'A')
     expected_sum = ab(jk(sumx)).compute_on(df[df.X > 4])
     expected_mean = ab(jk(meanx)).compute_on(df[df.X > 5])
-    expected = pd.concat((expected_sum, expected_mean), 1)
+    expected = pd.concat((expected_sum, expected_mean), axis=1)
     testing.assert_frame_equal(output, expected)
 
   def test_jackknife_with_operation_splitby(self):
@@ -2498,7 +2498,7 @@ class FilterTest(parameterized.TestCase):
     output = op(metrics.MetricList((m1, m2))).compute_on(self.df)
     expected1 = op(m1).compute_on(self.df)
     expected2 = op(m2).compute_on(self.df)
-    expected = pd.concat((expected1, expected2), 1)
+    expected = pd.concat((expected1, expected2), axis=1)
     testing.assert_frame_equal(output, expected)
 
   def test_metriclist(self, op):
@@ -2568,7 +2568,8 @@ class CachingTest(parameterized.TestCase):
     actual_call_ct = SUM_COMPUTE_THROUGH.mock.call_count
     expected = pd.concat(
         [no_filter.compute_on(self.df[(self.df.X > 2) & (self.df.Y > 1)])] * 4,
-        1)
+        axis=1,
+    )
 
     self.assertEqual(actual_call_ct, 2)
     testing.assert_frame_equal(output, expected)

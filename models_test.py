@@ -301,7 +301,7 @@ class LogisticRegressionTest(absltest.TestCase):
               'sum(X1) for class %s' % cl
           ])
       res.append(expected)
-    expected = pd.concat(res, 1)
+    expected = pd.concat(res, axis=1)
     pd.testing.assert_frame_equal(output, expected)
 
 
@@ -330,7 +330,7 @@ class MiscellaneousTests(parameterized.TestCase):
     ms = metrics.MetricList((m, s))
     jk = operations.Jackknife('grp2', confidence=0.9)
     output = jk(ms).compute_on(DF)
-    expected = pd.concat((jk(m).compute_on(DF), jk(s).compute_on(DF)), 1)
+    expected = pd.concat((jk(m).compute_on(DF), jk(s).compute_on(DF)), axis=1)
     pd.testing.assert_frame_equal(output, expected)
 
   def test_count_features(self):
