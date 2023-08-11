@@ -1169,7 +1169,7 @@ class MetricList(Metric):
       res: pd.Series,
       melted: bool = False,
       return_dataframe: bool = True,
-      apply_name_tmpl: Optional[Text] = None,
+      apply_name_tmpl: bool = None,
   ):
     """Rename columns if asked in addition to original manipulation."""
     res = super(MetricList, self).manipulate(
@@ -1213,6 +1213,56 @@ class MetricList(Metric):
       None
     """
     self.columns = rename_columns
+
+  def compute_on_sql(
+      self,
+      table,
+      split_by=None,
+      execute=None,
+      melted=False,
+      mode=None,
+      cache_key=None,
+      cache=None,
+      return_dataframe=True,
+  ):
+    if return_dataframe:
+      return super(MetricList, self).compute_on_sql(
+          table, split_by, execute, melted, mode, cache_key, cache
+      )
+      # Returns a list of results without pd.concat.
+    return self._compute_with_caching_and_postprocessing(
+        self.compute_children_sql,
+        table,
+        split_by,
+        melted,
+        return_dataframe,
+        False,
+        cache_key,
+        cache,
+        execute,
+        mode,
+    )
+
+  def compute_children_sql(self, table, split_by, execute, mode=None):
+    """The return should be similar to compute_children()."""
+    children = []
+    for c in self.children:
+      if not isinstance(c, Metric):
+        children.append(c)
+      else:
+        children.append(
+            self.compute_util_metric_on_sql(
+                c,
+                table,
+                split_by + self.extra_split_by,
+                execute,
+                False,
+                mode,
+                return_dataframe=self.children_return_dataframe,
+            )
+        )
+    # When there is only one child, returns the result of the child.
+    return children[0] if len(self.children) == 1 else children
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
