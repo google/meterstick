@@ -2365,10 +2365,8 @@ class Bootstrap(MetricWithCI):
     """Gets self.n_replicates bootstrap resamples."""
     del indexes  # not used
     if not self.unit:
-      return get_bootstrap_data_no_unit(
-          self, table, split_by, global_filter, with_data
-      )
-    return get_bootstrap_data_with_unit(
+      return bootstrap_by_row(self, table, split_by, global_filter, with_data)
+    return bootstrap_by_unit(
         self,
         table,
         split_by,
@@ -2547,7 +2545,7 @@ def get_jackknife_data_general(
     Buckets AS (SELECT DISTINCT unit AS meterstick_resample_idx
     FROM $DATA
     WHERE global_filter),
-    JackknifeResammpledData AS (SELECT
+    JackknifeResampledData AS (SELECT
       *
     FROM Buckets
     CROSS JOIN
@@ -2563,7 +2561,7 @@ def get_jackknife_data_general(
     FROM $DATA
     WHERE global_filter
     GROUP BY jk_split_by),
-    JackknifeResammpledData AS (SELECT
+    JackknifeResampledData AS (SELECT
       *
     FROM Buckets
     JOIN
@@ -2602,7 +2600,7 @@ def get_jackknife_data_general(
         jk_from,
         where=global_filter,
     )
-    jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
+    jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResampledData')
     jk_data_table_alias = with_data.add(jk_data_table)
   else:
     buckets = sql.Sql(unique_units, table, where=global_filter)
@@ -2615,7 +2613,7 @@ def get_jackknife_data_general(
             global_filter
         ),
     )
-    jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResammpledData')
+    jk_data_table = sql.Datasource(jk_data_table, 'JackknifeResampledData')
     jk_data_table_alias = with_data.add(jk_data_table)
 
   return jk_data_table_alias, with_data
@@ -2820,15 +2818,15 @@ def modify_descendants_for_jackknife_fast(
   return metric
 
 
-def get_bootstrap_data_no_unit(
-    metric, table, split_by, global_filter, with_data
+def bootstrap_by_row(
+    metric, table, split_by, global_filter, with_data, columns_in_table=None
 ):
   """Gets metric.n_replicates bootstrap resamples for Bootstrap without unit.
 
   The SQL is constructed as
     WITH
     BootstrapRandomRows AS (SELECT
-      *,
+      *,  # or columns_in_table and meterstick_resample_idx if columns_in_table
       global_filter AS meterstick_bs_filter,
       ROW_NUMBER() OVER (PARTITION BY meterstick_resample_idx, global_filter)
         AS meterstick_bs_row_number,
@@ -2861,12 +2859,17 @@ def get_bootstrap_data_no_unit(
     split_by: The columns that we use to split the data.
     global_filter: All the filters that applied to the Bootstrap.
     with_data: A global variable that contains all the WITH clauses we need.
+    columns_in_table: All the columns we want to SELECT from `table`. If None,
+      we do SELECT * FROM table.
 
   Returns:
     The alias of the table in the WITH clause that has all resampled data.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  columns = sql.Columns(sql.Column('*', auto_alias=False))
+  if columns_in_table:
+    columns = sql.Columns(columns_in_table).add('meterstick_resample_idx')
+  else:
+    columns = sql.Columns(sql.Column('*', auto_alias=False))
   partition = split_by.expressions + ['meterstick_resample_idx']
   if global_filter:
     columns.add(sql.Column(str(global_filter), alias='meterstick_bs_filter'))
@@ -2920,30 +2923,18 @@ def get_bootstrap_data_no_unit(
   return table, with_data
 
 
-def get_bootstrap_data_with_unit(
-    metric, table, split_by, global_filter, with_data
-):
+def bootstrap_by_unit(metric, table, split_by, global_filter, with_data):
   """Gets metric.n_replicates bootstrap resamples.
 
   The SQL is constructed as
     WITH
     Candidates AS (SELECT
       split_by,
-      ARRAY_AGG(DISTINCT unit) AS unit,
-      COUNT(DISTINCT unit) AS meterstick_bs_length
+      unit,
     FROM table
     WHERE global_filter
-    GROUP BY split_by),
-    BootstrapRandomChoices AS (SELECT
-      split_by,
-      meterstick_resample_idx,
-      unit[ORDINAL(CAST(CEILING(RAND() * meterstick_bs_length) AS INT64))]
-        AS unit
-    FROM Candidates
-    JOIN
-    UNNEST(unit)
-    JOIN
-    UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS meterstick_resample_idx),
+    GROUP BY split_by, unit),
+    <bootstrap Candidates by rows and save to BootstrapRandomChoices>
     BootstrapResampledData AS (SELECT
       *
     FROM BootstrapRandomChoices
@@ -2963,37 +2954,20 @@ def get_bootstrap_data_with_unit(
     The alias of the table in the WITH clause that has all resampled data.
     The global with_data which holds all datasources we need in the WITH clause.
   """
-  unit = metric.unit
-  unit_alias = sql.Column(unit).alias
-  columns = (
-      sql.Column('ARRAY_AGG(DISTINCT %s)' % unit, alias=unit),
-      sql.Column('COUNT(DISTINCT %s)' % unit, alias='meterstick_bs_length'),
-  )
-  units = sql.Sql(columns, table, global_filter, split_by)
+  columns = sql.Columns(split_by).add(metric.unit)
+  units = sql.Sql(columns, table, global_filter, columns)
   units_alias = with_data.add(sql.Datasource(units, 'Candidates'))
-  rand_samples = sql.Column(
-      f'{unit_alias}[ORDINAL(CAST(CEILING(RAND() * meterstick_bs_length) AS'
-      ' INT64))]',
-      alias=unit_alias,
+  resampled_grps, with_data = bootstrap_by_row(
+      metric,
+      units_alias,
+      sql.Columns(split_by.aliases),
+      sql.Filters(),
+      with_data,
+      columns.aliases,
   )
 
-  replicates = sql.Datasource(
-      'UNNEST(GENERATE_ARRAY(1, %s))' % metric.n_replicates,
-      'meterstick_resample_idx',
-  )
-  sample_table = sql.Sql(
-      sql.Columns(split_by.aliases)
-      .add('meterstick_resample_idx')
-      .add(rand_samples),
-      sql.Join(units_alias, sql.Datasource('UNNEST(%s)' % unit_alias)).join(
-          replicates
-      ),
-  )
-  sample_table_alias = with_data.add(
-      sql.Datasource(sample_table, 'BootstrapRandomChoices'))
-
-  renamed = [i for i in sql.Columns(split_by).add(unit) if i != i.alias]
-  if renamed or unit != unit_alias:
+  renamed = [i for i in sql.Columns(split_by).add(metric.unit) if i != i.alias]
+  if renamed:
     table = sql.Sql(
         sql.Columns(sql.Column('*', auto_alias=False)).add(renamed),
         table,
@@ -3001,10 +2975,10 @@ def get_bootstrap_data_with_unit(
   bs_data = sql.Sql(
       sql.Column('*', auto_alias=False),
       sql.Join(
-          sample_table_alias,
+          resampled_grps,
           table,
           join='LEFT',
-          using=sql.Columns(split_by.aliases).add(unit)),
+          using=sql.Columns(split_by.aliases).add(metric.unit)),
       where=global_filter)
   bs_data = sql.Datasource(bs_data, 'BootstrapResampledData')
   table = with_data.add(bs_data)
