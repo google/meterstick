@@ -132,6 +132,7 @@ BUILT_INS = [
     'MH',
     'Jackknife',
     'Bootstrap',
+    'PoissonBootstrap',
     # Models
     'LinearRegression',
     'Ridge',
@@ -322,7 +323,7 @@ class Metric(object):
       pd.DataFrame, otherwise it could be a base type.
     """
     self.cache = {} if cache is None else cache
-    split_by = [split_by] if isinstance(split_by, str) else split_by or []
+    split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
     try:
       key = self.wrap_cache_key(cache_key or self.cache_key, split_by)
       if self.in_cache(key):

@@ -2432,6 +2432,119 @@ class BootstrapTests(parameterized.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
+class PoissonBootstrapTests(parameterized.TestCase):
+
+  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
+  def test_runs(self, split_by):
+    df = pd.DataFrame({
+        'x': range(6),
+        'grp': range(6),
+        'grp2': [0] * 3 + [1] * 3,
+        'grp3': [0, 1, 2] * 2,
+    })
+    m = metrics.MetricList([
+        metrics.Sum('x'),
+        metrics.Count('x'),
+        metrics.Max('x'),
+        metrics.Min('x'),
+    ])
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
+    m2 = operations.PoissonBootstrap('grp', m, 5, 0.9, False)
+    m3 = operations.PoissonBootstrap(None, m, 5, 0.9)
+    np.random.seed(0)
+    res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
+    np.random.seed(0)
+    res2 = m2.compute_on(df, split_by).display(return_formatted_df=True)
+    np.random.seed(0)
+    res3 = m3.compute_on(df, split_by).display(return_formatted_df=True)
+    testing.assert_frame_equal(res1, res2)
+    testing.assert_frame_equal(res2, res3)
+
+  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
+  def test_each_unit_has_one_row(self, split_by):
+    df = pd.DataFrame({
+        'x': range(6),
+        'grp': range(6),
+        'grp2': [0] * 3 + [1] * 3,
+        'grp3': [0, 1, 2] * 2,
+        'grp4': [0, 1] * 3,
+    })
+    m = metrics.MetricList([
+        metrics.Sum('x'),
+        metrics.Count('x'),
+        metrics.Max('x'),
+        metrics.Min('x'),
+    ])
+    m = operations.AbsoluteChange('grp4', 1, m)
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
+    m2 = operations.PoissonBootstrap(None, m, 5, 0.9)
+    np.random.seed(0)
+    res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
+    np.random.seed(0)
+    res2 = m2.compute_on(df, split_by).display(return_formatted_df=True)
+    testing.assert_frame_equal(res1, res2)
+
+  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
+  def test_each_unit_has_multiple_rows(self, split_by):
+    df = pd.DataFrame({
+        'x': range(6),
+        'grp': [0] * 3 + [1] * 3,
+        'grp2': [0, 1] * 3,
+        'grp3': [0, 1] * 3,
+        'grp4': [0, 1, 2] * 2,
+    })
+    m = metrics.MetricList([
+        metrics.Sum('x'),
+        metrics.Count('x'),
+        metrics.Max('x'),
+        metrics.Min('x'),
+    ])
+    m = operations.AbsoluteChange('grp4', 0, m)
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
+    m2 = operations.PoissonBootstrap('grp', m, 5, 0.9, False)
+    np.random.seed(0)
+    res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
+    np.random.seed(0)
+    res2 = m2.compute_on(df, split_by).display(return_formatted_df=True)
+    testing.assert_frame_equal(res1, res2)
+
+  def test_get_samples_with_unit(self):
+    x = range(6)
+    df = pd.DataFrame({'x': x, 'grp': ['A'] * 3 + ['B'] * 3})
+    m = operations.PoissonBootstrap(
+        'grp', metrics.Sum('x'), 20, enable_optimization=False
+    )
+    output = [s[1] for s in m.get_samples(df, [])]
+    grp_cts = df.groupby('grp').size()
+    for s in output:
+      if s is not None:
+        self.assertTrue((s.groupby('grp').size() / grp_cts).sum().is_integer())
+
+  @parameterized.parameters([True, False])
+  def test_poissonbootstrap_unit_cache_across_samples(self, enable_opt):
+    np.random.seed(0)
+    df = pd.DataFrame({
+        'x': range(4),
+        'unit': [0, 0, 1, 1],
+        'grp': [0, 1] * 2,
+    })
+    SUM_COMPUTE_THROUGH.mock.reset_mock()
+    m = operations.PoissonBootstrap(
+        'unit',
+        operations.AbsoluteChange('grp', 0, metrics.Sum('x')),
+        5,
+        enable_optimization=enable_opt,
+    )
+    with mock.patch.object(
+        metrics.Sum,
+        'compute_through',
+        spy_decorator(metrics.Sum.compute_through),
+    ) as mock_fn_opt:
+      m.compute_on(df)
+    # The additional two calls are for precomputation and point estimate.
+    self.assertLess(mock_fn_opt.mock.call_count, 7)
+
+
 OPERATIONS = [('Distribution', operations.Distribution('condition')),
               ('CumulativeDistribution',
                operations.CumulativeDistribution('condition')),

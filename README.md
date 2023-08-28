@@ -179,6 +179,13 @@ Built-in standard errors include:
     `confidence` in (0,1) represents the level of the confidence interval;
     optional
 
++   `PoissonBootstrap(unit, n_replicates, confidence)` : Computes a Poisson
+    bootstrap estimate of the standard error. It's identical to `Bootstrap`
+    except that we use `Poisson(1)` instead of multinomial distribution in
+    sampling. It's faster than `Bootstrap` on large data when computing in SQL.
+    See the [post](https://www.unofficialgoogledatascience.com/2015/08/an-introduction-to-poisson-bootstrap26.html)
+    on *The Unofficial Google Data Science Blog* for a good introduction.
+
 Example Usage: `... | Jackknife('CookieBucket', confidence=.95)`
 
 #### Distributions

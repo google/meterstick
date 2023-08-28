@@ -413,6 +413,11 @@ class Columns(SqlComponents):
   def aliases(self):
     return [c.alias for c in self]
 
+  @property
+  def original_columns(self):
+    # Returns the original Column instances added.
+    return [c.column[0] for c in self]
+
   def get_alias(self, expression):
     res = [c for c in self if c.expression == expression]
     if res:
