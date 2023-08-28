@@ -182,9 +182,9 @@ class Distribution(Operation):
   def __init__(self,
                over: Union[Text, List[Text]],
                child: Optional[metrics.Metric] = None,
+               name_tmpl='Distribution of {}',
                **kwargs):
-    super(Distribution, self).__init__(child, 'Distribution of {}', over,
-                                       **kwargs)
+    super(Distribution, self).__init__(child, name_tmpl, over, **kwargs)
 
   def compute_on_children(self, children, split_by):
     total = (
@@ -245,7 +245,7 @@ class Distribution(Operation):
 Normalize = Distribution  # An alias.
 
 
-class CumulativeDistribution(Operation):
+class CumulativeDistribution(Distribution):
   """Computes the normalized cumulative sum.
 
   Attributes:
@@ -255,41 +255,46 @@ class CumulativeDistribution(Operation):
     order: An iterable. The over column will be ordered by it before computing
       cumsum.
     ascending: Sort ascending or descending.
-    And all other attributes inherited from Operation.
+    And all other attributes inherited from Distribution.
   """
 
-  def __init__(self,
-               over: Text,
-               child: Optional[metrics.Metric] = None,
-               order=None,
-               ascending: bool = True,
-               **kwargs):
+  def __init__(
+      self,
+      over: Text,
+      child: Optional[metrics.Metric] = None,
+      order=None,
+      ascending: bool = True,
+      name_tmpl='Cumulative Distribution of {}',
+      **kwargs,
+  ):
     self.order = order
     self.ascending = ascending
     super(CumulativeDistribution, self).__init__(
-        child,
-        'Cumulative Distribution of {}',
         over,
+        child,
+        name_tmpl,
         additional_fingerprint_attrs=['order', 'ascending'],
-        **kwargs)
+        **kwargs,
+    )
     if order and len(self.extra_index) > 1:
       raise ValueError(
           'Only one column is supported when "order" is specified.'
       )
 
-  def compute(self, df):
+  def compute_on_children(self, children, split_by):
+    dist = super(CumulativeDistribution, self).compute_on_children(
+        children, split_by
+    )
     if self.order:
-      order = [o for o in self.order if o in df.index.get_level_values(0)]
-      order = order if self.ascending else reversed(order)
-      if len(df.index.names) == 1:
-        df = df.reindex(order)
-      else:
-        df = df.reindex(order, level=0)
+      order = self.order if self.ascending else reversed(self.order)
+      level = None if len(dist.index.names) == 1 else self.extra_index[0]
+      dist = dist.reindex(order, level=level).dropna()
     else:
-      df.sort_values(self.extra_index, ascending=self.ascending, inplace=True)
-    dist = df.cumsum()
-    dist /= df.sum()
-    return dist
+      dist.sort_values(self.extra_index, ascending=self.ascending, inplace=True)
+    res = self.group(dist, split_by).cumsum()
+    if split_by:
+      res.sort_index(level=split_by, sort_remaining=False, inplace=True)
+    return res
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -315,13 +320,12 @@ class CumulativeDistribution(Operation):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    local_filter = (
-        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    dist_sql, with_data = super(
+        CumulativeDistribution, self
+    ).get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data
     )
-    util_metric = Distribution(self.extra_split_by, self.children[0])
-    child_sql, with_data = util_metric.get_sql_and_with_clause(
-        table, split_by, global_filter, indexes, local_filter, with_data)
-    child_table = sql.Datasource(child_sql, 'CumulativeDistributionRaw')
+    child_table = sql.Datasource(dist_sql, 'CumulativeDistributionRaw')
     child_table_alias = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
     order = list(utils.get_extra_idx(self))
@@ -329,7 +333,7 @@ class CumulativeDistribution(Operation):
         sql.Column(self.get_ordered_col(sql.Column(o).alias), auto_alias=False)
         for o in order
     ]
-    for c in child_sql.columns:
+    for c in dist_sql.columns:
       if c in columns:
         continue
 

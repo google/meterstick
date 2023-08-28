@@ -276,14 +276,21 @@ class CumulativeDistributionTests(absltest.TestCase):
     testing.assert_frame_equal(output, expected)
 
   def test_cumulative_distribution_order_splitby(self):
-    metric = operations.CumulativeDistribution('grp', self.sum_x, ('B', 'A'))
-    output = metric.compute_on(self.df, 'country')
-    expected = pd.DataFrame({
-        'Cumulative Distribution of sum(X)': [1., 2. / 3, 1.],
-        'grp': ['A', 'B', 'A'],
-        'country': ['EU', 'US', 'US']
+    df = pd.DataFrame({
+        'x': [1] * 6,
+        'grp': ['A'] * 3 + ['B'] * 3,
+        'unit': [1, 2, 1, 1, 1, 3],
     })
-    expected.set_index(['country', 'grp'], inplace=True)
+    metric = operations.CumulativeDistribution(
+        'grp', metrics.Sum('x'), order=['B', 'A']
+    )
+    output = metric.compute_on(df, 'unit')
+    expected = pd.DataFrame({
+        'Cumulative Distribution of sum(x)': [0.5, 1, 1, 1],
+        'unit': [1, 1, 2, 3],
+        'grp': ['B', 'A', 'A', 'B']
+    })
+    expected.set_index(['unit', 'grp'], inplace=True)
     testing.assert_frame_equal(output, expected)
 
   def test_cumulative_distribution_multiple_metrics(self):
