@@ -368,6 +368,10 @@ def get_data(m, table, split_by, execute, normalize=False):
   We compute a Model by first computing its children, and then fitting
   the model on it. This function retrieves the necessary variables to compute
   the children.
+  We first get the result of m.to_sql(table, split_by + m.group_by). If
+  `normalize` is False, we already get what we need. Otherwise we center and
+  normalize the columns for `x`s and returns the centered-and-normalized table,
+  together with the average of `x`s and the norms of centered `x`s.
 
   Args:
     m: A Model instance.
@@ -400,46 +404,75 @@ def get_data(m, table, split_by, execute, normalize=False):
 
   xs = xs_cols.aliases
   split_by = sql.Columns(split_by).aliases
-  avgs = [sql.Column(f'AVG({x})', alias=x) for x in xs]
-  avgs.append(sql.Column(f'AVG({y})', alias=y))
+  avg_x_and_y = sql.Columns([sql.Column(f'AVG({x})', alias=x) for x in xs])
+  avg_x_and_y.add(sql.Column(f'AVG({y})', alias=y))
+  cols = sql.Columns(split_by).add(avg_x_and_y)
   avgs = execute(
-      str(
-          sql.Sql(
-              sql.Columns(split_by).add(avgs),
-              table,
-              groupby=split_by,
-              with_data=with_data,
-          )
-      )
+      str(sql.Sql(cols, table, groupby=split_by, with_data=with_data))
   )
-  table_with_centered_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
-  for x in xs:
-    centered = sql.Column(x) - sql.Column(x, 'AVG({})', partition=split_by)
+  avg_table = sql.Sql(
+      cols,
+      table,
+      groupby=split_by,
+  )
+  avg_table = with_data.merge(sql.Datasource(avg_table, 'AverageValueTable'))
+  table_with_centered_x = sql.Columns(split_by)
+  table_with_centered_x.add(sql.Column(y, '%s.{}' % table, y))
+  for x in avg_x_and_y.aliases[:-1]:
+    centered = sql.Column(x, '%s.{}' % table) - sql.Column(
+        x, '%s.{}' % avg_table
+    )
     centered.alias = x
     table_with_centered_x.add(centered)
+  join = 'LEFT' if split_by else 'CROSS'
   table = with_data.merge(
-      sql.Datasource(sql.Sql(table_with_centered_x, table), 'DataCentered')
+      sql.Datasource(
+          sql.Sql(
+              table_with_centered_x,
+              sql.Join(table, avg_table, using=split_by, join=join),
+          ),
+          'DataCentered',
+      )
   )
 
-  norms = [sql.Column(f'SQRT(SUM(POWER({x}, 2)))', alias=x) for x in xs]
+  x_norms = [sql.Column(f'SQRT(SUM(POWER({x}, 2)))', alias=x) for x in xs]
   norms = sql.Sql(
-      sql.Columns(split_by).add(norms),
+      sql.Columns(split_by).add(x_norms),
       table,
       groupby=split_by,
       with_data=with_data,
   )
   norms = execute(str(norms))
-  table_with_normalized_x = sql.Columns(split_by + [sql.Column(y, alias=y)])
-  for x in xs:
-    normalized = (
-        sql.Column(x)
-        / sql.Column(x, 'SUM(POWER({}, 2))', partition=split_by) ** 0.5
-    )
-    normalized.alias = x
-    table_with_normalized_x.add(normalized)
-  table = with_data.add(
-      sql.Datasource(sql.Sql(table_with_normalized_x, table), 'DataNormalized')
+
+  x_norm_squared = [sql.Column(f'SUM(POWER({x}, 2))', alias=x) for x in xs]
+  norm_squared_table = sql.Sql(
+      sql.Columns(split_by).add(x_norm_squared),
+      table,
+      groupby=split_by,
   )
+  norm_squared_table = with_data.merge(
+      sql.Datasource(norm_squared_table, 'NormSquaredValueTable')
+  )
+
+  table_with_x_norms = sql.Columns(split_by)
+  table_with_x_norms.add(sql.Column(y, '%s.{}' % table, y))
+  for x in sql.Columns(x_norms).aliases:
+    norm = (
+        sql.Column(x, '%s.{}' % table)
+        / sql.Column(x, '%s.{}' % norm_squared_table) ** 0.5
+    )
+    norm.alias = x
+    table_with_x_norms.add(norm)
+  table = with_data.merge(
+      sql.Datasource(
+          sql.Sql(
+              table_with_x_norms,
+              sql.Join(table, norm_squared_table, using=split_by, join=join),
+          ),
+          'DataNormalized',
+      )
+  )
+
   return table, with_data, xs_cols, y, avgs, norms
 
 
