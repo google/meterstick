@@ -1292,7 +1292,9 @@ class MetricList(Metric):
         clause.
     """
     utils.get_extra_idx(self)  # Check if indexes are compatible.
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     children_sql = [
         c.get_sql_and_with_clause(table, split_by, global_filter, indexes,
                                   local_filter, with_data)[0]
@@ -1520,7 +1522,9 @@ class CompositeMetric(Metric):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     op = self.op
 
     if not isinstance(self.children[0], Metric):
@@ -1673,7 +1677,9 @@ class SimpleMetric(Metric):
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     cols = self.get_sql_columns(local_filter)
     if cols:
       return sql.Sql(cols, table, global_filter, split_by), with_data

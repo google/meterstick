@@ -222,7 +222,9 @@ class Distribution(Operation):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     child_sql, with_data = self.children[0].get_sql_and_with_clause(
         table, indexes, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'DistributionRaw')
@@ -313,7 +315,9 @@ class CumulativeDistribution(Operation):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     util_metric = Distribution(self.extra_split_by, self.children[0])
     child_sql, with_data = util_metric.get_sql_and_with_clause(
         table, split_by, global_filter, indexes, local_filter, with_data)
@@ -435,7 +439,9 @@ class Comparison(Operation):
     """
     if not isinstance(self, (PercentChange, AbsoluteChange)):
       raise ValueError('Not a PercentChange nor AbsoluteChange!')
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
 
     child = self.children[0]
     cond_cols = sql.Columns(self.extra_split_by)
@@ -1017,7 +1023,9 @@ class MH(Comparison):
     """
     child = self.children[0]
     self.check_is_ratio(child)
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
 
     grandchildren = []
     if isinstance(child, metrics.MetricList):
@@ -1714,10 +1722,12 @@ class MetricWithCI(Operation):
     )
     leaf = utils.get_leaf_metrics(expanded)
     cols = [
-        l.get_sql_columns(l.where).set_alias(get_preaggregated_metric_var(l))
+        l.get_sql_columns(l.where_raw).set_alias(
+            get_preaggregated_metric_var(l)
+        )
         for l in leaf
     ]
-    preagg = sql.Sql(cols, table, self.where, all_split_by)
+    preagg = sql.Sql(cols, table, self.where_raw, all_split_by)
     equiv = get_preaggregated_metric_tree(expanded)
     equiv.unit = sql.Column(equiv.unit).alias
     split_by = sql.Columns(split_by).aliases
@@ -1772,7 +1782,9 @@ class MetricWithCI(Operation):
       raise NotImplementedError
     self._is_root_node = None
 
-    local_filter = sql.Filters([self.where, local_filter]).remove(global_filter)
+    local_filter = (
+        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+    )
     # global_filter has been applied in preaggregated data.
     filters = (
         sql.Filters(None) if self.has_been_preaggregated else global_filter
@@ -2088,7 +2100,10 @@ class Jackknife(MetricWithCI):
     """Compute the children on leave-one-out data in SQL."""
     batch_size = batch_size or 1
     slice_and_units = sql.Sql(
-        sql.Columns(split_by + [self.unit], distinct=True), table, self.where)
+        sql.Columns(split_by + [self.unit], distinct=True),
+        table,
+        self.where_raw,
+    )
     slice_and_units = execute(str(slice_and_units))
     # Columns got sanitized in SQL generation if they have special characters.
     slice_and_units.columns = split_by + [self.unit]
@@ -2097,7 +2112,7 @@ class Jackknife(MetricWithCI):
     replicates = []
     unique_units = slice_and_units[self.unit].unique()
     if batch_size == 1:
-      loo_sql = sql.Sql(None, table, where=self.where)
+      loo_sql = sql.Sql(None, table, where=self.where_raw)
       where = copy.deepcopy(loo_sql.where)
       for unit in unique_units:
         loo_where = '%s != "%s"' % (self.unit, unit)

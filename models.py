@@ -132,7 +132,7 @@ class Model(operations.Operation):
     try:
       if mode == 'magic':
         if self.where:
-          table = sql.Sql(None, table, self.where)
+          table = sql.Sql(None, table, self.where_raw)
         res = self.compute_on_sql_magic_mode(table, split_by, execute)
         return utils.apply_name_tmpl(self.name_tmpl, res)
       return super(Model, self).compute_through_sql(
