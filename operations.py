@@ -98,6 +98,7 @@ class Operation(metrics.Metric):
           self).__init__(name, child or (), where, name_tmpl, extra_split_by,
                          extra_index, additional_fingerprint_attrs, **kwargs)
     self.precomputable_in_jk_bs = True
+    self.is_operation = True
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     try:

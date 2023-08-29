@@ -97,12 +97,6 @@ def to_sql(table, split_by=None):
   return lambda metric: metric.to_sql(table, split_by)
 
 
-def is_operation(m):
-  """We can't use isinstance because of loop dependency."""
-  return isinstance(m, Metric) and m.children and not isinstance(
-      m, (MetricList, CompositeMetric))
-
-
 # Classes we built so caching across instances can be enabled with confidence.
 BUILT_INS = [
     # Metrics
@@ -209,6 +203,7 @@ class Metric(object):
     extra_index: Used by Operation. See the doc there.
     name_tmpl: Used by Metrics that have children. It's applied to children's
       names in the output.
+    is_operation: If this instance is an Operation.
     cache_across_instances: If this Metric class will be cached across
       instances, namely, different instances with same attributes that matter
       can share the same place in cache. All the classes listed in BUILT_INS
@@ -247,6 +242,7 @@ class Metric(object):
                                                      str) else extra_index
     self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
     self.name_tmpl = name_tmpl
+    self.is_operation = False
     self.cache_across_instances = False
     self.cache_key = None
 
@@ -659,7 +655,7 @@ class Metric(object):
     return self.to_series_or_number_if_not_operation(res)
 
   def to_series_or_number_if_not_operation(self, df):
-    return self.to_series_or_number(df) if not is_operation(self) else df
+    return self.to_series_or_number(df) if not self.is_operation else df
 
   def to_series_or_number(self, df):
     if not isinstance(df, pd.DataFrame):
