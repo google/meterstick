@@ -132,7 +132,7 @@ class Model(operations.Operation):
     try:
       if mode == 'magic':
         if self.where:
-          table = sql.Sql(None, table, self.where_raw)
+          table = sql.Sql(None, table, self.where_)
         res = self.compute_on_sql_magic_mode(table, split_by, execute)
         return utils.apply_name_tmpl(self.name_tmpl, res)
       return super(Model, self).compute_through_sql(
@@ -224,7 +224,7 @@ class LinearRegression(Model):
         0,
         self.fit_intercept,
         self.normalize,
-        self.where_raw,
+        self.where_,
         self.name,
     ).compute_on_sql_magic_mode(table, split_by, execute)
 
@@ -690,7 +690,7 @@ class Lasso(Model):
         1,
         self.fit_intercept,
         self.normalize,
-        self.where_raw,
+        self.where_,
         self.name,
         tol=self.tol,
         max_iter=self.max_iter,

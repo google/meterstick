@@ -224,7 +224,7 @@ class Distribution(Operation):
         clause.
     """
     local_filter = (
-        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
     child_sql, with_data = self.children[0].get_sql_and_with_clause(
         table, indexes, global_filter, indexes, local_filter, with_data)
@@ -445,7 +445,7 @@ class Comparison(Operation):
     if not isinstance(self, (PercentChange, AbsoluteChange)):
       raise ValueError('Not a PercentChange nor AbsoluteChange!')
     local_filter = (
-        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
 
     child = self.children[0]
@@ -908,13 +908,13 @@ class MH(Comparison):
       children = []
       for m in child.children:
         util_metric = metrics.MetricList(
-            [metrics.MetricList(m.children, where=m.where_raw)],
-            where=child.where_raw)
+            [metrics.MetricList(m.children, where=m.where_)], where=child.where_
+        )
         children.append(
             self.compute_util_metric_on(
                 util_metric, df, split_by, cache_key=cache_key))
       return children
-    util_metric = metrics.MetricList(child.children, where=child.where_raw)
+    util_metric = metrics.MetricList(child.children, where=child.where_)
     return self.compute_util_metric_on(
         util_metric, df, split_by, cache_key=cache_key)
 
@@ -963,8 +963,8 @@ class MH(Comparison):
       children = []
       for m in child.children:
         util_metric = metrics.MetricList(
-            [metrics.MetricList(m.children, where=m.where_raw)],
-            where=child.where_raw)
+            [metrics.MetricList(m.children, where=m.where_)], where=child.where_
+        )
         c = self.compute_util_metric_on_sql(
             util_metric,
             table,
@@ -973,7 +973,7 @@ class MH(Comparison):
             mode=mode)
         children.append(c)
       return children
-    util_metric = metrics.MetricList(child.children, where=child.where_raw)
+    util_metric = metrics.MetricList(child.children, where=child.where_)
     return self.compute_util_metric_on_sql(
         util_metric, table, split_by + self.extra_split_by, execute, mode=mode)
 
@@ -1040,17 +1040,16 @@ class MH(Comparison):
     child = self.children[0]
     self.check_is_ratio(child)
     local_filter = (
-        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
 
-    grandchildren = []
     if isinstance(child, metrics.MetricList):
       grandchildren = []
       for m in child:
-        grandchildren.append(metrics.MetricList(m.children, where=m.where_raw))
-      util_metric = metrics.MetricList(grandchildren, where=child.where_raw)
+        grandchildren.append(metrics.MetricList(m.children, where=m.where_))
+      util_metric = metrics.MetricList(grandchildren, where=child.where_)
     else:
-      util_metric = metrics.MetricList(child.children, where=child.where_raw)
+      util_metric = metrics.MetricList(child.children, where=child.where_)
 
     cond_cols = sql.Columns(self.extra_index)
     groupby = sql.Columns(split_by).add(self.extra_split_by)
@@ -1096,14 +1095,14 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       for c in child:
         with_data2 = copy.deepcopy(with_data)
-        util = metrics.MetricList(c.children[:1], where=c.where_raw)
+        util = metrics.MetricList(c.children[:1], where=c.where_)
         numer_sql, with_data2 = util.get_sql_and_with_clause(
             table, groupby, global_filter, util_indexes, local_filter,
             with_data2)
         with_data2.merge(sql.Datasource(numer_sql))
         numer = numer_sql.columns[-1].alias
         with_data2 = copy.deepcopy(with_data)
-        util = metrics.MetricList(c.children[1:], where=c.where_raw)
+        util = metrics.MetricList(c.children[1:], where=c.where_)
         denom_sql, with_data2 = util.get_sql_and_with_clause(
             table, groupby, global_filter, util_indexes, local_filter,
             with_data2)
@@ -1118,13 +1117,13 @@ class MH(Comparison):
                 alias=alias_tmpl.format(c.name)))
     else:
       with_data2 = copy.deepcopy(with_data)
-      util = metrics.MetricList(child.children[:1], where=child.where_raw)
+      util = metrics.MetricList(child.children[:1], where=child.where_)
       numer_sql, with_data2 = util.get_sql_and_with_clause(
           table, groupby, global_filter, util_indexes, local_filter, with_data2)
       with_data2.merge(sql.Datasource(numer_sql))
       numer = numer_sql.columns[-1].alias
       with_data2 = copy.deepcopy(with_data)
-      util = metrics.MetricList(child.children[1:], where=child.where_raw)
+      util = metrics.MetricList(child.children[1:], where=child.where_)
       denom_sql, with_data2 = util.get_sql_and_with_clause(
           table, groupby, global_filter, util_indexes, local_filter, with_data2)
       with_data2.merge(sql.Datasource(denom_sql))
@@ -1420,9 +1419,10 @@ class MetricWithCI(Operation):
     change = self.children[0]
     util_metric = change.children[0]
     if isinstance(self.children[0], (PrePostChange, CUPED)):
-      util_metric = metrics.MetricList([util_metric.children[0]],
-                                       where=util_metric.where_raw)
-    util_metric = metrics.MetricList([util_metric], where=change.where_raw)
+      util_metric = metrics.MetricList(
+          [util_metric.children[0]], where=util_metric.where_
+      )
+    util_metric = metrics.MetricList([util_metric], where=change.where_)
     to_split = (
         split_by + change.extra_index if split_by else change.extra_index)
     if execute is None:
@@ -1759,12 +1759,10 @@ class MetricWithCI(Operation):
     )
     leaf = utils.get_leaf_metrics(expanded)
     cols = [
-        l.get_sql_columns(l.where_raw).set_alias(
-            get_preaggregated_metric_var(l)
-        )
+        l.get_sql_columns(l.where_).set_alias(get_preaggregated_metric_var(l))
         for l in leaf
     ]
-    preagg = sql.Sql(cols, table, self.where_raw, all_split_by)
+    preagg = sql.Sql(cols, table, self.where_, all_split_by)
     equiv = get_preaggregated_metric_tree(expanded)
     equiv.unit = sql.Column(equiv.unit).alias
     split_by = sql.Columns(split_by).aliases
@@ -1820,7 +1818,7 @@ class MetricWithCI(Operation):
     self._is_root_node = None
 
     local_filter = (
-        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
     # global_filter has been applied in preaggregated data.
     filters = (
@@ -1875,7 +1873,7 @@ class MetricWithCI(Operation):
         has_base_vals = True
         base_metric = copy.deepcopy(child.children[0])
         if child.where:
-          base_metric.add_where(child.where_raw)
+          base_metric.add_where(child.where_)
         base, with_data = base_metric.get_sql_and_with_clause(
             table,
             sql.Columns(split_by).add(child.extra_index),
@@ -1907,7 +1905,7 @@ class MetricWithCI(Operation):
       with_data,
   ):
     """Gets the SQL query that computes the standard error and dof if needed."""
-    global_filter = sql.Filters(global_filter).add(self.where_raw)
+    global_filter = sql.Filters(global_filter).add(self.where_)
     self_copy = copy.deepcopy(self)  # self_copy might get modified in-place.
     table = sql.Datasource(table)
     if not table.is_table:
@@ -2140,7 +2138,7 @@ class Jackknife(MetricWithCI):
     slice_and_units = sql.Sql(
         sql.Columns(split_by + [self.unit], distinct=True),
         table,
-        self.where_raw,
+        self.where_,
     )
     slice_and_units = execute(str(slice_and_units))
     # Columns got sanitized in SQL generation if they have special characters.
@@ -2150,7 +2148,7 @@ class Jackknife(MetricWithCI):
     replicates = []
     unique_units = slice_and_units[self.unit].unique()
     if batch_size == 1:
-      loo_sql = sql.Sql(None, table, where=self.where_raw)
+      loo_sql = sql.Sql(None, table, where=self.where_)
       where = copy.deepcopy(loo_sql.where)
       for unit in unique_units:
         loo_where = '%s != "%s"' % (self.unit, unit)
@@ -2176,7 +2174,7 @@ class Jackknife(MetricWithCI):
             sql.Datasource(
                 'UNNEST(%s)' % units, 'meterstick_resample_idx'
             ).join(table, on='meterstick_resample_idx != %s' % self.unit),
-            self.where_raw,
+            self.where_,
         )
         key = ('_RESERVED', 'Jackknife', self.unit, tuple(units))
         loo = self.compute_child_sql(
@@ -2671,7 +2669,7 @@ class PoissonBootstrap(Bootstrap):
         table.alias = table.alias or 'RawData'
         table = with_data.add(table)
       uniform_columns = sql.Columns(sql.Column('*', auto_alias=False))
-    global_filter = sql.Filters(global_filter).add(self.where_raw)
+    global_filter = sql.Filters(global_filter).add(self.where_)
     uniform_var = sql.Column('RAND()', alias='poisson_bootstrap_uniform_var')
     split_by_cols = (
         split_by.aliases
@@ -2834,7 +2832,7 @@ def get_preaggregated_data(m, df, split_by):
   if all_split_by:
     preagg_df.reset_index(all_split_by, inplace=True)
   for l, p in zip(leafs, preagg_leafs):
-    key = utils.CacheKey(l, m.cache_key, l.where_raw, all_split_by)
+    key = utils.CacheKey(l, m.cache_key, l.where_, all_split_by)
     res = m.get_cached(key)
     key = key.replace_metric(p).replace_where(m.cache_key.where)
     m.save_to_cache(key, res)
@@ -3198,7 +3196,7 @@ def modify_descendants_for_jackknife_fast(
     return metric
 
   metric = copy.deepcopy(metric)
-  local_filter = sql.Filters(metric.where_raw)
+  local_filter = sql.Filters(metric.where_)
   metric.where = None
   if needs_adjustment:
     tmpl = 'total_table.%s - COALESCE(unit_slice_table.%s, 0)'

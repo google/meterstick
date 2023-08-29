@@ -211,7 +211,7 @@ def get_global_filter(metric) -> sql.Filters:
   """Collects the filters that can be applied globally to the Metric tree."""
   global_filter = sql.Filters()
   if metric.where:
-    global_filter.add(metric.where_raw)
+    global_filter.add(metric.where_)
   # Filters inside resampling Operations shound not be considered global.
   if type(metric).__name__ in ('Jackknife', 'Bootstrap'):
     return global_filter
@@ -257,7 +257,7 @@ def push_filters_to_leaf(metric, is_root=True):
   if not metric.children:
     return copy.deepcopy(metric)
   metric = copy.copy(metric)
-  where = metric.where_raw
+  where = metric.where_
   children = metric.children
   if where:
     children = [

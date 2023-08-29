@@ -192,10 +192,10 @@ class Metric(object):
     name: Name of the Metric.
     children: An iterable of Metric(s) this Metric based upon.
     cache: A dict to store cached results.
-    where_raw: A string or list/tuple of strings to be concatenated that will be
+    where_: A string or list/tuple of strings to be concatenated that will be
       passed to df.query() as a prefilter.
-    where: A string that will be passed to df.query() as a prefilter. It's
-      ' and '.join(where_raw).
+    where: A string that will be passed to df.query() as a prefilter. It's ' and
+      '.join(where_).
     additional_fingerprint_attrs: Additional attributes to be encoded into the
       fingerprint. The attribute value must be hashable, or a list/dict of
       hashables. See get_fingerprint() for how it's used.
@@ -231,7 +231,7 @@ class Metric(object):
     self.cache_key = None
     self.children = [children] if isinstance(children,
                                              Metric) else children or []
-    self.where_raw = None
+    self.where_ = None
     self.where = where
     self.extra_split_by = [extra_split_by] if isinstance(
         extra_split_by, str) else extra_split_by or []
@@ -248,28 +248,28 @@ class Metric(object):
 
   @property
   def where(self):
-    if isinstance(self.where_raw, (list, tuple)):
-      where_raw = self.where_raw
-      if len(where_raw) > 1:
-        where_raw = (f'({i})' for i in sorted(where_raw))
-      return ' and '.join(where_raw)
-    return self.where_raw
+    if isinstance(self.where_, (list, tuple)):
+      where_ = self.where_
+      if len(where_) > 1:
+        where_ = (f'({i})' for i in sorted(where_))
+      return ' and '.join(where_)
+    return self.where_
 
   @where.setter
   def where(self, where):
     if where is None:
-      self.where_raw = None
+      self.where_ = None
     elif isinstance(where, str):
-      self.where_raw = (where,)
+      self.where_ = (where,)
     else:
-      self.where_raw = tuple(where)
+      self.where_ = tuple(where)
 
   def add_where(self, where):
     where = [where] if isinstance(where, str) else list(where) or []
     if not self.where:
       self.where = where
     else:
-      self.where = tuple(set(list(self.where_raw) + where))
+      self.where = tuple(set(list(self.where_) + where))
     return self
 
   def _compute_with_caching_and_postprocessing(
@@ -339,9 +339,7 @@ class Metric(object):
     if key and not isinstance(key, utils.CacheKey) and self.cache_key:
       key = self.cache_key.replace_key(key)
     key = key or self.cache_key
-    return utils.CacheKey(
-        self, key, where or self.where_raw, split_by, slice_val
-    )
+    return utils.CacheKey(self, key, where or self.where_, split_by, slice_val)
 
   def save_to_cache(self, key, val, split_by=None):
     if not isinstance(key, utils.CacheKey):
@@ -879,7 +877,7 @@ class Metric(object):
     res = self.get_equivalent_without_filter(*auxiliary_cols)  # pylint: disable=assignment-from-none
     if res:
       res.name = self.name
-      res.where = self.where_raw
+      res.where = self.where_
     return res
 
   def get_equivalent_without_filter(self, *auxiliary_cols):
@@ -1026,7 +1024,7 @@ class Metric(object):
     """
     fingerprint = {'class': self.__class__}
     if self.where:
-      fingerprint['where'] = sorted(self.where_raw)
+      fingerprint['where'] = sorted(self.where_)
     # Caching across instances is tricky so only turned on for built-ins and
     # custom Metrics with cache_across_instances being True. Otherwise different
     # instances of the same class are always saved under different keys.
@@ -1289,7 +1287,7 @@ class MetricList(Metric):
     """
     utils.get_extra_idx(self)  # Check if indexes are compatible.
     local_filter = (
-        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
     children_sql = [
         c.get_sql_and_with_clause(table, split_by, global_filter, indexes,
@@ -1519,7 +1517,7 @@ class CompositeMetric(Metric):
         clause.
     """
     local_filter = (
-        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
     op = self.op
 
@@ -1624,7 +1622,7 @@ class CompositeMetric(Metric):
     c = self.children[1]
     if isinstance(s, Sum) and isinstance(
         c, Count) and s.var == c.var and s.where == c.where and not c.distinct:
-      return Mean(s.var, where=s.where_raw).get_fingerprint(attr_to_exclude)
+      return Mean(s.var, where=s.where_).get_fingerprint(attr_to_exclude)
     return super(CompositeMetric, self).get_fingerprint(attr_to_exclude)
 
 
@@ -1647,7 +1645,7 @@ class Ratio(CompositeMetric):
   def get_fingerprint(self, attr_to_exclude=()):
     # Make the fingerprint same as the equivalent CompositeMetric for caching.
     util = self.children[0] / self.children[1]
-    util.where = self.where_raw  # pytype: disable=not-writable
+    util.where = self.where_  # pytype: disable=not-writable
     return util.get_fingerprint(attr_to_exclude)
 
 
@@ -1674,7 +1672,7 @@ class SimpleMetric(Metric):
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
     local_filter = (
-        sql.Filters(self.where_raw).add(local_filter).remove(global_filter)
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
     cols = self.get_sql_columns(local_filter)
     if cols:
