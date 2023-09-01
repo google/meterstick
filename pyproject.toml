@@ -1,0 +1,26 @@
+[project]
+name = "meterstick"
+version = "1.4.1"
+authors = [
+  { name="Xunmo Yang", email="xunmo@google.com" },
+  { name="Dennis Sun", email="dlsun@google.com" },
+  { name="Taylor Pospisil", email="taylorpospisil@google.com" },
+]
+description = "A grammar of data analysis"
+readme = "README.md"
+requires-python = ">=3.6"
+classifiers=[
+        "License :: OSI Approved :: Apache Software License",
+        "Development Status :: 5 - Production/Stable",
+        "Framework :: IPython",
+        "Framework :: Jupyter",
+        "Intended Audience :: Science/Research",
+        "Programming Language :: Python",
+        "Programming Language :: Python :: 2",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: SQL",
+    ]
+
+[project.urls]
+"Homepage" = "https://github.com/google/meterstick"
+"Bug Tracker" = "https://github.com/google/meterstick/issues"
