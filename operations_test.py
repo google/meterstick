@@ -1817,7 +1817,7 @@ class JackknifeTests(parameterized.TestCase):
     output_pt_est = output['Value']
     expected_pt_est = pct.compute_on(df, melted=True).iloc[:, 0] * df.X.sum()
     expected_pt_est.index = expected_pt_est.index.set_levels(
-        ['sum(X) * sum(X) Percent Change'], 0
+        ['sum(X) * sum(X) Percent Change'], level=0
     )
     output_html = output.display(return_formatted_df=True)
     expected_html = m_no_opt.compute_on(df).display(return_formatted_df=True)
@@ -2371,7 +2371,7 @@ class BootstrapTests(parameterized.TestCase):
         'Value'] - multiplier * expected['Bootstrap SE']
     expected['Bootstrap CI-upper'] = expected[
         'Value'] + multiplier * expected['Bootstrap SE']
-    expected.drop('Bootstrap SE', 1, inplace=True)
+    expected.drop('Bootstrap SE', axis=1, inplace=True)
     testing.assert_frame_equal(melted, expected)
     melted.display()  # Check display() runs.
 
@@ -2406,7 +2406,7 @@ class BootstrapTests(parameterized.TestCase):
     output_pt_est = output['Value']
     expected_pt_est = pct.compute_on(df, melted=True).iloc[:, 0] * df.X.sum()
     expected_pt_est.index = expected_pt_est.index.set_levels(
-        ['sum(X) * sum(X) Percent Change'], 0
+        ['sum(X) * sum(X) Percent Change'], level=0
     )
     output_html = output.display(return_formatted_df=True)
     np.random.seed(0)

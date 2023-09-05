@@ -2162,7 +2162,7 @@ class Jackknife(MetricWithCI):
         # the slice in the loo.
         if split_by:
           loo = slice_and_units[slice_and_units[self.unit] == unit].join(loo)
-          loo.drop(self.unit, 1, inplace=True)
+          loo.drop(self.unit, axis=1, inplace=True)
         replicates.append(utils.melt(loo))
     else:
       if split_by:
