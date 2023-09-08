@@ -205,6 +205,23 @@ a variable.
 Example Usage: `Sum("Queries") | Distribution("Device")` calculates the
 proportion of queries that come from each device.
 
+#### Diversity
+
+A **diversity** operation measures how diverse the child metric values are.
+
++   `HHI(over)`: calculates the Herfindahl–Hirschman index of the metric values
+    over the variables in `over`. The metric values are first normalized over
+    `over` then the HHI is computed.
++   `Entropy(over)`: calculates the entropy of the metric values
+    over the variables in `over`. The metric values are first normalized over
+    `over` then the entropy is computed.
++   `TopK(over, k)`: calculates the total share of the top k contributors. The
+     metric values are first normalized over `over` then largest k values are
+     summed.
++   `Nxx(over, x)`: calculates the minimum number of contributors to achieve `x`
+     total share. The metric values are first normalized over `over` then we
+     count the largest `n` contributors that make up `x` total share.
+
 ### Models
 
 A Meterstick **Model** fits a model on data computed by children Metrics.

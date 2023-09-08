@@ -226,11 +226,12 @@ class Distribution(Operation):
     local_filter = (
         sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
+    all_split_by = sql.Columns(split_by).add(self.extra_split_by)
     child_sql, with_data = self.children[0].get_sql_and_with_clause(
-        table, indexes, global_filter, indexes, local_filter, with_data)
+        table, all_split_by, global_filter, indexes, local_filter, with_data)
     child_table = sql.Datasource(child_sql, 'DistributionRaw')
     child_table_alias = with_data.merge(child_table)
-    groupby = sql.Columns(indexes.aliases)
+    groupby = sql.Columns(all_split_by.aliases)
     columns = sql.Columns()
     for c in child_sql.columns:
       if c.alias in groupby:

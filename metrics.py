@@ -127,6 +127,11 @@ BUILT_INS = [
     'Jackknife',
     'Bootstrap',
     'PoissonBootstrap',
+    # Diversity Operations
+    'HHI',
+    'Entropy',
+    'TopK',
+    'Nxx',
     # Models
     'LinearRegression',
     'Ridge',

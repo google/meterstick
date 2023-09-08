@@ -21,6 +21,7 @@ import copy
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from meterstick import diversity
 from meterstick import metrics
 from meterstick import models
 from meterstick import operations
@@ -175,6 +176,41 @@ class SimpleOperationTests(absltest.TestCase):
         'grp2': [1],
     })
     expected.set_index(['grp2', 'grp'], inplace=True)
+    testing.assert_frame_equal(output, expected)
+
+  def test_hhi(self):
+    output = diversity.HHI('grp', metrics.Sum('x')).compute_on(self.df)
+    expected = pd.DataFrame({
+        'HHI of sum(x)': [0.75 ** 2 + 0.25 ** 2],
+    })
+    testing.assert_frame_equal(output, expected)
+
+  def test_entropy(self):
+    output = diversity.Entropy('grp', metrics.Sum('x')).compute_on(self.df)
+    expected = pd.DataFrame({
+        'Entropy of sum(x)': [-(0.75 * np.log(0.75) + 0.25 * np.log(0.25))],
+    })
+    testing.assert_frame_equal(output, expected)
+
+  def test_topk(self):
+    s = metrics.Sum('x')
+    output = metrics.MetricList(
+        (diversity.TopK('grp', 1, s), diversity.TopK('grp', 2, s))
+    ).compute_on(self.df)
+    expected = pd.DataFrame(
+        [[0.75, 1.0]],
+        columns=["Top-1's share of sum(x)", "Top-2's share of sum(x)"],
+    )
+    testing.assert_frame_equal(output, expected)
+
+  def test_nxx(self):
+    s = metrics.Sum('x')
+    output = metrics.MetricList(
+        (diversity.Nxx('grp', 0.75, s), diversity.Nxx('grp', 0.751, s))
+    ).compute_on(self.df)
+    expected = pd.DataFrame(
+        [[1, 2]], columns=['N(75) of sum(x)', 'N(75.1) of sum(x)']
+    )
     testing.assert_frame_equal(output, expected)
 
 
@@ -608,6 +644,10 @@ SIMPLE_OPERATIONS = [
     ('CumulativeDistribution', operations.CumulativeDistribution('grp')),
     ('PercentChange', operations.PercentChange('grp', 0)),
     ('AbsoluteChange', operations.AbsoluteChange('grp', 0)),
+    ('HHI', diversity.HHI('grp')),
+    ('Entropy', diversity.Entropy('grp')),
+    ('TopK', diversity.TopK('grp', 1)),
+    ('Nxx', diversity.Nxx('grp', 0.4)),
 ]
 PRECOMPUTABLE_OPERATIONS = SIMPLE_OPERATIONS + [
     ('MH', operations.MH('grp', 0, 'cookie')),
@@ -2217,6 +2257,16 @@ class CommonTest(parameterized.TestCase):
         operations.Bootstrap('x', n_replicates=10),
         operations.Bootstrap('x', confidence=0.9),
         operations.Bootstrap('x', confidence=0.95),
+        diversity.HHI('x'),
+        diversity.HHI('y'),
+        diversity.Entropy('x'),
+        diversity.Entropy('y'),
+        diversity.TopK('x', 1),
+        diversity.TopK('x', 2),
+        diversity.TopK('y', 1),
+        diversity.Nxx('x', 0.1),
+        diversity.Nxx('x', 0.2),
+        diversity.Nxx('y', 0.1),
     ]
     fingerprints = set(
         [m(metrics.Ratio('x', 'y')).get_fingerprint() for m in distinct_ops]

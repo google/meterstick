@@ -22,6 +22,7 @@ import inspect
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from meterstick import diversity
 from meterstick import metrics
 from meterstick import models
 from meterstick import operations
@@ -915,6 +916,7 @@ class TestCaching(parameterized.TestCase):
         inspect.getmembers(metrics, inspect.isclass)
         + inspect.getmembers(operations, inspect.isclass)
         + inspect.getmembers(models, inspect.isclass)
+        + inspect.getmembers(diversity, inspect.isclass)
     )
     all_classes = set(
         (c[0] for c in all_classes if issubclass(c[1], metrics.Metric))
@@ -929,6 +931,7 @@ class TestCaching(parameterized.TestCase):
             'Comparison',
             'MetricWithCI',
             'Model',
+            'DiversityBase'
         )),
     )
     self.assertEmpty(set(metrics.BUILT_INS).difference(all_classes))
