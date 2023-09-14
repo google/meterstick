@@ -257,6 +257,9 @@ class CumulativeDistribution(Distribution):
     order: An iterable. The over column will be ordered by it before computing
       cumsum.
     ascending: Sort ascending or descending.
+    sort_by_values: Boolean that indicates whether or not to sort by the
+      computed distribution values instead of the `over` column. It works with
+      `ascending` but not `order`.
     And all other attributes inherited from Distribution.
   """
 
@@ -266,22 +269,28 @@ class CumulativeDistribution(Distribution):
       child: Optional[metrics.Metric] = None,
       order=None,
       ascending: bool = True,
+      sort_by_values: bool = False,
       name_tmpl: Text = 'Cumulative Distribution of {}',
+      additional_fingerprint_attrs=None,
       **kwargs,
   ):
     self.order = order
     self.ascending = ascending
+    self.sort_by_values = sort_by_values
     super(CumulativeDistribution, self).__init__(
         over,
         child,
         name_tmpl,
-        additional_fingerprint_attrs=['order', 'ascending'],
+        additional_fingerprint_attrs=['order', 'ascending', 'sort_by_values']
+        + (additional_fingerprint_attrs or []),
         **kwargs,
     )
     if order and len(self.extra_index) > 1:
       raise ValueError(
           'Only one column is supported when "order" is specified.'
       )
+    if order and sort_by_values:
+      raise ValueError('Custom order is not allowed when sorting by values!')
 
   def compute_on_children(self, children, split_by):
     dist = super(CumulativeDistribution, self).compute_on_children(
@@ -291,9 +300,19 @@ class CumulativeDistribution(Distribution):
       order = self.order if self.ascending else reversed(self.order)
       level = None if len(dist.index.names) == 1 else self.extra_index[0]
       dist = dist.reindex(order, level=level).dropna()
-    else:
+      res = self.group(dist, split_by).cumsum()
+    elif not self.sort_by_values:
       dist.sort_values(self.extra_index, ascending=self.ascending, inplace=True)
-    res = self.group(dist, split_by).cumsum()
+      res = self.group(dist, split_by).cumsum()
+    else:
+      cumsum = []
+      for col in dist:
+        cumsum.append(
+            self.group(
+                dist[col].sort_values(ascending=self.ascending), split_by
+            ).cumsum()
+        )
+      res = pd.concat(cumsum, axis=1)
     if split_by:
       res.sort_index(level=split_by, sort_remaining=False, inplace=True)
     return res
@@ -343,7 +362,7 @@ class CumulativeDistribution(Distribution):
           c.alias,
           'SUM({})',
           partition=split_by.aliases,
-          order=order,
+          order=self.get_ordered_col(c.alias) if self.sort_by_values else order,
           window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW',
       )
       col.set_alias('Cumulative %s' % c.alias_raw)

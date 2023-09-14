@@ -142,10 +142,15 @@ class Entropy(DiversityBase):
 class TopK(DiversityBase):
   """The total share of the largest k contributors."""
 
-  def __init__(self, over, k, child=None):
+  def __init__(self, over, k, child=None, additional_fingerprint_attrs=None):
     if not isinstance(k, int):
       raise ValueError('k must be an integer!')
-    super(TopK, self).__init__(over, child, "Top-%s's share of {}" % k, {'k'})
+    super(TopK, self).__init__(
+        over,
+        child,
+        "Top-%s's share of {}" % k,
+        ['k'] + (additional_fingerprint_attrs or []),
+    )
     self.k = k
 
   def compute_on_children(self, child, split_by):
@@ -224,7 +229,9 @@ class TopK(DiversityBase):
 class Nxx(DiversityBase):
   """The minimum number of contributors to achieve certain share."""
 
-  def __init__(self, over, share, child=None):
+  def __init__(
+      self, over, share, child=None, additional_fingerprint_attrs=None
+  ):
     if not 0 < share <= 1:
       raise ValueError('Share must be in (0, 1]!')
     super(Nxx, self).__init__(
@@ -232,7 +239,7 @@ class Nxx(DiversityBase):
         child,
         'N(%s) of {}'
         % (int(100 * share) if (100 * share).is_integer() else 100 * share),
-        {'share'}
+        ['share'] + (additional_fingerprint_attrs or []),
     )
     self.share = share
 

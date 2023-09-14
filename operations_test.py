@@ -108,6 +108,37 @@ class SimpleOperationTests(absltest.TestCase):
     ).compute_on(self.df)
     testing.assert_frame_equal(output, expected)
 
+  def test_cumulative_distribution_sort_by_values(self):
+    metric = operations.CumulativeDistribution(
+        'grp', metrics.Sum('x'), sort_by_values=True
+    )
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame(
+        {'Cumulative Distribution of sum(x)': [0.25, 1]}, index=['B', 'A']
+    )
+    expected.index.name = 'grp'
+    testing.assert_frame_equal(output, expected)
+
+  def test_cumulative_distribution_sort_by_values_order_descending(self):
+    metric = operations.CumulativeDistribution(
+        'grp', metrics.Sum('x'), sort_by_values=True, ascending=False
+    )
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame(
+        {'Cumulative Distribution of sum(x)': [0.75, 1]}, index=['A', 'B']
+    )
+    expected.index.name = 'grp'
+    testing.assert_frame_equal(output, expected)
+
+  def test_cumulative_distribution_sort_by_values_and_order_raises(self):
+    with self.assertRaises(ValueError) as cm:
+      operations.CumulativeDistribution(
+          'grp', metrics.Sum('x'), sort_by_values=True, order=('A', 'B')
+      )
+    self.assertEqual(
+        str(cm.exception), 'Custom order is not allowed when sorting by values!'
+    )
+
   def test_percent_change(self):
     metric = operations.PercentChange('grp', 'B', metrics.Sum('x'))
     output = metric.compute_on(self.df)
@@ -642,6 +673,16 @@ class MHTests(absltest.TestCase):
 SIMPLE_OPERATIONS = [
     ('Distribution', operations.Distribution('grp')),
     ('CumulativeDistribution', operations.CumulativeDistribution('grp')),
+    (
+        'CumulativeDistribution sort by values',
+        operations.CumulativeDistribution('grp', sort_by_values=True),
+    ),
+    (
+        'CumulativeDistribution sort by values descending',
+        operations.CumulativeDistribution(
+            'grp', ascending=False, sort_by_values=True
+        ),
+    ),
     ('PercentChange', operations.PercentChange('grp', 0)),
     ('AbsoluteChange', operations.AbsoluteChange('grp', 0)),
     ('HHI', diversity.HHI('grp')),
@@ -2216,6 +2257,7 @@ class CommonTest(parameterized.TestCase):
         operations.CumulativeDistribution('y'),
         operations.CumulativeDistribution('x', order='foo'),
         operations.CumulativeDistribution('x', ascending=False),
+        operations.CumulativeDistribution('x', sort_by_values=True),
         operations.PercentChange('x', 'y'),
         operations.PercentChange('z', 'y'),
         operations.PercentChange('x', 'z'),

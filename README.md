@@ -196,11 +196,12 @@ a variable.
 +   `Distribution(over)`: calculates the distribution of the metric over the
     variables in `over`; the values are normalized so that they sum to 1. It has
     an alias `Normalize`.
-+   `CumulativeDistribution(over, order=None, ascending=True)`: calculates the
-    cumulative distribution of the metric over the variables in `over`. The
-    `over` column will be sorted. You can pass in a list of values as a custom
-    `order`. `ascending` determines whether the variables in `over` should be
-    sorted in ascending or descending order.
++   `CumulativeDistribution(over, order=None, ascending=True, sort_by_values=False)`:
+    calculates the cumulative distribution of the metric over the variables in
+    `over`. Before computing the cumulative sum, we sort by the values if
+    `sort_by_values=True` else by the `over` column(s). If `sort_by_values=False`,
+    you can pass in a list of values as a custom `order`. `ascending` determines
+    the direction of the sort.
 
 Example Usage: `Sum("Queries") | Distribution("Device")` calculates the
 proportion of queries that come from each device.
