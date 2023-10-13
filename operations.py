@@ -1576,12 +1576,16 @@ class MetricWithCI(Operation):
         change = self.children[0]
         indexes = [i for i in indexes if i not in change.extra_index]
       res = self.add_display_fn(res, indexes, melted)
+    else:
+      msg = (
+          'You need to specify a confidence level in order to use `.display()`'
+      )
+      warn = lambda _: print(msg)
+      res.display = warn.__get__(res)  # pytype: disable=attribute-error
     return res
 
-  def add_display_fn(self, res, split_by, melted, base=None):
+  def add_display_fn(self, res, split_by, melted):
     """Bounds a display function to res so res.display() works."""
-    if base is not None or not hasattr(res, 'meterstick_change_base'):
-      self.add_base_to_res(res, base)
     value = res.columns[0] if melted else res.columns[0][1]
     ctrl_id = None
     condition_col = None
