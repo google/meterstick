@@ -19,7 +19,6 @@ from __future__ import print_function
 
 from meterstick import operations
 from meterstick import sql
-from meterstick import utils
 import numpy as np
 import pandas as pd
 
