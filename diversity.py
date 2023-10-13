@@ -265,8 +265,7 @@ class Nxx(DiversityBase):
     2. Keep all indexing/groupby columns unchanged.
     3. For all value columns, order the values in descending order and compute
        the cumulative sum by SELECT
-       SUM(val_col) OVER
-        (ORDER BY val_col DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+       SUM(val_col) OVER (ORDER BY val_col DESC)
     4. Get the minimum number of players to achieve the share by SELECT
        COUNTIF(cumulative_sum < share) + 1.
 
@@ -303,7 +302,6 @@ class Nxx(DiversityBase):
           'SUM({})',
           partition=split_by.aliases,
           order=f'{c.alias} DESC',
-          window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW',
       )
       cumsum_col.set_alias('Cumulative %s' % c.alias_raw)
       cumsum_cols.add(cumsum_col)

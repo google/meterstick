@@ -363,7 +363,6 @@ class CumulativeDistribution(Distribution):
           'SUM({})',
           partition=split_by.aliases,
           order=self.get_ordered_col(c.alias) if self.sort_by_values else order,
-          window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW',
       )
       col.set_alias('Cumulative %s' % c.alias_raw)
       columns.add(col)
