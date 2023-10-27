@@ -31,9 +31,10 @@ def is_compatible(sql0, sql1):
   """Checks if two datasources are compatible so their columns can be merged.
 
   Being compatible means datasources
-  1. have same GROUP BY clauses
-  2. have compatible PARTITION BY. For simplicity as long as one SQL instance
-  has any PARTITION BY, we consider them incompatible.
+  1. SELECT FROM the same data source
+  2. have same GROUP BY clauses
+  3. have the same WITH clause (usually None)
+  4. do not SELECT DISTINCT.
 
   Args:
     sql0: A Sql instance.
@@ -51,8 +52,6 @@ def is_compatible(sql0, sql1):
       and sql0.with_data == sql1.with_data
       and not sql0.columns.distinct
       and not sql1.columns.distinct
-      and ' OVER ' not in str(sql0)
-      and ' OVER ' not in str(sql1)
   )
 
 
