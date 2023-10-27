@@ -384,7 +384,7 @@ class PrePostChangeTests(absltest.TestCase):
         'y': np.random.choice(range(20), n),
         'pre_x': np.random.choice(range(20), n),
         'cookie': np.random.choice(range(5), n),
-        'condition1': np.random.choice(range(2), n),
+        'condition1': np.random.choice(('a', 'b'), n),
         'condition2': np.random.choice(('A', 'B', 'C'), n),
         'grp1': np.random.choice(('foo', 'bar', 'baz'), n),
         'grp2': np.random.choice(('US', 'non-US'), n),
@@ -394,7 +394,7 @@ class PrePostChangeTests(absltest.TestCase):
     pre = [self.sum_prex, metrics.Sum('y')]
     metric = operations.PrePostChange(
         ['condition1', 'condition2'],
-        (1, 'C'),
+        ('b', 'C'),
         metrics.MetricList(post),
         pre,
         ['cookie', 'grp1'],
@@ -405,7 +405,7 @@ class PrePostChangeTests(absltest.TestCase):
 
     expected = [
         operations.PrePostChange(
-            'condition', (1, 'C'), m, pre, 'agg'
+            'condition', ('b', 'C'), m, pre, 'agg'
         ).compute_on(df, ['grp2', 'grp3'])
         for m in post
     ]
@@ -560,7 +560,7 @@ class CUPEDTests(absltest.TestCase):
         'y': np.random.choice(range(20), n),
         'pre_x': np.random.choice(range(20), n),
         'cookie': np.random.choice(range(5), n),
-        'condition1': np.random.choice(range(2), n),
+        'condition1': np.random.choice(('a', 'b'), n),
         'condition2': np.random.choice(('A', 'B', 'C'), n),
         'grp1': np.random.choice(('foo', 'bar', 'baz'), n),
         'grp2': np.random.choice(('US', 'non-US'), n),
@@ -570,7 +570,7 @@ class CUPEDTests(absltest.TestCase):
     pre = [self.sum_prex, metrics.Sum('y')]
     metric = operations.CUPED(
         ['condition1', 'condition2'],
-        (1, 'C'),
+        ('b', 'C'),
         metrics.MetricList(post),
         pre,
         ['cookie', 'grp1'],
@@ -580,7 +580,7 @@ class CUPEDTests(absltest.TestCase):
     df['agg'] = df[['cookie', 'grp1']].apply(tuple, 1)
 
     expected = [
-        operations.CUPED('condition', (1, 'C'), m, pre, 'agg').compute_on(
+        operations.CUPED('condition', ('b', 'C'), m, pre, 'agg').compute_on(
             df, ['grp2', 'grp3']
         )
         for m in post
