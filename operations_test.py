@@ -706,13 +706,21 @@ PRECOMPUTABLE_OPERATIONS = SIMPLE_OPERATIONS + [
     (
         'PrePostChange',
         operations.PrePostChange(
-            'grp', 0, metrics.Sum('x'), metrics.Sum('y'), 'cookie'
+            'grp',
+            0,
+            metrics.Sum('x'),
+            [metrics.Sum('y'), metrics.Sum('y') ** 2],
+            'cookie',
         ),
     ),
     (
         'CUPED',
         operations.CUPED(
-            'grp', 0, metrics.Sum('x'), metrics.Sum('y'), 'cookie'
+            'grp',
+            0,
+            metrics.Sum('x'),
+            [metrics.Sum('y'), metrics.Sum('y') ** 2],
+            'cookie',
         ),
     ),
     (
@@ -2065,9 +2073,17 @@ ALL_OPERATIONS = OPERATIONS_AND_JACKKNIFE + [
 def set_up_metric(m):
   m = copy.deepcopy(m)
   if not m.children:
-    m = m(
-        metrics.MetricList((metrics.Ratio('x', 'y'), metrics.Ratio('y', 'x')))
-    )
+    if isinstance(m, (operations.CUPED, operations.PrePostChange)):
+      m = m(
+          metrics.MetricList((
+              metrics.Ratio('x', 'y'),
+              metrics.MetricList((metrics.Ratio('y', 'x'), metrics.Sum('y'))),
+          ))
+      )
+    else:
+      m = m(
+          metrics.MetricList((metrics.Ratio('x', 'y'), metrics.Ratio('y', 'x')))
+      )
   return m
 
 
