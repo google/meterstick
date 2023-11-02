@@ -30,6 +30,31 @@ import pandas as pd
 from scipy import stats
 
 
+def count_features(m: metrics.Metric):
+  """Gets the width of the result of m.compute_on()."""
+  if not m:
+    return 0
+  if isinstance(m, metrics.MetricList):
+    return sum([count_features(i) for i in m])
+  if isinstance(m, MetricWithCI):
+    return (
+        count_features(m.children[0]) * 3
+        if m.confidence
+        else count_features(m.children[0]) * 2
+    )
+  if isinstance(m, (CUPED, PrePostChange)):
+    return count_features(m.children[0][0])
+  if isinstance(m, Operation):
+    return count_features(m.children[0])
+  if isinstance(m, metrics.CompositeMetric):
+    return max([count_features(i) for i in m.children])
+  if isinstance(m, metrics.Quantile):
+    if m.one_quantile:
+      return 1
+    return len(m.quantile)
+  return 1
+
+
 class Operation(metrics.Metric):
   """A special kind of Metric that operates on other Metric instance(s).
 
@@ -464,15 +489,10 @@ class Comparison(Operation):
     """
     if not isinstance(self, (PercentChange, AbsoluteChange)):
       raise ValueError('Not a PercentChange nor AbsoluteChange!')
-    local_filter = (
-        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    cond_cols = sql.Columns(self.extra_index)
+    raw_table_sql, with_data = self.get_change_raw_sql(
+        table, split_by, global_filter, indexes, local_filter, with_data
     )
-
-    child = self.children[0]
-    cond_cols = sql.Columns(self.extra_split_by)
-    groupby = sql.Columns(split_by).add(cond_cols)
-    raw_table_sql, with_data = child.get_sql_and_with_clause(
-        table, groupby, global_filter, indexes, local_filter, with_data)
     raw_table = sql.Datasource(raw_table_sql, 'ChangeRaw')
     raw_table_alias = with_data.merge(raw_table)
 
@@ -516,6 +536,19 @@ class Comparison(Operation):
         sql.Columns(indexes.aliases).add(columns),
         sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
         cond), with_data
+
+  def get_change_raw_sql(
+      self, table, split_by, global_filter, indexes, local_filter, with_data
+  ):
+    """Gets the query where the comparison will be carried out."""
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    groupby = sql.Columns(split_by).add(self.extra_split_by)
+    raw_table_sql, with_data = self.children[0].get_sql_and_with_clause(
+        table, groupby, global_filter, indexes, local_filter, with_data
+    )
+    return raw_table_sql, with_data
 
 
 class PercentChange(Comparison):
@@ -715,6 +748,30 @@ class PrePostChange(PercentChange):
     # 1. It's faster. See the comments in Metric.compute_slices().
     # 2. It ensures that the result is formatted correctly.
     class Adjust(metrics.Metric):
+      """Adjusts the value by fitting controlling for the covariates.
+
+      See the class doc for adjustment details. Essentially for every slice for
+      comparison, we fit a linear regression child = c + k * covariate and use c
+      as the adjusted value for PercentChange computation later.
+      Because we center covariate first, when there is only one covariate, k can
+      be computed as Covariance(child, covariate) / Var(covariate, covariate)
+      and c = avg(child) - k * avg(covariate).
+      """
+
+      def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+        child = df.iloc[:, :len_child]
+        cov = df.iloc[:, len_child:]
+        if len(cov.columns) > 1:
+          return super(Adjust, self).compute_slices(df, split_by)
+        adjusted = df.groupby(split_by, observed=True).mean()
+        cov_col = cov.columns[0]
+        cov_adjusted = adjusted.iloc[:, -1]
+        for c in child:
+          theta = (
+              metrics.Cov(c, cov_col) / metrics.Variance(cov_col)
+          ).compute_on(df, split_by, return_dataframe=False)
+          adjusted[c] = adjusted[c] - cov_adjusted * theta
+        return adjusted.iloc[:, :len_child]
 
       def compute(self, df_slice):
         child_slice = df_slice.iloc[:, :len_child]
@@ -731,10 +788,96 @@ class PrePostChange(PercentChange):
     child = child.iloc[:, :1]
     return self.adjust_value(child, covariates, split_by)
 
-  def get_sql_and_with_clause(
+  def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
   ):
-    raise NotImplementedError
+    """Generates PrePost-adjusted values for PercentChange computation.
+
+    This function generats subquries like
+    WITH PrePostRaw AS (SELECT
+      split_by,
+      stratified_by,
+      condition_column,
+      child_metric,
+      covariate
+    FROM T
+    GROUP BY split_by, stratified_by, condition_column),
+    PrePostcovariateCentered AS (SELECT
+      split_by,
+      stratified_by,
+      condition_column,
+      child_metric,
+      covariate - AVG(covariate) OVER (PARTITION BY split_by) AS covariate
+    FROM PrePostRaw),
+    ChangeRaw AS (SELECT
+      split_by,
+      condition_column,
+      AVG(child_metric) - SAFE_DIVIDE(AVG(covariate) * COVAR_SAMP(child_metric,
+        covariate), VAR_SAMP(covariate)) AS child_metric
+    FROM PrePostcovariateCentered
+    GROUP BY split_by, condition_column)
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    if count_features(self.children[0][1]) > 1:
+      raise NotImplementedError
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    all_split_by = sql.Columns(split_by).add(self.extra_split_by)
+    all_indexes = sql.Columns(split_by).add(self.extra_index)
+    child_sql, with_data = self.children[0].get_sql_and_with_clause(
+        table, all_split_by, global_filter, indexes, local_filter, with_data)
+    child_table = sql.Datasource(child_sql, 'PrePostRaw')
+    child_table_alias = with_data.merge(child_table)
+
+    split_by = split_by.aliases
+    all_split_by = all_split_by.aliases
+    all_indexes = all_indexes.aliases
+    cols = [
+        sql.Column(c.alias, alias=c.alias_raw)
+        for c in child_sql.all_columns[:-1]
+    ]
+    covariate = child_sql.all_columns[-1].alias
+    covariate_mean = sql.Column(covariate, 'AVG({})', partition=split_by)
+    covariate_centered = (sql.Column(covariate) - covariate_mean).set_alias(
+        covariate
+    )
+    cols.append(covariate_centered)
+    covariate_centered_sql = sql.Sql(cols, child_table_alias)
+    covariate_centered_table = sql.Datasource(
+        covariate_centered_sql, 'PrePostcovariateCentered'
+    )
+    covariate_centered_table_alias = with_data.merge(covariate_centered_table)
+
+    to_adjust = []
+    for c in child_sql.all_columns[:-1]:
+      if c.alias in all_split_by:
+        continue
+      adjusted = metrics.Mean(c.alias) - metrics.Mean(covariate) * metrics.Cov(
+          c.alias, covariate
+      ) / metrics.Variance(covariate)
+      to_adjust.append(adjusted.set_name(c.alias_raw))
+    return metrics.MetricList(to_adjust).get_sql_and_with_clause(
+        covariate_centered_table_alias,
+        all_indexes,
+        None,
+        all_indexes,
+        None,
+        with_data,
+    )
 
 
 class CUPED(AbsoluteChange):
@@ -742,7 +885,7 @@ class CUPED(AbsoluteChange):
 
   Computes the absolute change after controlling for preperiod metrics.
   Essentially, if the data only has a baseline and a treatment slice, CUPED
-  1. centers the covariates
+  1. centers the covariates (we skip it because it doesn't affect the result).
   2. fit child ~ intercept + covariate.
   And the intercept is the adjusted effect and has a smaller variance than
   child. See https://exp-platform.com/cuped for more details.
@@ -758,8 +901,7 @@ class CUPED(AbsoluteChange):
     children: A MetricList whose first element is the Metric we want to compute
       change on and the rest is the covariates for adjustment.
     include_base: A boolean for whether the baseline condition should be
-      included in the output.
-    And all other attributes inherited from Operation.
+      included in the output. And all other attributes inherited from Operation.
   """
 
   def __init__(self,
@@ -814,15 +956,6 @@ class CUPED(AbsoluteChange):
       The adjusted values of the child (post metrics).
     """
     from sklearn import linear_model  # pylint: disable=g-import-not-at-top
-    # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
-    # has different implementations for __sub__ and __isub__. ___isub__ tries
-    # to reindex to update in place which sometimes lead to lots of NAs.
-    if split_by:
-      covariates = (
-          covariates - covariates.groupby(split_by, observed=True).mean()
-      )
-    else:
-      covariates = covariates - covariates.mean()
     # Align child with covariates in case there is any missing slices.
     covariates = covariates.reorder_levels(child.index.names)
     aligned = pd.concat([child, covariates], axis=1)
@@ -834,12 +967,34 @@ class CUPED(AbsoluteChange):
     # 1. It's faster. See the comments in Metric.compute_slices().
     # 2. It ensures that the result is formatted correctly.
     class Adjust(metrics.Metric):
+      """Adjusts the value by fitting controlling for the covariates.
+
+      Essentially we fit a linear regression child = c + θ * covariate.
+      and use child - θ * covariate as the adjusted value. When there is only
+      one covariate, θ can be computed as
+      Covariance(child, covariate) / Var(covariate, covariate)
+      """
+
+      def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+        child = df.iloc[:, :len_child]
+        cov = df.iloc[:, len_child:]
+        if len(cov.columns) > 1:
+          return super(Adjust, self).compute_slices(df, split_by)
+        adjusted = df.groupby(split_by + extra_index, observed=True).mean()
+        cov_col = cov.columns[0]
+        cov_adjusted = adjusted.iloc[:, -1]
+        for c in child:
+          theta = (
+              metrics.Cov(c, cov_col) / metrics.Variance(cov_col)
+          ).compute_on(df, split_by, return_dataframe=False)
+          adjusted[c] = adjusted[c] - cov_adjusted * theta
+        return adjusted.iloc[:, :len_child]
 
       def compute(self, df_slice):
         child_slice = df_slice.iloc[:, :len_child]
         cov = df_slice.iloc[:, len_child:]
         adjusted = df_slice.groupby(extra_index, observed=True).mean()
-        for c in aligned.iloc[:, :len_child]:
+        for c in child_slice:
           theta = lm.fit(cov, child_slice[c]).coef_
           adjusted[c] = adjusted[c] - adjusted.iloc[:, len_child:].dot(theta)
         return adjusted.iloc[:, :len_child]
@@ -853,10 +1008,102 @@ class CUPED(AbsoluteChange):
     child = child.iloc[:, :1]
     return self.adjust_value(child, covariates, split_by)
 
-  def get_sql_and_with_clause(
+  def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
   ):
-    raise NotImplementedError
+    """Generates CUPED-adjusted values for AbsoluteChange computation.
+
+    This function generats subquries like
+    WITH CUPEDRaw AS (SELECT
+      split_by,
+      stratified_by,
+      condition_column,
+      child_metric,
+      covariate
+    FROM T
+    GROUP BY split_by, stratified_by, condition_column),
+    CUPEDTheta AS (SELECT
+      split_by,
+      SAFE_DIVIDE(COVAR_SAMP(child_metric, covariate), VAR_SAMP(covariate))
+        AS child_metric_theta
+    FROM CUPEDRaw
+    GROUP BY split_by),
+    ChangeRaw AS (SELECT
+      split_by,
+      condition_column,
+      AVG(child_metric) - AVG(child_metric_theta * covariate) AS child_metric
+    FROM CUPEDRaw
+    FULL JOIN
+    CUPEDTheta
+    USING (split_by)
+    GROUP BY split_by, condition_column)
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    if count_features(self.children[0][1]) > 1:
+      raise NotImplementedError
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    all_split_by = sql.Columns(split_by).add(self.extra_split_by)
+    all_indexes = sql.Columns(split_by).add(self.extra_index)
+    child_sql, with_data = self.children[0].get_sql_and_with_clause(
+        table, all_split_by, global_filter, indexes, local_filter, with_data)
+    child_table = sql.Datasource(child_sql, 'CUPEDRaw')
+    child_table_alias = with_data.merge(child_table)
+
+    split_by = split_by.aliases
+    all_split_by = all_split_by.aliases
+    all_indexes = all_indexes.aliases
+    cols = []
+    for c in child_sql.columns:
+      if c.alias not in all_split_by:
+        cols.append(c)
+    covariate = cols.pop().alias
+    theta = metrics.MetricList(
+        [
+            (
+                metrics.Cov(c.alias, covariate) / metrics.Variance(covariate)
+            ).set_name(f'{c.alias}_theta')
+            for c in cols
+        ]
+    )
+    theta_sql, with_data = theta.get_sql_and_with_clause(
+        child_table_alias, split_by, None, all_indexes, None, with_data
+    )
+    theta_table = sql.Datasource(theta_sql, 'CUPEDTheta')
+    theta_table_alias = with_data.merge(theta_table)
+
+    to_adjust = sql.Columns(
+        [
+            (
+                sql.Column(c.alias, 'AVG({})')
+                - sql.Column((c.alias, covariate), 'AVG({}_theta * {})')
+            ).set_alias(c.alias_raw)
+            for c in cols
+        ]
+    )
+    join = 'FULL' if split_by else 'CROSS'
+    adjusted_sql = sql.Sql(
+        to_adjust,
+        sql.Join(
+            child_table_alias, theta_table_alias, using=split_by, join=join
+        ),
+        groupby=all_indexes,
+    )
+    return adjusted_sql, with_data
 
 
 class MH(Comparison):
@@ -1676,7 +1923,30 @@ class MetricWithCI(Operation):
       ) from e
 
   def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
-    """Computes self in a SQL query and process the result."""
+    """Computes self in a SQL query and process the result.
+
+    We first execute the SQL query then process the result.
+    When confidence is not specified, for each child Metric, the SQL query
+    returns two columns. The result columns are like
+      metric1, metric1 jackknife SE, metric2, metric2 jackknife SE, ...
+    When confidence is specified, for each child Metric, the SQL query
+    returns four columns. The result columns are like
+      metric1, metric1 CI lower, metric1 CI upper,
+      metric2, metric2 CI lower, metric2 CI upper,
+      ...
+      metricN, metricN CI lower, metricN CI upper,
+      metric 1 base value, metric 2 base value, ..., metricN base value.
+    The base value columns only exist when the child is a PercentChange or
+    AbsoluteChange. Base values are the raw value the comparison is carried out.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+
+    Returns:
+      The result DataFrame of Jackknife/Bootstrap.
+    """
     res = super(MetricWithCI,
                 self).compute_on_sql_sql_mode(table, split_by, execute)
     sub_dfs = []
@@ -1730,21 +2000,92 @@ class MetricWithCI(Operation):
     return self.add_base_to_res(res, base)
 
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
+    """Computes the child in SQL and the rest in Python.
+
+    There are two parts. First we compute the standard errors. Then we join it
+    with point estimate. When the child is a Comparison, we also compute the
+    base value for the display().
+    For the first part, we preaggregate the data when possible. See the docs of
+    Bootstrap.compute_slices about the details of the preaggregation. The
+    structure of this part is similar to to_sql(). Note that we apply
+    preaggregation to both Jackknife and Bootstrap even though
+    Jackknife.compute_slices doesn't have preaggregation. We don't do
+    preaggregation in Jackknife.compute_slices because it already cuts the
+    corner to get leave-one-out-estimates. Adding preaggregation actually slow
+    things down. Here in 'mixed' mode we don't cut the corner to get LOO so
+    preaggregation makes sense.
+    Then we compute the point estimate, join it with the standard error, and do
+    some data manipulations.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      mode: It's always 'mixed' or 'magic' otherwise we won't be here.
+
+    Returns:
+      The result DataFrame of Jackknife/Bootstrap.
+    """
     batch_size = self._runtime_batch_size or self.sql_batch_size
-    replicates = self.compute_children_sql(
-        table, split_by, execute, mode, batch_size
+    if self.has_been_preaggregated or not self.can_precompute():
+      if self.where:
+        table = sql.Sql(None, table, self.where)
+        self_no_filter = copy.deepcopy(self)
+        self_no_filter.where = None
+        return self_no_filter.compute_on_sql_mixed_mode(
+            table, split_by, execute, mode
+        )
+
+      replicates = self.compute_children_sql(
+          table, split_by, execute, mode, batch_size
+      )
+      std = self.compute_on_children(replicates, split_by)
+      point_est = self.compute_child_sql(
+          table, split_by, execute, True, mode=mode
+      )
+      res = point_est.join(utils.melt(std))
+      if self.confidence:
+        res[self.prefix + ' CI-lower'] = (
+            res.iloc[:, 0] - res[self.prefix + ' CI-lower']
+        )
+        res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
+      res = utils.unmelt(res)
+      base = self.compute_change_base(table, split_by, execute, mode)
+      return self.add_base_to_res(res, base)
+
+    expanded, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
+    if self != expanded:
+      return expanded.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+
+    # The filter has been taken care of in preaggregation.
+    expanded.where = None
+    expanded = utils.push_filters_to_leaf(expanded)
+    all_split_by = (
+        split_by
+        + list(utils.get_extra_split_by(expanded, return_superset=True))
+        + [expanded.unit]
     )
-    std = self.compute_on_children(replicates, split_by)
-    point_est = self.compute_child_sql(
-        table, split_by, execute, True, mode=mode)
-    res = point_est.join(utils.melt(std))
-    if self.confidence:
-      res[self.prefix +
-          ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
-      res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
-    res = utils.unmelt(res)
-    base = self.compute_change_base(table, split_by, execute, mode)
-    return self.add_base_to_res(res, base)
+    leaf = utils.get_leaf_metrics(expanded)
+    cols = [
+        l.get_sql_columns(l.where_).set_alias(get_preaggregated_metric_var(l))
+        for l in leaf
+    ]
+    preagg = sql.Sql(cols, table, self.where_, all_split_by)
+    equiv = get_preaggregated_metric_tree(expanded)
+    equiv.unit = sql.Column(equiv.unit).alias
+    split_by = sql.Columns(split_by).aliases
+    for m in equiv.traverse():
+      if isinstance(m, metrics.Metric):
+        m.extra_index = sql.Columns(m.extra_index).aliases
+        m.extra_split_by = sql.Columns(m.extra_split_by).aliases
+    if isinstance(equiv, Bootstrap):
+      # When each unit only has one row after preaggregation, we sample by
+      # rows.
+      if not utils.get_extra_split_by(equiv, return_superset=True):
+        equiv.unit = None
+    else:
+      equiv.has_local_filter = any([l.where for l in leaf])
+    return equiv.compute_on_sql_mixed_mode(preagg, split_by, execute, mode)
 
   def compute_children_sql(self,
                            table,
@@ -1756,6 +2097,20 @@ class MetricWithCI(Operation):
     raise NotImplementedError
 
   def to_sql(self, table, split_by=None):
+    """Generates SQL query for the metric.
+
+    The SQL generation is actually delegated to get_sql_and_with_clause(). This
+    function does the preaggregation when possible. See the docs of
+    Bootstrap.compute_slices() about the details of the preaggregation. The
+    structure of this function is similar to compute_on_sql_mixed_mode().
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+
+    Returns:
+      The query that does Jackknife/Bootstrap.
+    """
     if not isinstance(self, (Jackknife, Bootstrap)):
       raise NotImplementedError
     split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
@@ -1896,6 +2251,8 @@ class MetricWithCI(Operation):
       ):
         has_base_vals = True
         base_metric = copy.deepcopy(child.children[0])
+        if isinstance(child, (CUPED, PrePostChange)):
+          base_metric = base_metric[0]
         if child.where:
           base_metric.add_where(child.where_)
         base, with_data = base_metric.get_sql_and_with_clause(
@@ -2157,7 +2514,83 @@ class Jackknife(MetricWithCI):
   def compute_children_sql(
       self, table, split_by, execute, mode=None, batch_size=None
   ):
-    """Compute the children on leave-one-out data in SQL."""
+    """Compute the children on leave-one-out data in SQL.
+
+    When
+    1. the data have been preaggregated, which means all the leaf Metrics are
+    Sum and Count,
+    2. batch_size is None,
+    we compute all the leaf nodes on the preaggregated date, grouped by all the
+    split_by columns we ever need, including self.unit. Then we cut the corner
+    to get the leave-one-out estimates. See the doc of compute_slices() for more
+    details.
+    Otherwise, if batch_size is None or 1, we iterate unique units in the data.
+    In iteration k, we compute the child on
+    'SELECT * FROM table WHERE unit != k' to get the leave-k-out estimate.
+    If batch_size is larger than 1, in each iteration, we compute the child on
+    SELECT
+      *
+    FROM UNNEST([1, 2, ..., batch_size]) AS meterstick_resample_idx
+    JOIN
+    table
+    ON meterstick_resample_idx != unit), split by meterstick_resample_idx in
+    addition.
+    At last we concat the estimates.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      mode: It's always 'mixed' or 'magic' otherwise we won't be here.
+      batch_size: The number of units we handle in one iteration.
+
+    Returns:
+      A DataFrame contains all the leave-one-out estimates. Each row is a child
+      metric * split_by slice and each column is an estimate.
+    """
+    if self.has_been_preaggregated and not batch_size:
+      all_split_by = (
+          split_by
+          + [self.unit]
+          + list(utils.get_extra_split_by(self, return_superset=True))
+      )
+      all_split_by_no_unit = split_by + list(
+          utils.get_extra_split_by(self, return_superset=True)
+      )
+      filter_in_leaf = utils.push_filters_to_leaf(self)
+      leafs = utils.get_leaf_metrics(filter_in_leaf)
+      for m in leafs:  # filters have been handled in preaggregation
+        m.where = None
+      # Make sure the output column names are the same as the var so we can
+      # compute_child on it later. has_been_preaggregated being True means that
+      # all leaf metrics are Sum or Count.
+      leafs = copy.deepcopy(leafs)
+      for m in leafs:
+        m.name = m.var
+      leafs = metrics.MetricList(tuple(set(leafs)))
+      if len(leafs) == 1:
+        leafs.name = leafs.children[0].name
+      bucket_res = self.compute_util_metric_on_sql(
+          leafs, table, all_split_by, execute, mode=mode
+      )
+
+      if all_split_by_no_unit:
+        total = bucket_res.groupby(
+            level=all_split_by_no_unit, observed=True
+        ).sum()
+      else:
+        total = bucket_res.sum()
+      bucket_res = bucket_res.fillna(0)
+      bucket_res = utils.adjust_slices_for_loo(bucket_res, split_by, bucket_res)
+      loo = total - bucket_res
+      if all_split_by_no_unit:
+        # The levels might get messed up.
+        loo = loo.reorder_levels(all_split_by)
+      res = filter_in_leaf.children[0].compute_on(
+          loo, split_by + [self.unit], melted=True
+      )
+      return [res.unstack(self.unit)]
+
     batch_size = batch_size or 1
     slice_and_units = sql.Sql(
         sql.Columns(split_by + [self.unit], distinct=True),
@@ -2394,8 +2827,24 @@ class Bootstrap(MetricWithCI):
   def compute_children_sql(
       self, table, split_by, execute, mode=None, batch_size=None
   ):
-    """Compute the children on resampled data in SQL."""
-    batch_size = batch_size or 1000
+    """Compute the children on resampled data in SQL.
+
+    We compute the child on bootstrapped data in a batched way. We bootstrap for
+    batch_size in one iteration. Namely, it's equivalent to compute self but
+    setting n_replicates to batch_size.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      mode: It's always 'mixed' or 'magic' otherwise we won't be here.
+      batch_size: The number of units we handle in one iteration.
+
+    Returns:
+      A DataFrame contains all the bootstrap estimates. Each row is a child
+      metric * split_by slice and each column is an estimate.
+    """
+    batch_size = batch_size or self.n_replicates
     global_filter = utils.get_global_filter(self)
     util_metric = copy.deepcopy(self)
     util_metric.n_replicates = batch_size
