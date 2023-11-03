@@ -33,7 +33,7 @@ import pandas as pd
 from pandas import testing
 
 # pylint: disable=g-long-lambda
-METRICS_TO_TEST = metrics_to_test = [
+METRICS_TO_TEST = [
     ('Ratio', metrics.Ratio('X', 'Y'), lambda d: d.X.sum() / d.Y.sum()),
     ('Sum', metrics.Sum('X'), lambda d: d.X.sum()),
     ('Count', metrics.Count('X'), lambda d: d.X.size),
@@ -56,6 +56,12 @@ METRICS_TO_TEST = metrics_to_test = [
     ),
     ('Max', metrics.Max('X'), lambda d: d.X.max()),
     ('Min', metrics.Min('X'), lambda d: d.X.min()),
+    ('Nth', metrics.Nth('X', 'Y', 1), lambda d: d.sort_values('Y').X.values[1]),
+    (
+        'Nth desc',
+        metrics.Nth('X', 'Y', 2, False),
+        lambda d: d.sort_values('Y', ascending=False).X.values[2],
+    ),
     ('Quantile', metrics.Quantile('X', 0.2), lambda d: d.X.quantile(0.2)),
     ('Variance', metrics.Variance('X', True), lambda d: d.X.var()),
     (
@@ -381,10 +387,56 @@ class TestMetricsMiscellaneous(absltest.TestCase):
                                 names=['Metric', 'grp']))
     testing.assert_frame_equal(output, expected)
 
+  def test_nth_na(self):
+    df = pd.DataFrame({'x': [np.nan, 1], 'w': [1, 0]})
+    m = metrics.Nth('x', 'w', 1)
+    output = m.compute_on(df)
+    expected = pd.DataFrame({'2nd(x) sort by w asc': [np.NaN]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_nth_dropna(self):
+    df = pd.DataFrame({'x': [np.nan, 1], 'w': [0, 1]})
+    m = metrics.Nth('x', 'w', 0, dropna=True)
+    output = m.compute_on(df)
+    expected = pd.DataFrame({'1st(x) sort by w asc': [1.0]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_nth_n_larger_than_df_len(self):
+    df = pd.DataFrame({'x': [np.nan, 1], 'w': [0, 1]})
+    m = metrics.Nth('x', 'w', 2)
+    output = m.compute_on(df)
+    expected = pd.DataFrame({'3rd(x) sort by w asc': [np.NaN]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_nth_negative_n(self):
+    output = metrics.Nth('x', 'w', -1)
+    expected = metrics.Nth('x', 'w', 0, False)
+    self.assertEqual(output, expected)
+
   def test_cov_invalid_ddof(self):
     df = pd.DataFrame({'X': np.random.rand(3), 'w': np.array([1, 1, 2])})
     m = metrics.Cov('X', 'X', ddof=5, fweight='w')
     self.assertTrue(pd.isnull(m.compute_on(df, return_dataframe=False)))
+
+  def test_large_metriclist(self):
+    df = pd.DataFrame({
+        'X': np.random.rand(100) + 5,
+        'Y': np.random.rand(100) + 5,
+        'w': np.random.rand(100) + 5,
+        'w2': np.random.randint(100, size=100) + 5,
+        'g1': np.random.randint(3, size=100),
+        'g2': np.random.choice(list('ab'), size=100),
+    })
+    ms = []
+    for c in METRICS_TO_TEST:
+      m = copy.deepcopy(c[1])
+      m.name = c[0]
+      m.where = 'X > %.4f' % (np.random.rand() * 20 + 5)
+      ms.append(m)
+    m = metrics.MetricList(ms)
+    actual = m.compute_on(df)
+    expected = pd.concat((c.compute_on(df) for c in m), axis=1)
+    testing.assert_frame_equal(expected, actual)
 
 
 class TestCompositeMetric(absltest.TestCase):
@@ -857,6 +909,12 @@ class TestCaching(parameterized.TestCase):
         metrics.Mean('x', 'y'),
         metrics.Max('x'),
         metrics.Min('x'),
+        metrics.Nth('x', 'y', 2),
+        metrics.Nth('x', 'y', 3),
+        metrics.Nth('z', 'y', 2),
+        metrics.Nth('x', 'z', 2),
+        metrics.Nth('x', 'z', 2, False),
+        metrics.Nth('x', 'z', 2, False, True),
         metrics.Quantile('x'),
         metrics.Quantile('x', 0.2),
         metrics.Variance('x', True),
