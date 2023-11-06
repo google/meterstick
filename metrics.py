@@ -1299,9 +1299,15 @@ class MetricList(Metric):
                                   local_filter, with_data)[0]
         for c in self.children
     ]
+    children_sql_copy = copy.deepcopy(children_sql)
     incompatible_sqls = sql.Datasources()
-    for child_sql in children_sql:
-      incompatible_sqls.merge(sql.Datasource(child_sql, 'MetricListChildTable'))
+    child_table_aliases = []
+    for i, child_sql in enumerate(children_sql):
+      child_table_aliases.append(
+          incompatible_sqls.merge(
+              sql.Datasource(child_sql, 'MetricListChildTable')
+          )
+      )
 
     name_tmpl = self.name_tmpl or '{}'
     if len(incompatible_sqls) == 1:
@@ -1312,10 +1318,23 @@ class MetricList(Metric):
       return res, with_data
 
     columns = sql.Columns(indexes.aliases)
-    for i, (alias, table) in enumerate(incompatible_sqls.children.items()):
-      data = sql.Datasource(table, alias)
-      alias = with_data.merge(data)
-      for c in table.columns:
+    alias_lookup = {}
+    from_data = None
+    for i, child_sql in enumerate(children_sql_copy):
+      child_table_alias = child_table_aliases[i]
+      if child_table_alias in alias_lookup:
+        alias = alias_lookup[child_table_alias]
+      else:
+        table = incompatible_sqls.children[child_table_alias]
+        data = sql.Datasource(table, child_table_alias)
+        alias = with_data.merge(data)
+        alias_lookup[child_table_alias] = alias
+        if i == 0:
+          from_data = alias
+        else:
+          join = 'FULL' if indexes else 'CROSS'
+          from_data = sql.Join(from_data, alias, join=join, using=indexes)
+      for c in child_sql.columns:
         if c not in columns:
           columns.add(
               sql.Column(
@@ -1323,11 +1342,6 @@ class MetricList(Metric):
                   alias=name_tmpl.format(c.alias_raw),
               )
           )
-      if i == 0:
-        from_data = alias
-      else:
-        join = 'FULL' if indexes else 'CROSS'
-        from_data = sql.Join(from_data, alias, join=join, using=indexes)
 
     query = sql.Sql(columns, from_data)
     if self.columns:

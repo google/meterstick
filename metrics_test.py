@@ -33,7 +33,7 @@ import pandas as pd
 from pandas import testing
 
 # pylint: disable=g-long-lambda
-METRICS_TO_TEST = metrics_to_test = [
+METRICS_TO_TEST = [
     ('Ratio', metrics.Ratio('X', 'Y'), lambda d: d.X.sum() / d.Y.sum()),
     ('Sum', metrics.Sum('X'), lambda d: d.X.sum()),
     ('Count', metrics.Count('X'), lambda d: d.X.size),
@@ -385,6 +385,26 @@ class TestMetricsMiscellaneous(absltest.TestCase):
     df = pd.DataFrame({'X': np.random.rand(3), 'w': np.array([1, 1, 2])})
     m = metrics.Cov('X', 'X', ddof=5, fweight='w')
     self.assertTrue(pd.isnull(m.compute_on(df, return_dataframe=False)))
+
+  def test_large_metriclist(self):
+    df = pd.DataFrame({
+        'X': np.random.rand(100) + 5,
+        'Y': np.random.rand(100) + 5,
+        'w': np.random.rand(100) + 5,
+        'w2': np.random.randint(100, size=100) + 5,
+        'g1': np.random.randint(3, size=100),
+        'g2': np.random.choice(list('ab'), size=100),
+    })
+    ms = []
+    for c in METRICS_TO_TEST:
+      m = copy.deepcopy(c[1])
+      m.name = c[0]
+      m.where = 'X > %.4f' % (np.random.rand() * 20 + 5)
+      ms.append(m)
+    m = metrics.MetricList(ms)
+    actual = m.compute_on(df)
+    expected = pd.concat((c.compute_on(df) for c in m), axis=1)
+    testing.assert_frame_equal(expected, actual)
 
 
 class TestCompositeMetric(absltest.TestCase):
