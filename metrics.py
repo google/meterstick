@@ -1938,34 +1938,35 @@ class Quantile(SimpleMetric):
     super(Quantile, self).__init__(var, name, name_tmpl, where,
                                    ['quantile', 'weight', 'interpolation'])
 
-  def compute(self, df):
-    """Adapted from https://stackoverflow.com/a/29677616/12728137."""
-    if not self.weight:
-      raise ValueError('Weight is missing in %s.' % self.name)
-
-    sample_weight = np.array(df[self.weight])
-    values = np.array(df[self.var])
-    sorter = np.argsort(values)
-    values = values[sorter]
-    sample_weight = sample_weight[sorter]
-    weighted_quantiles = np.cumsum(sample_weight) - 0.5 * sample_weight
-    weighted_quantiles /= np.sum(sample_weight)
-    res = np.interp(self.quantile, weighted_quantiles, values)
-    if self.one_quantile:
-      return res
-    return pd.DataFrame(
-        [res],
-        columns=[self.name_tmpl.format(self.var, q) for q in self.quantile])
-
   def compute_slices(self, df, split_by=None):
     if self.weight:
-      # When there is weight, just loop through slices.
-      return super(Quantile, self).compute_slices(df, split_by)
+      # Adapted from https://stackoverflow.com/a/29677616/12728137.
+      def interp(d):
+        res = np.interp(self.quantile, d[self.weight], d[self.var])
+        if self.one_quantile:
+          return res
+        return pd.DataFrame(
+            [res],
+            columns=[self.name_tmpl.format(self.var, q) for q in self.quantile])
+
+      aggregated_weight = df.groupby(split_by + [self.var])[self.weight].sum()
+      # See https://en.wikipedia.org/wiki/Percentile#Weighted_percentile.
+      weighted_quantiles = (
+          self.group(aggregated_weight, split_by).cumsum()
+          - 0.5 * aggregated_weight
+      )
+      weighted_quantiles /= self.group(aggregated_weight, split_by).sum()
+      if split_by:
+        weighted_quantiles = weighted_quantiles.reset_index(self.var)
+        return self.group(weighted_quantiles, split_by).apply(interp)
+      else:
+        weighted_quantiles = weighted_quantiles.to_frame().reset_index()
+        return interp(weighted_quantiles)
+
     res = self.group(df, split_by)[self.var].quantile(
         self.quantile, interpolation=self.interpolation)
     if self.one_quantile:
       return res
-
     if split_by:
       res = res.unstack()
       res.columns = [self.name_tmpl.format(self.var, c) for c in res]
@@ -1977,7 +1978,7 @@ class Quantile(SimpleMetric):
   def get_sql_columns(self, local_filter):
     """Get SQL columns."""
     if self.weight:
-      raise ValueError('SQL for weighted quantile is not supported!')
+      raise ValueError('SQL for weighted quantile should already be handled!')
     if self.one_quantile:
       alias = 'quantile(%s, %s)' % (self.var, self.quantile)
       return sql.Column(
@@ -1994,6 +1995,149 @@ class Quantile(SimpleMetric):
       quantiles.append(
           sql.Column(self.var, query % int(100 * q), alias, local_filter))
     return sql.Columns(quantiles)
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL for weighted quantile.
+
+    The query is constructed as following.
+    1. Add three subqueries below to the WITH clause:
+      AggregatedQuantileWeights AS (SELECT
+        split_by,
+        val,
+        SUM(weight) AS weight
+      FROM T
+      GROUP BY split_by, val),
+      QuantileWeights AS (SELECT
+        split_by,
+        val,
+        SAFE_DIVIDE(SUM(weight) OVER (PARTITION BY split_by ORDER BY val
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+          - 0.5 * weight,
+          SUM(weight) OVER (PARTITION BY split_by)) AS weight
+      FROM AggregatedQuantileWeights
+      ORDER BY split_by, val),
+      PairedQuantileWeights AS (SELECT
+        split_by,
+        val,
+        weight,
+        LAG(weight) OVER (PARTITION BY split_by ORDER BY val) AS prev_weight,
+        LEAD(weight) OVER (PARTITION BY split_by ORDER BY val) AS next_weight,
+        LEAD(val) OVER (PARTITION BY split_by ORDER BY val) AS next_value
+      FROM QuantileWeights)
+    2. For each quantile q, SELECT
+    SUM(IF((prev_weight IS NULL AND q <= weight) OR
+             (next_weight IS NULL AND q >= weight),
+           val,
+           IF(q BETWEEN weight AND next_weight,
+              (next_value * (q - weight) + (next_weight - q) * val) /
+                (next_weight - weight),
+              0))).
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    if not self.weight:  # Fall back to get_sql_columns().
+      return super(Quantile, self).get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, local_filter, with_data
+      )
+    if self.interpolation != 'linear':
+      raise NotImplementedError('Only linear interpolation is supported!')
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    split_by_and_value = sql.Columns(split_by).add(self.var)
+    weight = sql.Column(
+        self.weight, 'SUM({})', filters=local_filter, alias=self.weight
+    )
+    cols = sql.Columns(split_by_and_value).add(weight)
+    deduped_weight_sql = sql.Sql(cols, table, global_filter, split_by_and_value)
+    deduped_weight_alias = with_data.merge(
+        sql.Datasource(deduped_weight_sql, 'AggregatedQuantileWeights')
+    )
+
+    v = split_by_and_value.aliases[-1]
+    w = weight.alias
+    split_by = sql.Columns(split_by.aliases)
+    split_by_and_value = sql.Columns(split_by_and_value.aliases)
+    total_weight = sql.Column(w, 'SUM({})', partition=split_by)
+    cum_weight = sql.Column(
+        w,
+        'SUM({})',
+        partition=split_by,
+        order=v,
+        window_frame='ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW',
+    )
+    normalized_weights = (cum_weight - 0.5 * sql.Column(w)) / total_weight
+    cols = sql.Columns(split_by_and_value).add(normalized_weights.set_alias(w))
+    normalized_weights_sql = sql.Sql(
+        cols, deduped_weight_alias, orderby=split_by_and_value
+    )
+    normalized_weights_alias = with_data.merge(
+        sql.Datasource(normalized_weights_sql, 'QuantileWeights')
+    )
+
+    prev_w = sql.Column(
+        w,
+        'LAG({})',
+        'prev_weight',
+        partition=split_by,
+        order=v
+    )
+    next_w = sql.Column(
+        w,
+        'LEAD({})',
+        'next_weight',
+        partition=split_by,
+        order=v
+    )
+    next_val = sql.Column(
+        v,
+        'LEAD({})',
+        'next_value',
+        partition=split_by,
+        order=v
+    )
+    paired_weights_cols = sql.Columns(cols.aliases).add(
+        (prev_w, next_w, next_val)
+    )
+    paired_weights_sql = sql.Sql(paired_weights_cols, normalized_weights_alias)
+    paired_weights_alias = with_data.merge(
+        sql.Datasource(paired_weights_sql, 'PairedQuantileWeights')
+    )
+
+    prev_w = prev_w.alias
+    next_w = next_w.alias
+    next_v = next_val.alias
+    cols = sql.Columns(split_by)
+    quantiles = [self.quantile] if self.one_quantile else self.quantile
+    for q in quantiles:
+      interp = (
+          f'({next_v} * ({q} - {w}) + ({next_w} - {q}) * {v})'
+          f' / ({next_w} - {w})'
+      )
+      cols.add(
+          sql.Column(
+              f"""SUM(IF(({prev_w} IS NULL AND {q} <= {w}) OR ({next_w} IS NULL AND {q} >= {w}), {v},
+    IF({q} BETWEEN {w} AND {next_w}, {interp}, 0)))""",
+              alias=f'{self.weight}-weighted quantile({self.var}, {q})',
+          )
+      )
+    if self.one_quantile:
+      cols[-1].set_alias(self.name)
+    res_sql = sql.Sql(cols, paired_weights_alias, groupby=split_by)
+    return res_sql, with_data
 
 
 class Variance(SimpleMetric):

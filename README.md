@@ -300,10 +300,10 @@ It can help you to sanity check complex Metrics.
 
 ## SQL
 
-You can get the SQL query for all built-in Metrics and Operations (except
-weighted Quantile) by calling `to_sql(sql_data_source,
-split_by)` on the Metric. `sql_data_source` could be a table or a subquery. The
-dialect it uses is the [standard SQL](https://cloud.google.com/bigquery/docs/reference/standard-sql)
+You can get the SQL query for all built-in Metrics and Operations by calling
+`to_sql(sql_data_source, split_by)` on the Metric. `sql_data_source` could be a
+table or a subquery. The dialect it uses is the
+[standard SQL](https://cloud.google.com/bigquery/docs/reference/standard-sql)
 in Google Cloud's BigQuery. For example,
 
 ```python
