@@ -59,6 +59,8 @@ Currently built-in metrics include:
     Sum(denominator)`.
 +   `Quantile(variable, quantile(s))`: calculates the `quantile(s)` quantile for
     `variable`.
++   `Nth(variable, n, sort_by, ascending=True, dropna=False)` computes the `n`th
+    value (0-based indexing) after sorting by `sort_by`.
 +   `Variance(variable, unbiased=True)`: calculates the variance of `variable`;
     `unbiased` determines whether the unbiased (sample) or population estimate
     is used.

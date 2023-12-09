@@ -109,6 +109,7 @@ BUILT_INS = [
     'Mean',
     'Max',
     'Min',
+    'Nth',
     'Quantile',
     'Variance',
     'StandardDeviation',
@@ -1904,6 +1905,153 @@ class Min(SimpleMetric):
 
   def get_sql_columns(self, local_filter):
     return sql.Column(self.var, 'MIN({})', self.name, local_filter)
+
+
+class Nth(SimpleMetric):
+  """The n-th (0-based indexing) value of var when sorting by sort_by.
+
+  Attributes:
+    var: Column to compute on.
+    n: The `n`-th value to get.
+    sort_by: Column to sort by.
+    ascending: If to sort in ascending order.
+    dropna: If to drop NA in var before counting.
+    name: Name of the Metric.
+    where: A string or list of strings to be concatenated that will be passed to
+      df.query() as a prefilter.
+    And all other attributes inherited from SimpleMetric.
+  """
+
+  def __init__(
+      self,
+      var: Text,
+      n: int,
+      sort_by: Text,
+      ascending: bool = True,
+      dropna: bool = False,
+      name: Optional[Text] = None,
+      where: Optional[Union[Text, Sequence[Text]]] = None,
+      additional_fingerprint_attrs: Optional[List[str]] = None,
+  ):
+    if not isinstance(n, int):
+      raise ValueError('n must be an integer.')
+    if n < 0:
+      n = -n - 1
+      ascending = not ascending
+    self.n = n
+    self.ascending = ascending
+    self.dropna = dropna
+    self.sort_by = sort_by
+    i = n + 1
+    if i % 10 == 1 and i % 100 != 11:
+      tmpl = f'{i}st'
+    elif i % 10 == 2 and i % 100 != 12:
+      tmpl = f'{i}nd'
+    elif i % 10 == 3 and i % 100 != 13:
+      tmpl = f'{i}rd'
+    else:
+      tmpl = f'{i}th'
+    order = 'asc' if ascending else 'desc'
+    name_tmpl = '%s({}) sort by %s %s' % (tmpl, sort_by, order)
+    additional_fingerprint_attrs = (additional_fingerprint_attrs or []) + [
+        'n',
+        'sort_by',
+        'dropna',
+        'ascending',
+    ]
+    super(Nth, self).__init__(
+        var,
+        name,
+        name_tmpl,
+        where,
+        additional_fingerprint_attrs=additional_fingerprint_attrs
+    )
+
+  def compute_slices(self, df, split_by=None):
+    if self.dropna:
+      df = df.dropna(subset=[self.var])
+    df = df.sort_values(self.sort_by, ascending=self.ascending)
+    if split_by:
+      return self.group(df, split_by)[self.var].nth(self.n)
+    if self.n > len(df) - 1:
+      return np.nan
+    return df[self.var].values[self.n]
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL query and WITH clause.
+
+    If there is no local filter, the metric can be expressed in one line like
+    ARRAY_AGG(var IGNORE NULLS ORDER BY sort_by LIMIT n + 1)[SAFE_OFFSET(n)]. In
+    that case we will fall back to get_sql_columns().
+    Otherwise the metric requires multiple subqueries. We will first add
+    SELECT split_by, var, sort_by FROM table WHERE local_filter + global_filter
+    to with_data
+    then generate one line query like above on the subquery.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    if not local_filter:
+      return super(Nth, self).get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, None, with_data
+      )
+    all_filters = sql.Filters(local_filter).add(global_filter)
+    if self.dropna:
+      all_filters.add(f'{self.var} IS NOT NULL')
+    split_by = sql.Columns(split_by)
+    var = sql.Column(self.var, alias=self.var)
+    sort_by = sql.Column(self.sort_by, alias=self.sort_by)
+    filtered_sql = sql.Sql(
+        sql.Columns(split_by).add([var, sort_by]), table, all_filters
+    )
+    filtered_table = sql.Datasource(filtered_sql, 'WeightedQuantileFiltered')
+    filtered_table_alias = with_data.merge(filtered_table)
+    no_filter = Nth(
+        var.alias,
+        self.n,
+        sort_by.alias,
+        dropna=self.dropna,
+        ascending=self.ascending,
+        name=self.name,
+    )
+    return super(Nth, no_filter).get_sql_and_with_clause(
+        filtered_table_alias, split_by.aliases, None, indexes, None, with_data
+    )
+
+  def get_sql_columns(self, local_filter):
+    if local_filter:
+      raise ValueError(
+          'This case should be handled by get_sql_and_with_clause() already.'
+      )
+    order = '' if self.ascending else ' DESC'
+    dropna = ' IGNORE NULLS' if self.dropna else ''
+    sql_tmpl = 'ARRAY_AGG({}%s ORDER BY %s%s LIMIT %s)[SAFE_OFFSET(%s)]' % (
+        dropna,
+        self.sort_by,
+        order,
+        self.n + 1,
+        self.n,
+    )
+    return sql.Column(
+        self.var,
+        sql_tmpl,
+        self.name,
+    )
 
 
 class Quantile(SimpleMetric):

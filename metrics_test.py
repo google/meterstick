@@ -56,6 +56,12 @@ METRICS_TO_TEST = [
     ),
     ('Max', metrics.Max('X'), lambda d: d.X.max()),
     ('Min', metrics.Min('X'), lambda d: d.X.min()),
+    ('Nth', metrics.Nth('X', 1, 'Y'), lambda d: d.sort_values('Y').X.values[1]),
+    (
+        'Nth desc',
+        metrics.Nth('X', 2, 'Y', False),
+        lambda d: d.sort_values('Y', ascending=False).X.values[2],
+    ),
     ('Quantile', metrics.Quantile('X', 0.2), lambda d: d.X.quantile(0.2)),
     ('Variance', metrics.Variance('X', True), lambda d: d.X.var()),
     (
@@ -380,6 +386,32 @@ class TestMetricsMiscellaneous(absltest.TestCase):
                                 ], ['A', 'B']),
                                 names=['Metric', 'grp']))
     testing.assert_frame_equal(output, expected)
+
+  def test_nth_na(self):
+    df = pd.DataFrame({'x': [np.nan, 1], 'w': [1, 0]})
+    m = metrics.Nth('x', 1, 'w')
+    output = m.compute_on(df)
+    expected = pd.DataFrame({'2nd(x) sort by w asc': [np.NaN]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_nth_dropna(self):
+    df = pd.DataFrame({'x': [np.nan, 1], 'w': [0, 1]})
+    m = metrics.Nth('x', 0, 'w', dropna=True)
+    output = m.compute_on(df)
+    expected = pd.DataFrame({'1st(x) sort by w asc': [1.0]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_nth_n_larger_than_df_len(self):
+    df = pd.DataFrame({'x': [np.nan, 1], 'w': [0, 1]})
+    m = metrics.Nth('x', 2, 'w')
+    output = m.compute_on(df)
+    expected = pd.DataFrame({'3rd(x) sort by w asc': [np.NaN]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_nth_negative_n(self):
+    output = metrics.Nth('x', -1, 'w')
+    expected = metrics.Nth('x', 0, 'w', False)
+    self.assertEqual(output, expected)
 
   def test_cov_invalid_ddof(self):
     df = pd.DataFrame({'X': np.random.rand(3), 'w': np.array([1, 1, 2])})
@@ -877,6 +909,12 @@ class TestCaching(parameterized.TestCase):
         metrics.Mean('x', 'y'),
         metrics.Max('x'),
         metrics.Min('x'),
+        metrics.Nth('x', 2, 'y'),
+        metrics.Nth('x', 3, 'y'),
+        metrics.Nth('z', 2, 'y'),
+        metrics.Nth('x', 2, 'z'),
+        metrics.Nth('x', 2, 'z', False),
+        metrics.Nth('x', 2, 'z', False, True),
         metrics.Quantile('x'),
         metrics.Quantile('x', 0.2),
         metrics.Variance('x', True),
