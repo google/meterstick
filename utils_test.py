@@ -20,6 +20,7 @@ from __future__ import print_function
 from absl.testing import absltest
 from meterstick import metrics
 from meterstick import operations
+from meterstick import sql
 from meterstick import utils
 import numpy as np
 import pandas as pd
@@ -32,36 +33,37 @@ class UtilsTest(absltest.TestCase):
     df = pd.DataFrame({'unit': list('abc'), 'x': range(1, 4)})
     bucket_res = df[df.unit != 'a'].groupby('unit').sum()
     output = utils.adjust_slices_for_loo(bucket_res, [], df)
-    expected = pd.DataFrame({'x': [0, 2, 3]},
-                            index=pd.Index(list('abc'), name='unit'))
+    expected = pd.DataFrame(
+        {'x': [0, 2, 3]}, index=pd.Index(list('abc'), name='unit')
+    )
     testing.assert_frame_equal(output, expected)
 
   def test_adjust_slices_for_loo_no_splitby_operation(self):
-    df = pd.DataFrame({
-        'unit': list('abb'),
-        'grp': list('bbc'),
-        'x': range(1, 4)
-    })
+    df = pd.DataFrame(
+        {'unit': list('abb'), 'grp': list('bbc'), 'x': range(1, 4)}
+    )
     bucket_res = df[df.unit != 'a'].groupby(['unit', 'grp']).sum()
     output = utils.adjust_slices_for_loo(bucket_res, [], df)
-    expected = pd.DataFrame({'x': [0, 0]},
-                            index=pd.MultiIndex.from_tuples(
-                                (('a', 'b'), ('a', 'c')),
-                                names=('unit', 'grp')))
+    expected = pd.DataFrame(
+        {'x': [0, 0]},
+        index=pd.MultiIndex.from_tuples(
+            (('a', 'b'), ('a', 'c')), names=('unit', 'grp')
+        ),
+    )
     testing.assert_frame_equal(output, expected)
 
   def test_adjust_slices_for_loo_splitby_no_operation(self):
-    df = pd.DataFrame({
-        'unit': list('abc'),
-        'grp': list('abb'),
-        'x': range(1, 4)
-    })
+    df = pd.DataFrame(
+        {'unit': list('abc'), 'grp': list('abb'), 'x': range(1, 4)}
+    )
     bucket_res = df[df.grp != 'b'].groupby(['grp', 'unit']).sum()
     output = utils.adjust_slices_for_loo(bucket_res, ['grp'], df)
-    expected = pd.DataFrame({'x': [1, 0, 0]},
-                            index=pd.MultiIndex.from_tuples(
-                                (('a', 'a'), ('b', 'b'), ('b', 'c')),
-                                names=('grp', 'unit')))
+    expected = pd.DataFrame(
+        {'x': [1, 0, 0]},
+        index=pd.MultiIndex.from_tuples(
+            (('a', 'a'), ('b', 'b'), ('b', 'c')), names=('grp', 'unit')
+        ),
+    )
     testing.assert_frame_equal(output, expected)
 
   def test_adjust_slices_for_loo_splitby_operation(self):
@@ -69,22 +71,25 @@ class UtilsTest(absltest.TestCase):
         'grp': list('aaabbb'),
         'op': ['x'] * 2 + ['y'] * 2 + ['z'] * 2,
         'unit': [1, 2, 3, 2, 3, 2],
-        'x': range(1, 7)
+        'x': range(1, 7),
     })
     bucket_res = df[df.unit != 1].groupby(['grp', 'unit', 'op']).sum()
     output = utils.adjust_slices_for_loo(bucket_res, ['grp'], df)
-    expected = pd.DataFrame({'x': [0, 0, 0, 0, 6, 0, 5]},
-                            index=pd.MultiIndex.from_tuples(
-                                (
-                                    ('a', 1, 'x'),
-                                    ('a', 1, 'y'),
-                                    ('a', 2, 'y'),
-                                    ('a', 3, 'x'),
-                                    ('b', 2, 'z'),
-                                    ('b', 3, 'y'),
-                                    ('b', 3, 'z'),
-                                ),
-                                names=('grp', 'unit', 'op')))
+    expected = pd.DataFrame(
+        {'x': [0, 0, 0, 0, 6, 0, 5]},
+        index=pd.MultiIndex.from_tuples(
+            (
+                ('a', 1, 'x'),
+                ('a', 1, 'y'),
+                ('a', 2, 'y'),
+                ('a', 3, 'x'),
+                ('b', 2, 'z'),
+                ('b', 3, 'y'),
+                ('b', 3, 'z'),
+            ),
+            names=('grp', 'unit', 'op'),
+        ),
+    )
     testing.assert_frame_equal(output, expected)
 
   def test_one_level_column_and_no_splitby_melt(self):
@@ -103,173 +108,183 @@ class UtilsTest(absltest.TestCase):
   def test_one_level_not_value_column_and_no_splitby_unmelt(self):
     melted = pd.DataFrame({'Baz': [1, 2]}, index=['foo', 'bar'])
     melted.index.name = 'Metric'
-    expected = pd.DataFrame([[1, 2]],
-                            columns=pd.MultiIndex.from_product(
-                                [['foo', 'bar'], ['Baz']],
-                                names=['Metric', None]))
+    expected = pd.DataFrame(
+        [[1, 2]],
+        columns=pd.MultiIndex.from_product(
+            [['foo', 'bar'], ['Baz']], names=['Metric', None]
+        ),
+    )
     testing.assert_frame_equal(expected, utils.unmelt(melted))
 
   def test_one_level_column_and_single_splitby_melt(self):
     unmelted = pd.DataFrame(
-        data={
-            'foo': [0, 1],
-            'bar': [2, 3]
-        },
+        data={'foo': [0, 1], 'bar': [2, 3]},
         columns=['foo', 'bar'],
-        index=['B', 'A'])
+        index=['B', 'A'],
+    )
     unmelted.index.name = 'grp'
-    expected = pd.DataFrame({'Value': range(4)},
-                            index=pd.MultiIndex.from_product(
-                                (['foo', 'bar'], ['B', 'A']),
-                                names=['Metric', 'grp']))
+    expected = pd.DataFrame(
+        {'Value': range(4)},
+        index=pd.MultiIndex.from_product(
+            (['foo', 'bar'], ['B', 'A']), names=['Metric', 'grp']
+        ),
+    )
     expected.index.name = 'Metric'
     testing.assert_frame_equal(expected, utils.melt(unmelted))
 
   def test_one_level_column_and_single_splitby_unmelt(self):
     expected = pd.DataFrame(
-        data={
-            'foo': [0, 1],
-            'bar': [2, 3]
-        },
+        data={'foo': [0, 1], 'bar': [2, 3]},
         columns=['foo', 'bar'],
-        index=['B', 'A'])
+        index=['B', 'A'],
+    )
     expected.index.name = 'grp'
     expected.columns.name = 'Metric'
-    melted = pd.DataFrame({'Value': range(4)},
-                          index=pd.MultiIndex.from_product(
-                              (['foo', 'bar'], ['B', 'A']),
-                              names=['Metric', 'grp']))
+    melted = pd.DataFrame(
+        {'Value': range(4)},
+        index=pd.MultiIndex.from_product(
+            (['foo', 'bar'], ['B', 'A']), names=['Metric', 'grp']
+        ),
+    )
     melted.index.name = 'Metric'
     testing.assert_frame_equal(expected, utils.unmelt(melted))
 
   def test_one_level_column_and_multiple_splitby_melt(self):
     unmelted = pd.DataFrame(
-        data={
-            'foo': range(4),
-            'bar': range(4, 8)
-        },
+        data={'foo': range(4), 'bar': range(4, 8)},
         columns=['foo', 'bar'],
-        index=pd.MultiIndex.from_product((['B', 'A'], ['US', 'non-US']),
-                                         names=['grp', 'country']))
-    expected = pd.DataFrame({'Value': range(8)},
-                            index=pd.MultiIndex.from_product(
-                                (['foo', 'bar'], ['B', 'A'], ['US', 'non-US']),
-                                names=['Metric', 'grp', 'country']))
+        index=pd.MultiIndex.from_product(
+            (['B', 'A'], ['US', 'non-US']), names=['grp', 'country']
+        ),
+    )
+    expected = pd.DataFrame(
+        {'Value': range(8)},
+        index=pd.MultiIndex.from_product(
+            (['foo', 'bar'], ['B', 'A'], ['US', 'non-US']),
+            names=['Metric', 'grp', 'country'],
+        ),
+    )
     expected.index.name = 'Metric'
     testing.assert_frame_equal(expected, utils.melt(unmelted))
 
   def test_one_level_column_and_multiple_splitby_unmelt(self):
-    melted = pd.DataFrame({'Value': range(8)},
-                          index=pd.MultiIndex.from_product(
-                              (['foo', 'bar'], ['B', 'A'], ['US', 'non-US']),
-                              names=['Metric', 'grp', 'country']))
+    melted = pd.DataFrame(
+        {'Value': range(8)},
+        index=pd.MultiIndex.from_product(
+            (['foo', 'bar'], ['B', 'A'], ['US', 'non-US']),
+            names=['Metric', 'grp', 'country'],
+        ),
+    )
     expected = pd.DataFrame(
-        data={
-            'foo': range(4),
-            'bar': range(4, 8)
-        },
+        data={'foo': range(4), 'bar': range(4, 8)},
         columns=['foo', 'bar'],
-        index=pd.MultiIndex.from_product((['B', 'A'], ['US', 'non-US']),
-                                         names=['grp', 'country']))
+        index=pd.MultiIndex.from_product(
+            (['B', 'A'], ['US', 'non-US']), names=['grp', 'country']
+        ),
+    )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(expected, utils.unmelt(melted))
 
   def test_multiple_index_columns_and_no_splitby_melt(self):
-    unmelted = pd.DataFrame([[1, 2, 3, 4]],
-                            columns=pd.MultiIndex.from_product(
-                                (['foo', 'bar'], ['Value', 'SE'])))
+    unmelted = pd.DataFrame(
+        [[1, 2, 3, 4]],
+        columns=pd.MultiIndex.from_product((['foo', 'bar'], ['Value', 'SE'])),
+    )
     expected = pd.DataFrame(
-        data={
-            'Value': [1, 3],
-            'SE': [2, 4]
-        },
+        data={'Value': [1, 3], 'SE': [2, 4]},
         index=['foo', 'bar'],
-        columns=['Value', 'SE'])
+        columns=['Value', 'SE'],
+    )
     expected.index.name = 'Metric'
     testing.assert_frame_equal(expected, utils.melt(unmelted))
 
   def test_multiple_index_columns_and_no_splitby_unmelt(self):
     melted = pd.DataFrame(
-        data={
-            'Value': [1, 3],
-            'SE': [2, 4]
-        },
+        data={'Value': [1, 3], 'SE': [2, 4]},
         index=['foo', 'bar'],
-        columns=['Value', 'SE'])
+        columns=['Value', 'SE'],
+    )
     melted.index.name = 'Metric'
-    expected = pd.DataFrame([[1, 2, 3, 4]],
-                            columns=pd.MultiIndex.from_product(
-                                (['foo', 'bar'], ['Value', 'SE'])))
+    expected = pd.DataFrame(
+        [[1, 2, 3, 4]],
+        columns=pd.MultiIndex.from_product((['foo', 'bar'], ['Value', 'SE'])),
+    )
     expected.columns.names = ['Metric', None]
     testing.assert_frame_equal(expected, utils.unmelt(melted))
 
   def test_multiple_index_column_and_single_splitby_melt(self):
-    unmelted = pd.DataFrame([[1, 2, 3, 4], [5, 6, 7, 8]],
-                            columns=pd.MultiIndex.from_product(
-                                (['foo', 'bar'], ['Value', 'SE'])),
-                            index=['B', 'A'])
+    unmelted = pd.DataFrame(
+        [[1, 2, 3, 4], [5, 6, 7, 8]],
+        columns=pd.MultiIndex.from_product((['foo', 'bar'], ['Value', 'SE'])),
+        index=['B', 'A'],
+    )
     unmelted.index.name = 'grp'
     expected = pd.DataFrame(
-        data={
-            'Value': [1, 5, 3, 7],
-            'SE': [2, 6, 4, 8]
-        },
-        index=pd.MultiIndex.from_product((['foo', 'bar'], ['B', 'A']),
-                                         names=['Metric', 'grp']),
-        columns=['Value', 'SE'])
+        data={'Value': [1, 5, 3, 7], 'SE': [2, 6, 4, 8]},
+        index=pd.MultiIndex.from_product(
+            (['foo', 'bar'], ['B', 'A']), names=['Metric', 'grp']
+        ),
+        columns=['Value', 'SE'],
+    )
     testing.assert_frame_equal(expected, utils.melt(unmelted))
 
   def test_multiple_index_column_and_single_splitby_unmelt(self):
     melted = pd.DataFrame(
-        data={
-            'Value': [1, 5, 3, 7],
-            'SE': [2, 6, 4, 8]
-        },
-        index=pd.MultiIndex.from_product((['foo', 'bar'], ['B', 'A']),
-                                         names=['Metric', 'grp']),
-        columns=['Value', 'SE'])
-    expected = pd.DataFrame([[1, 2, 3, 4], [5, 6, 7, 8]],
-                            columns=pd.MultiIndex.from_product(
-                                (['foo', 'bar'], ['Value', 'SE'])),
-                            index=['B', 'A'])
+        data={'Value': [1, 5, 3, 7], 'SE': [2, 6, 4, 8]},
+        index=pd.MultiIndex.from_product(
+            (['foo', 'bar'], ['B', 'A']), names=['Metric', 'grp']
+        ),
+        columns=['Value', 'SE'],
+    )
+    expected = pd.DataFrame(
+        [[1, 2, 3, 4], [5, 6, 7, 8]],
+        columns=pd.MultiIndex.from_product((['foo', 'bar'], ['Value', 'SE'])),
+        index=['B', 'A'],
+    )
     expected.index.name = 'grp'
     expected.columns.names = ['Metric', None]
     testing.assert_frame_equal(expected, utils.unmelt(melted))
 
   def test_multiple_index_column_and_multiple_splitby_melt(self):
     unmelted = pd.DataFrame(
-        [range(4), range(4, 8),
-         range(8, 12), range(12, 16)],
+        [range(4), range(4, 8), range(8, 12), range(12, 16)],
         columns=pd.MultiIndex.from_product((['foo', 'bar'], ['Value', 'SE'])),
-        index=pd.MultiIndex.from_product((['B', 'A'], ['US', 'non-US']),
-                                         names=['grp', 'country']))
+        index=pd.MultiIndex.from_product(
+            (['B', 'A'], ['US', 'non-US']), names=['grp', 'country']
+        ),
+    )
     expected = pd.DataFrame(
         data={
             'Value': [0, 4, 8, 12, 2, 6, 10, 14],
-            'SE': [1, 5, 9, 13, 3, 7, 11, 15]
+            'SE': [1, 5, 9, 13, 3, 7, 11, 15],
         },
         index=pd.MultiIndex.from_product(
             (['foo', 'bar'], ['B', 'A'], ['US', 'non-US']),
-            names=['Metric', 'grp', 'country']),
-        columns=['Value', 'SE'])
+            names=['Metric', 'grp', 'country'],
+        ),
+        columns=['Value', 'SE'],
+    )
     testing.assert_frame_equal(expected, utils.melt(unmelted))
 
   def test_multiple_index_column_and_multiple_splitby_unmelt(self):
     melted = pd.DataFrame(
         data={
             'Value': [0, 4, 8, 12, 2, 6, 10, 14],
-            'SE': [1, 5, 9, 13, 3, 7, 11, 15]
+            'SE': [1, 5, 9, 13, 3, 7, 11, 15],
         },
         index=pd.MultiIndex.from_product(
             (['foo', 'bar'], ['B', 'A'], ['US', 'non-US']),
-            names=['Metric', 'grp', 'country']),
-        columns=['Value', 'SE'])
+            names=['Metric', 'grp', 'country'],
+        ),
+        columns=['Value', 'SE'],
+    )
     expected = pd.DataFrame(
-        [range(4), range(4, 8),
-         range(8, 12), range(12, 16)],
+        [range(4), range(4, 8), range(8, 12), range(12, 16)],
         columns=pd.MultiIndex.from_product((['foo', 'bar'], ['Value', 'SE'])),
-        index=pd.MultiIndex.from_product((['B', 'A'], ['US', 'non-US']),
-                                         names=['grp', 'country']))
+        index=pd.MultiIndex.from_product(
+            (['B', 'A'], ['US', 'non-US']), names=['grp', 'country']
+        ),
+    )
     expected.columns.names = ['Metric', None]
     testing.assert_frame_equal(expected, utils.unmelt(melted))
 
@@ -287,29 +302,6 @@ class UtilsTest(absltest.TestCase):
     expected = df.droplevel(0)
     actual = utils.remove_empty_level(df)
     testing.assert_frame_equal(expected, actual)
-
-  def test_get_extra_idx(self):
-    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
-    ab = operations.AbsoluteChange('foo', 'f', metrics.Sum('c'))
-    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
-    self.assertEqual(utils.get_extra_idx(m), ('foo',))
-
-  def test_get_extra_idx_return_superset(self):
-    s = metrics.Sum('x')
-    m = metrics.MetricList((
-        operations.AbsoluteChange('g', 0, s),
-        operations.AbsoluteChange('g2', 1, s),
-    ))
-    actual = utils.get_extra_idx(m, True)
-    self.assertEqual(set(actual), set(('g', 'g2')))
-
-  def test_get_extra_idx_raises(self):
-    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
-    ab = operations.AbsoluteChange('baz', 'f', metrics.Sum('c'))
-    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
-    with self.assertRaises(ValueError) as cm:
-      utils.get_extra_idx(m)
-    self.assertEqual(str(cm.exception), 'Incompatible indexes!')
 
   def test_get_extra_split_by(self):
     mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
@@ -352,11 +344,9 @@ class UtilsTest(absltest.TestCase):
     expected = metrics.Sum('meterstick_tmp:(x * y)')
     expected.where = 'a'
     expected.name = 'foo'
-    expected_df = pd.DataFrame({
-        'x': [1, 2],
-        'y': [2, 3],
-        'meterstick_tmp:(x * y)': [2, 6]
-    })
+    expected_df = pd.DataFrame(
+        {'x': [1, 2], 'y': [2, 3], 'meterstick_tmp:(x * y)': [2, 6]}
+    )
     self.assertEqual(output, expected)
     testing.assert_frame_equal(df, expected_df)
 
@@ -423,6 +413,60 @@ class UtilsTest(absltest.TestCase):
     output = utils.get_leaf_metrics(m, True)
     expected = [metrics.Sum('x'), metrics.Sum('y'), metrics.Sum('c'), 1]
     self.assertEqual(output, expected)
+
+  def test_get_x_t_x_and_x_t_y_cols_one_x(self):
+    xs = ['a']
+    y = 'y'
+    actual = utils.get_x_t_x_and_x_t_y_cols(xs, y, 'foo_')
+    x_t_x = sql.Columns([
+        sql.Column('AVG(a)', alias='foo_x0'),
+        sql.Column('AVG(a * a)', alias='foo_x0x0'),
+    ])
+    x_t_y = sql.Columns([
+        sql.Column('AVG(y)', alias='foo_y'),
+        sql.Column('AVG(a * y)', alias='foo_x0y'),
+    ])
+    self.assertEqual(sql.Columns(actual[0]), x_t_x)
+    self.assertEqual(sql.Columns(actual[1]), x_t_y)
+
+  def test_get_x_t_x_and_x_t_y_cols_multiple_xs(self):
+    xs = ['a', 'b']
+    y = 'y'
+    actual = utils.get_x_t_x_and_x_t_y_cols(xs, y)
+    x_t_x = sql.Columns([
+        sql.Column('AVG(a)', alias='x0'),
+        sql.Column('AVG(b)', alias='x1'),
+        sql.Column('AVG(a * a)', alias='x0x0'),
+        sql.Column('AVG(a * b)', alias='x0x1'),
+        sql.Column('AVG(b * b)', alias='x1x1'),
+    ])
+    x_t_y = sql.Columns([
+        sql.Column('AVG(y)', alias='y'),
+        sql.Column('AVG(a * y)', alias='x0y'),
+        sql.Column('AVG(b * y)', alias='x1y'),
+    ])
+    self.assertEqual(sql.Columns(actual[0]), x_t_x)
+    self.assertEqual(sql.Columns(actual[1]), x_t_y)
+
+  def test_get_x_t_x_and_x_t_y_cols_no_intercept(self):
+    xs = ['a']
+    y = 'y'
+    actual = utils.get_x_t_x_and_x_t_y_cols(xs, y, fit_intercept=False)
+    x_t_x = sql.Columns([sql.Column('AVG(a * a)', alias='x0x0')])
+    x_t_y = sql.Columns([sql.Column('AVG(a * y)', alias='x0y')])
+    self.assertEqual(sql.Columns(actual[0]), x_t_x)
+    self.assertEqual(sql.Columns(actual[1]), x_t_y)
+
+  def test_get_x_t_x_and_x_t_y_cols_normalize(self):
+    xs = ['a']
+    y = 'y'
+    actual = utils.get_x_t_x_and_x_t_y_cols(xs, y, normalize=True)
+    x_t_x = sql.Columns([sql.Column('AVG(a * a)', alias='x0x0')])
+    x_t_y = sql.Columns(
+        [sql.Column('AVG(y)', alias='y'), sql.Column('AVG(a * y)', alias='x0y')]
+    )
+    self.assertEqual(sql.Columns(actual[0]), x_t_x)
+    self.assertEqual(sql.Columns(actual[1]), x_t_y)
 
 
 if __name__ == '__main__':
