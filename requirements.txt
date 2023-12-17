@@ -3,5 +3,6 @@ six
 numpy>=2.0.0
 scipy>=1.9.3
 sklearn>=1.6.1
+sympy>=1.12
 pandas>=2.2.2
 pydot>=1.4.2

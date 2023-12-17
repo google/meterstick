@@ -374,7 +374,7 @@ class CumulativeDistribution(Distribution):
     child_table = sql.Datasource(dist_sql, 'CumulativeDistributionRaw')
     child_table_alias = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
-    order = list(utils.get_extra_idx(self))
+    order = list(self.get_extra_idx())
     order = [
         sql.Column(self.get_ordered_col(sql.Column(o).alias), auto_alias=False)
         for o in order
@@ -521,23 +521,28 @@ class Comparison(Operation):
     sql_template_for_comparison = self.get_sql_template_for_comparison(
         raw_table_alias, base_table_alias
     )
-    columns = sql.Columns()
-    val_col_len = len(raw_table_sql.all_columns) - len(indexes)
+    columns = []
     for r, b in zip(
-        raw_table_sql.all_columns[-val_col_len:],
-        base_value.columns[-val_col_len:],
+        raw_table_sql.all_columns[::-1],
+        base_value.columns[::-1],
     ):
+      if r.alias in sql.Columns(utils.get_extra_split_by(self)).aliases:
+        break
       col = sql.Column(
           sql_template_for_comparison % {'r': r.alias, 'b': b.alias},
           alias=self.name_tmpl.format(r.alias_raw),
       )
-      columns.add(col)
+      columns = [col] + columns
     using = indexes.difference(cond_cols)
     join = '' if using else 'CROSS'
-    return sql.Sql(
-        sql.Columns(indexes.aliases).add(columns),
-        sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
-        cond), with_data
+    return (
+        sql.Sql(
+            sql.Columns(indexes.aliases).add(columns),
+            sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
+            cond,
+        ),
+        with_data,
+    )
 
   def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
