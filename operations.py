@@ -30,6 +30,31 @@ import pandas as pd
 from scipy import stats
 
 
+def count_features(m: metrics.Metric):
+  """Gets the width of the result of m.compute_on()."""
+  if not m:
+    return 0
+  if isinstance(m, metrics.MetricList):
+    return sum([count_features(i) for i in m])
+  if isinstance(m, MetricWithCI):
+    return (
+        count_features(m.children[0]) * 3
+        if m.confidence
+        else count_features(m.children[0]) * 2
+    )
+  if isinstance(m, (CUPED, PrePostChange)):
+    return count_features(m.children[0][0])
+  if isinstance(m, Operation):
+    return count_features(m.children[0])
+  if isinstance(m, metrics.CompositeMetric):
+    return max([count_features(i) for i in m.children])
+  if isinstance(m, metrics.Quantile):
+    if m.one_quantile:
+      return 1
+    return len(m.quantile)
+  return 1
+
+
 class Operation(metrics.Metric):
   """A special kind of Metric that operates on other Metric instance(s).
 
@@ -349,7 +374,7 @@ class CumulativeDistribution(Distribution):
     child_table = sql.Datasource(dist_sql, 'CumulativeDistributionRaw')
     child_table_alias = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
-    order = list(utils.get_extra_idx(self))
+    order = list(self.get_extra_idx())
     order = [
         sql.Column(self.get_ordered_col(sql.Column(o).alias), auto_alias=False)
         for o in order
@@ -464,15 +489,10 @@ class Comparison(Operation):
     """
     if not isinstance(self, (PercentChange, AbsoluteChange)):
       raise ValueError('Not a PercentChange nor AbsoluteChange!')
-    local_filter = (
-        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    cond_cols = sql.Columns(self.extra_index)
+    raw_table_sql, with_data = self.get_change_raw_sql(
+        table, split_by, global_filter, indexes, local_filter, with_data
     )
-
-    child = self.children[0]
-    cond_cols = sql.Columns(self.extra_split_by)
-    groupby = sql.Columns(split_by).add(cond_cols)
-    raw_table_sql, with_data = child.get_sql_and_with_clause(
-        table, groupby, global_filter, indexes, local_filter, with_data)
     raw_table = sql.Datasource(raw_table_sql, 'ChangeRaw')
     raw_table_alias = with_data.merge(raw_table)
 
@@ -499,23 +519,41 @@ class Comparison(Operation):
           )
           + ' * 100 - 100'
       )
-    columns = sql.Columns()
-    val_col_len = len(raw_table_sql.all_columns) - len(indexes)
+    columns = []
     for r, b in zip(
-        raw_table_sql.all_columns[-val_col_len:],
-        base_value.columns[-val_col_len:],
+        raw_table_sql.all_columns[::-1],
+        base_value.columns[::-1],
     ):
+      if r.alias in sql.Columns(utils.get_extra_split_by(self)).aliases:
+        break
       col = sql.Column(
           col_tmp % {'r': r.alias, 'b': b.alias},
           alias=self.name_tmpl.format(r.alias_raw),
       )
-      columns.add(col)
+      columns = [col] + columns
     using = indexes.difference(cond_cols)
     join = '' if using else 'CROSS'
-    return sql.Sql(
-        sql.Columns(indexes.aliases).add(columns),
-        sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
-        cond), with_data
+    return (
+        sql.Sql(
+            sql.Columns(indexes.aliases).add(columns),
+            sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
+            cond,
+        ),
+        with_data,
+    )
+
+  def get_change_raw_sql(
+      self, table, split_by, global_filter, indexes, local_filter, with_data
+  ):
+    """Gets the query where the comparison will be carried out."""
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    groupby = sql.Columns(split_by).add(self.extra_split_by)
+    raw_table_sql, with_data = self.children[0].get_sql_and_with_clause(
+        table, groupby, global_filter, indexes, local_filter, with_data
+    )
+    return raw_table_sql, with_data
 
 
 class PercentChange(Comparison):
@@ -715,6 +753,30 @@ class PrePostChange(PercentChange):
     # 1. It's faster. See the comments in Metric.compute_slices().
     # 2. It ensures that the result is formatted correctly.
     class Adjust(metrics.Metric):
+      """Adjusts the value by fitting controlling for the covariates.
+
+      See the class doc for adjustment details. Essentially for every slice for
+      comparison, we fit a linear regression child = c + k * covariate and use c
+      as the adjusted value for PercentChange computation later.
+      Because we center covariate first, when there is only one covariate, k can
+      be computed as Covariance(child, covariate) / Var(covariate, covariate)
+      and c = avg(child) - k * avg(covariate).
+      """
+
+      def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+        child = df.iloc[:, :len_child]
+        cov = df.iloc[:, len_child:]
+        if len(cov.columns) > 1:
+          return super(Adjust, self).compute_slices(df, split_by)
+        adjusted = df.groupby(split_by, observed=True).mean()
+        cov_col = cov.columns[0]
+        cov_adjusted = adjusted.iloc[:, -1]
+        for c in child:
+          theta = (
+              metrics.Cov(c, cov_col) / metrics.Variance(cov_col)
+          ).compute_on(df, split_by, return_dataframe=False)
+          adjusted[c] = adjusted[c] - cov_adjusted * theta
+        return adjusted.iloc[:, :len_child]
 
       def compute(self, df_slice):
         child_slice = df_slice.iloc[:, :len_child]
@@ -731,10 +793,96 @@ class PrePostChange(PercentChange):
     child = child.iloc[:, :1]
     return self.adjust_value(child, covariates, split_by)
 
-  def get_sql_and_with_clause(
+  def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
   ):
-    raise NotImplementedError
+    """Generates PrePost-adjusted values for PercentChange computation.
+
+    This function generats subquries like
+    WITH PrePostRaw AS (SELECT
+      split_by,
+      stratified_by,
+      condition_column,
+      child_metric,
+      covariate
+    FROM T
+    GROUP BY split_by, stratified_by, condition_column),
+    PrePostcovariateCentered AS (SELECT
+      split_by,
+      stratified_by,
+      condition_column,
+      child_metric,
+      covariate - AVG(covariate) OVER (PARTITION BY split_by) AS covariate
+    FROM PrePostRaw),
+    ChangeRaw AS (SELECT
+      split_by,
+      condition_column,
+      AVG(child_metric) - SAFE_DIVIDE(AVG(covariate) * COVAR_SAMP(child_metric,
+        covariate), VAR_SAMP(covariate)) AS child_metric
+    FROM PrePostcovariateCentered
+    GROUP BY split_by, condition_column)
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    if count_features(self.children[0][1]) > 1:
+      raise NotImplementedError
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    all_split_by = sql.Columns(split_by).add(self.extra_split_by)
+    all_indexes = sql.Columns(split_by).add(self.extra_index)
+    child_sql, with_data = self.children[0].get_sql_and_with_clause(
+        table, all_split_by, global_filter, indexes, local_filter, with_data)
+    child_table = sql.Datasource(child_sql, 'PrePostRaw')
+    child_table_alias = with_data.merge(child_table)
+
+    split_by = split_by.aliases
+    all_split_by = all_split_by.aliases
+    all_indexes = all_indexes.aliases
+    cols = [
+        sql.Column(c.alias, alias=c.alias_raw)
+        for c in child_sql.all_columns[:-1]
+    ]
+    covariate = child_sql.all_columns[-1].alias
+    covariate_mean = sql.Column(covariate, 'AVG({})', partition=split_by)
+    covariate_centered = (sql.Column(covariate) - covariate_mean).set_alias(
+        covariate
+    )
+    cols.append(covariate_centered)
+    covariate_centered_sql = sql.Sql(cols, child_table_alias)
+    covariate_centered_table = sql.Datasource(
+        covariate_centered_sql, 'PrePostcovariateCentered'
+    )
+    covariate_centered_table_alias = with_data.merge(covariate_centered_table)
+
+    to_adjust = []
+    for c in child_sql.all_columns[:-1]:
+      if c.alias in all_split_by:
+        continue
+      adjusted = metrics.Mean(c.alias) - metrics.Mean(covariate) * metrics.Cov(
+          c.alias, covariate
+      ) / metrics.Variance(covariate)
+      to_adjust.append(adjusted.set_name(c.alias_raw))
+    return metrics.MetricList(to_adjust).get_sql_and_with_clause(
+        covariate_centered_table_alias,
+        all_indexes,
+        None,
+        all_indexes,
+        None,
+        with_data,
+    )
 
 
 class CUPED(AbsoluteChange):
@@ -742,7 +890,7 @@ class CUPED(AbsoluteChange):
 
   Computes the absolute change after controlling for preperiod metrics.
   Essentially, if the data only has a baseline and a treatment slice, CUPED
-  1. centers the covariates
+  1. centers the covariates (we skip it because it doesn't affect the result).
   2. fit child ~ intercept + covariate.
   And the intercept is the adjusted effect and has a smaller variance than
   child. See https://exp-platform.com/cuped for more details.
@@ -758,8 +906,7 @@ class CUPED(AbsoluteChange):
     children: A MetricList whose first element is the Metric we want to compute
       change on and the rest is the covariates for adjustment.
     include_base: A boolean for whether the baseline condition should be
-      included in the output.
-    And all other attributes inherited from Operation.
+      included in the output. And all other attributes inherited from Operation.
   """
 
   def __init__(self,
@@ -814,15 +961,6 @@ class CUPED(AbsoluteChange):
       The adjusted values of the child (post metrics).
     """
     from sklearn import linear_model  # pylint: disable=g-import-not-at-top
-    # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
-    # has different implementations for __sub__ and __isub__. ___isub__ tries
-    # to reindex to update in place which sometimes lead to lots of NAs.
-    if split_by:
-      covariates = (
-          covariates - covariates.groupby(split_by, observed=True).mean()
-      )
-    else:
-      covariates = covariates - covariates.mean()
     # Align child with covariates in case there is any missing slices.
     covariates = covariates.reorder_levels(child.index.names)
     aligned = pd.concat([child, covariates], axis=1)
@@ -834,12 +972,34 @@ class CUPED(AbsoluteChange):
     # 1. It's faster. See the comments in Metric.compute_slices().
     # 2. It ensures that the result is formatted correctly.
     class Adjust(metrics.Metric):
+      """Adjusts the value by fitting controlling for the covariates.
+
+      Essentially we fit a linear regression child = c + θ * covariate.
+      and use child - θ * covariate as the adjusted value. When there is only
+      one covariate, θ can be computed as
+      Covariance(child, covariate) / Var(covariate, covariate)
+      """
+
+      def compute_slices(self, df, split_by: Optional[List[Text]] = None):
+        child = df.iloc[:, :len_child]
+        cov = df.iloc[:, len_child:]
+        if len(cov.columns) > 1:
+          return super(Adjust, self).compute_slices(df, split_by)
+        adjusted = df.groupby(split_by + extra_index, observed=True).mean()
+        cov_col = cov.columns[0]
+        cov_adjusted = adjusted.iloc[:, -1]
+        for c in child:
+          theta = (
+              metrics.Cov(c, cov_col) / metrics.Variance(cov_col)
+          ).compute_on(df, split_by, return_dataframe=False)
+          adjusted[c] = adjusted[c] - cov_adjusted * theta
+        return adjusted.iloc[:, :len_child]
 
       def compute(self, df_slice):
         child_slice = df_slice.iloc[:, :len_child]
         cov = df_slice.iloc[:, len_child:]
         adjusted = df_slice.groupby(extra_index, observed=True).mean()
-        for c in aligned.iloc[:, :len_child]:
+        for c in child_slice:
           theta = lm.fit(cov, child_slice[c]).coef_
           adjusted[c] = adjusted[c] - adjusted.iloc[:, len_child:].dot(theta)
         return adjusted.iloc[:, :len_child]
@@ -853,10 +1013,102 @@ class CUPED(AbsoluteChange):
     child = child.iloc[:, :1]
     return self.adjust_value(child, covariates, split_by)
 
-  def get_sql_and_with_clause(
+  def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
   ):
-    raise NotImplementedError
+    """Generates CUPED-adjusted values for AbsoluteChange computation.
+
+    This function generats subquries like
+    WITH CUPEDRaw AS (SELECT
+      split_by,
+      stratified_by,
+      condition_column,
+      child_metric,
+      covariate
+    FROM T
+    GROUP BY split_by, stratified_by, condition_column),
+    CUPEDTheta AS (SELECT
+      split_by,
+      SAFE_DIVIDE(COVAR_SAMP(child_metric, covariate), VAR_SAMP(covariate))
+        AS child_metric_theta
+    FROM CUPEDRaw
+    GROUP BY split_by),
+    ChangeRaw AS (SELECT
+      split_by,
+      condition_column,
+      AVG(child_metric) - AVG(child_metric_theta * covariate) AS child_metric
+    FROM CUPEDRaw
+    FULL JOIN
+    CUPEDTheta
+    USING (split_by)
+    GROUP BY split_by, condition_column)
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    if count_features(self.children[0][1]) > 1:
+      raise NotImplementedError
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    all_split_by = sql.Columns(split_by).add(self.extra_split_by)
+    all_indexes = sql.Columns(split_by).add(self.extra_index)
+    child_sql, with_data = self.children[0].get_sql_and_with_clause(
+        table, all_split_by, global_filter, indexes, local_filter, with_data)
+    child_table = sql.Datasource(child_sql, 'CUPEDRaw')
+    child_table_alias = with_data.merge(child_table)
+
+    split_by = split_by.aliases
+    all_split_by = all_split_by.aliases
+    all_indexes = all_indexes.aliases
+    cols = []
+    for c in child_sql.columns:
+      if c.alias not in all_split_by:
+        cols.append(c)
+    covariate = cols.pop().alias
+    theta = metrics.MetricList(
+        [
+            (
+                metrics.Cov(c.alias, covariate) / metrics.Variance(covariate)
+            ).set_name(f'{c.alias}_theta')
+            for c in cols
+        ]
+    )
+    theta_sql, with_data = theta.get_sql_and_with_clause(
+        child_table_alias, split_by, None, all_indexes, None, with_data
+    )
+    theta_table = sql.Datasource(theta_sql, 'CUPEDTheta')
+    theta_table_alias = with_data.merge(theta_table)
+
+    to_adjust = sql.Columns(
+        [
+            (
+                sql.Column(c.alias, 'AVG({})')
+                - sql.Column((c.alias, covariate), 'AVG({}_theta * {})')
+            ).set_alias(c.alias_raw)
+            for c in cols
+        ]
+    )
+    join = 'FULL' if split_by else 'CROSS'
+    adjusted_sql = sql.Sql(
+        to_adjust,
+        sql.Join(
+            child_table_alias, theta_table_alias, using=split_by, join=join
+        ),
+        groupby=all_indexes,
+    )
+    return adjusted_sql, with_data
 
 
 class MH(Comparison):
@@ -1896,6 +2148,8 @@ class MetricWithCI(Operation):
       ):
         has_base_vals = True
         base_metric = copy.deepcopy(child.children[0])
+        if isinstance(child, (CUPED, PrePostChange)):
+          base_metric = base_metric[0]
         if child.where:
           base_metric.add_where(child.where_)
         base, with_data = base_metric.get_sql_and_with_clause(
