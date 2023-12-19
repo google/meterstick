@@ -56,6 +56,40 @@ class ModelsTest(parameterized.TestCase):
         ])
     pd.testing.assert_frame_equal(output, expected)
 
+  def test_model_on_operations(self, model, sklearn_model, name):
+    del name  # unused
+    s = metrics.Ratio('X1', 'Y')
+    s2 = metrics.Sum('Y')
+    pct = operations.PercentChange('grp1', 'A', s, include_base=True)
+    ab = operations.AbsoluteChange('grp1', 'A', s, include_base=True)
+    mh = operations.MH('grp1', 'A', 'grp2', s, include_base=True)
+    prepost = operations.PrePostChange(
+        'grp1', 'A', s, s2, 'grp2', include_base=True
+    )
+    cuped = operations.CUPED('grp1', 'A', s, s2, 'grp2', include_base=True)
+    all_changes = metrics.MetricList((pct, ab, mh, prepost, cuped))
+    m1 = model(pct, [ab, mh, prepost, cuped], name='foo')
+    m2 = model(name='foo')(all_changes)
+
+    output1 = m1.compute_on(DF)
+    output2 = m2.compute_on(DF)
+
+    data_to_fit = all_changes.compute_on(DF)
+    model = sklearn_model().fit(data_to_fit.iloc[:, 1:], data_to_fit.iloc[:, 0])
+    expected = pd.DataFrame([[model.intercept_] + list(model.coef_)])
+    expected.columns = ['foo Coefficient: intercept'] + [
+        f'foo Coefficient: sum(X1) / sum(Y) {c}'
+        for c in (
+            'Absolute Change',
+            'MH Ratio',
+            'PrePost Percent Change',
+            'CUPED Change',
+        )
+    ]
+
+    pd.testing.assert_frame_equal(output1, expected)
+    pd.testing.assert_frame_equal(output2, expected)
+
   def test_melted(self, model, sklearn_model, name):
     del sklearn_model, name  # unused
     m = model(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1')
@@ -335,28 +369,45 @@ class MiscellaneousTests(parameterized.TestCase):
 
   def test_count_features(self):
     s = metrics.Sum('x')
-    self.assertEqual(models.count_features(metrics.Sum('x')), 1)
-    self.assertEqual(models.count_features(metrics.MetricList([s, s])), 2)
+    self.assertEqual(operations.count_features(metrics.Sum('x')), 1)
+    self.assertEqual(operations.count_features(metrics.MetricList([s, s])), 2)
     self.assertEqual(
-        models.count_features(
-            metrics.MetricList([metrics.Sum('x'),
-                                metrics.MetricList([s])])), 2)
+        operations.count_features(
+            metrics.MetricList([metrics.Sum('x'), metrics.MetricList([s])])
+        ),
+        2,
+    )
     self.assertEqual(
-        models.count_features(operations.AbsoluteChange('a', 'b', s)), 1)
+        operations.count_features(operations.AbsoluteChange('a', 'b', s)), 1
+    )
     self.assertEqual(
-        models.count_features(
+        operations.count_features(
             operations.AbsoluteChange(
-                'a', 'b', metrics.MetricList([s, metrics.MetricList([s])]))), 2)
+                'a', 'b', metrics.MetricList([s, metrics.MetricList([s])])
+            )
+        ),
+        2,
+    )
     self.assertEqual(
-        models.count_features(
+        operations.count_features(
             operations.AbsoluteChange(
-                'a', 'b',
-                metrics.MetricList([
-                    operations.AbsoluteChange('a', 'b',
-                                              metrics.MetricList([s, s]))
-                ]))), 2)
-    self.assertEqual(models.count_features(metrics.Ratio('x', 'y')), 1)
-    self.assertEqual(models.count_features(metrics.MetricList([s, s]) / 2), 2)
+                'a',
+                'b',
+                metrics.MetricList(
+                    [
+                        operations.AbsoluteChange(
+                            'a', 'b', metrics.MetricList([s, s])
+                        )
+                    ]
+                ),
+            )
+        ),
+        2,
+    )
+    self.assertEqual(operations.count_features(metrics.Ratio('x', 'y')), 1)
+    self.assertEqual(
+        operations.count_features(metrics.MetricList([s, s]) / 2), 2
+    )
 
   def test_symmetrize_triangular(self):
     actual = models.symmetrize_triangular([1, 2, 3, 4, 5, 6])
