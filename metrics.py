@@ -1972,7 +1972,8 @@ class Nth(SimpleMetric):
       df = df.dropna(subset=[self.var])
     df = df.sort_values(self.sort_by, ascending=self.ascending)
     if split_by:
-      return self.group(df, split_by)[self.var].nth(self.n)
+      res = self.group(df[split_by + [self.var]], split_by).nth(self.n)
+      return res.set_index(split_by)[self.var].sort_index()
     if self.n > len(df) - 1:
       return np.nan
     return df[self.var].values[self.n]

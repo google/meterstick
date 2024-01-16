@@ -3,5 +3,5 @@ six
 numpy>=1.25
 scipy>=1.9.3
 sklearn>=1.0.2
-pandas>=1.5.3
+pandas>=2.0.3
 pydot>=1.4.2
