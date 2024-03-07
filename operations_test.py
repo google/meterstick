@@ -160,6 +160,17 @@ class SimpleOperationTests(absltest.TestCase):
     expected.index.name = 'grp'
     testing.assert_frame_equal(output, expected)
 
+  def test_percent_change_object_dtype_divide_by_zero(self):
+    df = pd.DataFrame({'x': [0, 1], 'grp': [1, 2]}).astype(object)
+    m = operations.PercentChange('grp', 1, metrics.Sum('x'))
+    output = m.compute_on(df)
+    expected = pd.DataFrame(
+        {'sum(x) Percent Change': [np.inf]},
+        index=[2],
+    )
+    expected.index.name = 'grp'
+    testing.assert_frame_equal(output, expected)
+
   def test_absolute_change(self):
     metric = operations.AbsoluteChange('grp', 'B', metrics.Sum('x'))
     output = metric.compute_on(self.df)

@@ -548,6 +548,8 @@ class PercentChange(Comparison):
     if split_by:
       level = self.extra_index[0] if len(
           self.extra_index) == 1 else self.extra_index
+    # Avoid ZeroDivisionError when input is object dytpe.
+    children = children.astype(float)
     res = (children / children.xs(self.baseline_key, level=level) - 1) * 100
     if len(children.index.names) > 1:  # xs might mess up the level order.
       res = res.reorder_levels(children.index.names)
