@@ -50,26 +50,26 @@ A Meterstick analysis begins with one or more metrics.
 
 Currently built-in metrics include:
 
-+   `Count(variable)`: calculates the number of (non-null) entries of `variable`
-+   `Sum(variable)` : calculates the sum of `variable`
-+   `Mean(variable)`: calculates the mean of `variable`
-+   `Max(variable)`: calculates the max of `variable`
-+   `Min(variable)`: calculates the min of `variable`
-+   `Ratio(numerator, denominator)` : calculates `Sum(numerator) /
-    Sum(denominator)`.
-+   `Quantile(variable, quantile(s))`: calculates the `quantile(s)` quantile for
-    `variable`.
++   `Count(variable)`: calculates the number of (non-null) entries of the
+    `variable` column.
++   `Sum(variable)` : calculates the sum of the `variable` column.
++   `Dot(variable1, variable2, normalize=False)`: calculates the dot product
+    between the `variable1` column and the `variable2` column; `normalize`
+    determines whether to normalize the dot product using the length.
++   `Max(variable)`: calculates the max of the `variable` column.
++   `Min(variable)`: calculates the min of the `variable` column.
++   `Ratio(numerator, denominator)` : calculates `Sum(numerator) / Sum(denominator)`.
 +   `Nth(variable, n, sort_by, ascending=True, dropna=False)` computes the `n`th
-    value (0-based indexing) after sorting by `sort_by`.
-+   `Variance(variable, unbiased=True)`: calculates the variance of `variable`;
-    `unbiased` determines whether the unbiased (sample) or population estimate
-    is used.
+    value (0-based indexing) in the `variable` column after sorting by the `sort_by` column.
++   `Variance(variable, unbiased=True)`: calculates the variance of the
+    `variable` column `unbiased` determines whether the unbiased (sample) or
+    population estimate is used.
 +   `StandardDeviation(variable, unbiased=True)`: calculates the standard
     deviations of `variable`; `unbiased` determines whether the unbiased or MLE
     estimate is used.
 +   `CV(variable, unbiased=True)`: calculates the coefficient of variation of
-    `variable`; `unbiased` determines whether the unbiased or MLE estimate of
-    the standard deviation is used.
+    the `variable` column; `unbiased` determines whether the unbiased or MLE
+    estimate of the standard deviation is used.
 +   `Correlation(variable1, variable2)`: calculates the Pearson correlation
     between `variable1` and `variable2`.
 +   `Cov(variable1, variable2)`: calculates the covariance between `variable1`
