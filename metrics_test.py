@@ -346,6 +346,12 @@ class TestMetricsMiscellaneous(absltest.TestCase):
     expected = pd.DataFrame({'Y-weighted quantile(X, 0.5)': [1.25]})
     testing.assert_frame_equal(output, expected)
 
+  def test_weighted_quantile_na_dropped(self):
+    df = pd.DataFrame({'X': [1, 2, np.nan, 3], 'Y': [3, 1, 2, np.nan]})
+    metric = metrics.Quantile('X', weight='Y')
+    output = metric.compute_on(df, return_dataframe=False)
+    self.assertEqual(output, 1.25)
+
   def test_weighted_quantile_multiple_quantiles_split_by(self):
     df = pd.DataFrame({
         'X': [0, 1, 2, 1, 2, 3],

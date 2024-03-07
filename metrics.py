@@ -2059,9 +2059,10 @@ class Quantile(SimpleMetric):
   """Quantile estimator.
 
   Attributes:
-    var: Column to compute on.
+    var: Column to compute on. NA values will be dropped.
     quantile: Same as the arg "q" in np.quantile().
     weight: The column of weights. If specified, we always return a DataFrame.
+      Weights that are NA will be dropped.
     interpolation: As the same arg in pd.Series.quantile(). No effect if
       'weight' is specified.
     one_quantile: If quantile is a number or an iterable.
@@ -2170,6 +2171,7 @@ class Quantile(SimpleMetric):
         val,
         SUM(weight) AS weight
       FROM T
+      WHERE val IS NOT NULL AND weight IS NOT NULL
       GROUP BY split_by, val),
       QuantileWeights AS (SELECT
         split_by,
@@ -2225,7 +2227,14 @@ class Quantile(SimpleMetric):
         self.weight, 'SUM({})', filters=local_filter, alias=self.weight
     )
     cols = sql.Columns(split_by_and_value).add(weight)
-    deduped_weight_sql = sql.Sql(cols, table, global_filter, split_by_and_value)
+    deduped_weight_sql = sql.Sql(
+        cols,
+        table,
+        sql.Filters(global_filter).add(
+            (f'{self.var} IS NOT NULL', f'{self.weight} IS NOT NULL')
+        ),
+        split_by_and_value,
+    )
     deduped_weight_alias = with_data.merge(
         sql.Datasource(deduped_weight_sql, 'AggregatedQuantileWeights')
     )
