@@ -71,8 +71,10 @@ class Model(operations.Operation):
     """
     if y and not isinstance(y, metrics.Metric):
       raise ValueError('y must be a Metric!')
-    if y and count_features(y) != 1:
-      raise ValueError('y must be a 1D array but is %iD!' % count_features(y))
+    if y and operations.count_features(y) != 1:
+      raise ValueError(
+          'y must be a 1D array but is %iD!' % operations.count_features(y)
+      )
     self.group_by = [group_by] if isinstance(group_by, str) else group_by or []
     if isinstance(x, Sequence):
       x = metrics.MetricList(x)
@@ -82,7 +84,7 @@ class Model(operations.Operation):
       self.y = y
       child = metrics.MetricList((y, x))
     self.model = model
-    self.k = count_features(x)
+    self.k = operations.count_features(x)
     self.model_name = model_name
     if not name and x and y:
       x_names = (
@@ -159,7 +161,7 @@ class Model(operations.Operation):
     model = super(Model, self).__call__(child)
     model.y = child[0]
     model.x = metrics.MetricList(child[1:])
-    model.k = count_features(model.x)
+    model.k = operations.count_features(model.x)
     x_names = [m.name for m in model.x]
     model.name = '%s(%s ~ %s)' % (
         model.model_name,
@@ -168,31 +170,6 @@ class Model(operations.Operation):
     )
     model.name_tmpl = model.name + ' Coefficient: {}'
     return model
-
-
-def count_features(m: metrics.Metric):
-  """Gets the width of the result of m.compute_on()."""
-  if not m:
-    return 0
-  if isinstance(m, Model):
-    return m.k
-  if isinstance(m, metrics.MetricList):
-    return sum([count_features(i) for i in m])
-  if isinstance(m, operations.MetricWithCI):
-    return (
-        count_features(m.children[0]) * 3
-        if m.confidence
-        else count_features(m.children[0]) * 2
-    )
-  if isinstance(m, operations.Operation):
-    return count_features(m.children[0])
-  if isinstance(m, metrics.CompositeMetric):
-    return max([count_features(i) for i in m.children])
-  if isinstance(m, metrics.Quantile):
-    if m.one_quantile:
-      return 1
-    return len(m.quantile)
-  return 1
 
 
 class LinearRegression(Model):
