@@ -3351,12 +3351,13 @@ def get_jackknife_data_fast(
     total.`sum(X)` - COALESCE(unit.`sum(X)`, 0) AS `sum(X)`
     # else
     total.`sum(X)` - unit.`sum(X)` AS `sum(X)`
-  FROM (SELECT DISTINCT
+  FROM
+  TotalCount AS total
+  RIGHT JOIN  # Or CROSS JOIN (SELECT DISTINCT unit FROM UnitSliceCount)
+  (SELECT DISTINCT
     split_by,
     unit
   FROM UnitSliceCount)
-  LEFT JOIN  # Or (SELECT DISTINCT unit FROM UnitSliceCount) CROSS JOIN
-  TotalCount AS total
   USING (split_by)
   LEFT JOIN
   UnitSliceCount AS unit
@@ -3405,6 +3406,7 @@ def get_jackknife_data_fast(
       unit_slice_ct_alias,
       groupby=indexes_and_unit.difference(metric.unit).aliases)
   total_ct_alias = with_data.add(sql.Datasource(total_ct_table, 'TotalCount'))
+  total_ct = sql.Datasource(total_ct_alias, 'total_table')
 
   split_by_and_unit = sql.Columns(split_by).add(metric.unit)
   all_slices = sql.Datasource(
@@ -3412,13 +3414,9 @@ def get_jackknife_data_fast(
           sql.Columns(split_by_and_unit.aliases, distinct=True),
           unit_slice_ct_alias))
   if split_by:
-    loo_from = all_slices.join(
-        sql.Datasource(total_ct_alias, 'total_table'),
-        using=split_by,
-        join='LEFT')
+    loo_from = total_ct.join(all_slices, using=split_by, join='RIGHT')
   else:
-    loo_from = all_slices.join(
-        sql.Datasource(total_ct_alias, 'total_table'), join='CROSS')
+    loo_from = total_ct.join(all_slices, join='CROSS')
   loo_from = loo_from.join(
       sql.Datasource(unit_slice_ct_alias, 'unit_slice_table'),
       using=indexes_and_unit.aliases,
