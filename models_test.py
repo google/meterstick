@@ -335,28 +335,45 @@ class MiscellaneousTests(parameterized.TestCase):
 
   def test_count_features(self):
     s = metrics.Sum('x')
-    self.assertEqual(models.count_features(metrics.Sum('x')), 1)
-    self.assertEqual(models.count_features(metrics.MetricList([s, s])), 2)
+    self.assertEqual(operations.count_features(metrics.Sum('x')), 1)
+    self.assertEqual(operations.count_features(metrics.MetricList([s, s])), 2)
     self.assertEqual(
-        models.count_features(
-            metrics.MetricList([metrics.Sum('x'),
-                                metrics.MetricList([s])])), 2)
+        operations.count_features(
+            metrics.MetricList([metrics.Sum('x'), metrics.MetricList([s])])
+        ),
+        2,
+    )
     self.assertEqual(
-        models.count_features(operations.AbsoluteChange('a', 'b', s)), 1)
+        operations.count_features(operations.AbsoluteChange('a', 'b', s)), 1
+    )
     self.assertEqual(
-        models.count_features(
+        operations.count_features(
             operations.AbsoluteChange(
-                'a', 'b', metrics.MetricList([s, metrics.MetricList([s])]))), 2)
+                'a', 'b', metrics.MetricList([s, metrics.MetricList([s])])
+            )
+        ),
+        2,
+    )
     self.assertEqual(
-        models.count_features(
+        operations.count_features(
             operations.AbsoluteChange(
-                'a', 'b',
-                metrics.MetricList([
-                    operations.AbsoluteChange('a', 'b',
-                                              metrics.MetricList([s, s]))
-                ]))), 2)
-    self.assertEqual(models.count_features(metrics.Ratio('x', 'y')), 1)
-    self.assertEqual(models.count_features(metrics.MetricList([s, s]) / 2), 2)
+                'a',
+                'b',
+                metrics.MetricList(
+                    [
+                        operations.AbsoluteChange(
+                            'a', 'b', metrics.MetricList([s, s])
+                        )
+                    ]
+                ),
+            )
+        ),
+        2,
+    )
+    self.assertEqual(operations.count_features(metrics.Ratio('x', 'y')), 1)
+    self.assertEqual(
+        operations.count_features(metrics.MetricList([s, s]) / 2), 2
+    )
 
   def test_symmetrize_triangular(self):
     actual = models.symmetrize_triangular([1, 2, 3, 4, 5, 6])
