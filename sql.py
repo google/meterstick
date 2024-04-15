@@ -413,6 +413,10 @@ class Columns(SqlComponents):
     return [c.alias for c in self]
 
   @property
+  def raw_aliases(self):
+    return [c.alias_raw for c in self]
+
+  @property
   def original_columns(self):
     # Returns the original Column instances added.
     return [c.column[0] for c in self]
