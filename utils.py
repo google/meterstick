@@ -24,6 +24,7 @@ import os
 from typing import Iterable, List, Optional, Text, Union
 
 from meterstick import sql
+import numpy as np
 import pandas as pd
 
 
@@ -143,32 +144,6 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
       else:
         res.columns = map(name_tmpl.format, res.columns)
   return res
-
-
-def get_extra_idx(metric, return_superset=False):
-  """Collects the extra indexes added by Operations for the metric tree.
-
-  Args:
-    metric: A Metric instance.
-    return_superset: If to return the superset of extra indexes if metric has
-      incompatible indexes.
-
-  Returns:
-    A tuple of column names which are just the index of metric.compute_on(df).
-  """
-  extra_idx = metric.extra_index[:]
-  children_idx = [
-      get_extra_idx(c, return_superset) for c in metric.children if is_metric(c)
-  ]
-  if len(set(children_idx)) > 1:
-    if not return_superset:
-      raise ValueError('Incompatible indexes!')
-    children_idx_superset = set()
-    children_idx_superset.update(*children_idx)
-    children_idx = [list(children_idx_superset)]
-  if children_idx:
-    extra_idx += list(children_idx[0])
-  return tuple(extra_idx)
 
 
 def get_extra_split_by(metric, return_superset=False):
@@ -701,3 +676,86 @@ def pcollection_to_df_via_file_io(
     if cleanup:
       os.remove(f)
   return pd.concat(res, ignore_index=True)
+
+
+def get_x_t_x_and_x_t_y_cols(
+    xs: List[str], y: str, prefix='', fit_intercept=True, normalize=False
+):
+  """Computes the x_t_x and x_t_y elements.
+
+  When solving LinearRegression or Ridge using sufficient stats, we need to
+  constuct SQL columns for X'X and X'Y. This function takes the SQL columns of
+  X and y, and output SQL columns for the elements of X'X and X'Y.
+
+  Args:
+    xs: A list of column names of the features.
+    y: The column name of y.
+    prefix: A prefix to be added to the alias of the generated SQL columns.
+    fit_intercept: If the model in question fits intercept.
+    normalize: If the model in question normalizes x.
+
+  Returns:
+    The SQL columns for the elements of X'X and X'Y. The elements of X'X are
+      avg(x0), avg(x1), ...,  # if fit_intercept
+      avg(x0 * x0), avg(x0 * x1), avg(x0 * x2), avg(x1 * x2), ....
+    The elements of X'Y are
+      avg(y),  # if fit_intercept
+      avg(x0 * y), avg(x1 * y), ...,
+    Note that when fit_intercept, the return cannot be directly fed to the
+    get_ridge_coefficients() below. You need to prepend a '1' to x_t_x.
+  """
+  x_t_x = []
+  x_t_y = []
+  if fit_intercept:
+    if not normalize:
+      x_t_x = [
+          sql.Column(f'AVG({x})', alias=f'{prefix}x{i}')
+          for i, x in enumerate(xs)
+      ]
+    x_t_y = [sql.Column(f'AVG({y})', alias=f'{prefix}y')]
+  for i, x1 in enumerate(xs):
+    for j, x2 in enumerate(xs[i:]):
+      x_t_x.append(
+          sql.Column(f'AVG({x1} * {x2})', alias=f'{prefix}x{i}x{i + j}')
+      )
+  x_t_y += [
+      sql.Column(f'AVG({x} * {y})', alias=f'{prefix}x{i}y')
+      for i, x in enumerate(xs)
+  ]
+  return x_t_x, x_t_y
+
+
+def get_ridge_coefficients(
+    x_t_x_elements, x_t_y_elements, fit_intercept=True, penalty=0
+):
+  """Computes coefficients of Ridge regression.
+
+  Args:
+    x_t_x_elements: The SQL column names of the elements of X'X. If not
+      fit_intercept, it's the 1st return of get_x_t_x_and_x_t_y_cols. If
+      fit_intercept, it's the 1st return of get_x_t_x_and_x_t_y_cols with '1'
+      prepended.
+    x_t_y_elements: The SQL column names of the elements of X'Y. It's the 2nd
+      return of get_x_t_x_and_x_t_y_cols.
+    fit_intercept: If the model in question fits intercept.
+    penalty: The penalty of Ridge regression.
+
+  Returns:
+    (X'X)^(-1)(X'Y) as a Sympy matrix.
+  """
+  import sympy  # pylint: disable=g-import-not-at-top
+  n = len(x_t_y_elements)
+  x_t_x = np.empty([n, n], dtype=object)
+  x_t_x[np.triu_indices(n)] = x_t_x_elements
+  x_t_x[np.tril_indices(n)] = x_t_x.T[np.tril_indices(n)]
+  x_t_x = sympy.Matrix(x_t_x)
+  if penalty:
+    iden = np.identity(n)
+    if fit_intercept:
+      iden[0, 0] = 0
+    x_t_x += penalty * sympy.Matrix(iden)
+  # Do not use x_t_x.inv(). It's very slow
+  # https://stackoverflow.com/questions/75553096/why-is-sympy-matrix-inv-slow.
+  x_t_x_inv = x_t_x.adjugate() / x_t_x.det()
+  x_t_y = sympy.Matrix(x_t_y_elements)
+  return x_t_x_inv * x_t_y
