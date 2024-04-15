@@ -374,7 +374,7 @@ class CumulativeDistribution(Distribution):
     child_table = sql.Datasource(dist_sql, 'CumulativeDistributionRaw')
     child_table_alias = with_data.merge(child_table)
     columns = sql.Columns(indexes.aliases)
-    order = list(utils.get_extra_idx(self))
+    order = list(self.get_extra_idx())
     order = [
         sql.Column(self.get_ordered_col(sql.Column(o).alias), auto_alias=False)
         for o in order
@@ -487,8 +487,6 @@ class Comparison(Operation):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    if not isinstance(self, (PercentChange, AbsoluteChange)):
-      raise ValueError('Not a PercentChange nor AbsoluteChange!')
     cond_cols = sql.Columns(self.extra_index)
     raw_table_sql, with_data = self.get_change_raw_sql(
         table, split_by, global_filter, indexes, local_filter, with_data
@@ -509,33 +507,29 @@ class Comparison(Operation):
     base_table_alias = with_data.merge(base_table)
 
     cond = None if self.include_base else sql.Filters([f'NOT ({base_cond})'])
-    if isinstance(self, AbsoluteChange):
-      col_tmp = f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'
-    else:
-      col_tmp = (
-          sql.SAFE_DIVIDE.format(
-              numer=f'{raw_table_alias}.%(r)s',
-              denom=f'{base_table_alias}.%(b)s',
-          )
-          + ' * 100 - 100'
-      )
-    columns = sql.Columns()
-    val_col_len = len(raw_table_sql.all_columns) - len(indexes)
+    col_tmp = self.get_col_tmp(raw_table_alias, base_table_alias)
+    columns = []
     for r, b in zip(
-        raw_table_sql.all_columns[-val_col_len:],
-        base_value.columns[-val_col_len:],
+        raw_table_sql.all_columns[::-1],
+        base_value.columns[::-1],
     ):
+      if r.alias in sql.Columns(utils.get_extra_split_by(self)).aliases:
+        break
       col = sql.Column(
           col_tmp % {'r': r.alias, 'b': b.alias},
           alias=self.name_tmpl.format(r.alias_raw),
       )
-      columns.add(col)
+      columns = [col] + columns
     using = indexes.difference(cond_cols)
     join = '' if using else 'CROSS'
-    return sql.Sql(
-        sql.Columns(indexes.aliases).add(columns),
-        sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
-        cond), with_data
+    return (
+        sql.Sql(
+            sql.Columns(indexes.aliases).add(columns),
+            sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
+            cond,
+        ),
+        with_data,
+    )
 
   def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
@@ -549,6 +543,23 @@ class Comparison(Operation):
         table, groupby, global_filter, indexes, local_filter, with_data
     )
     return raw_table_sql, with_data
+
+  def get_col_tmp(self, raw_table_alias, base_table_alias):
+    """Gets a string template to compute the comparison between columns.
+
+    The template needs to use "%(r)s" to represent the column from
+    raw_table_alias and "%(b)s" to represent that from base_table_alias.
+    For example, AbsoluteChange returns
+    f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'.
+
+    Args:
+      raw_table_alias: The alias of the raw table for comparison.
+      base_table_alias: The alias of the base table for comparison.
+
+    Returns:
+      A string template to compute the comparison between two columns.
+    """
+    raise NotImplementedError
 
 
 class PercentChange(Comparison):
@@ -592,6 +603,15 @@ class PercentChange(Comparison):
       res = res[~idx_to_match.isin([self.baseline_key])]
     return res
 
+  def get_col_tmp(self, raw_table_alias, base_table_alias):
+    return (
+        sql.SAFE_DIVIDE.format(
+            numer=f'{raw_table_alias}.%(r)s',
+            denom=f'{base_table_alias}.%(b)s',
+        )
+        + ' * 100 - 100'
+    )
+
 
 class AbsoluteChange(Comparison):
   """Absolute change estimator on a Metric.
@@ -634,6 +654,9 @@ class AbsoluteChange(Comparison):
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
       res = res[~idx_to_match.isin([self.baseline_key])]
     return res
+
+  def get_col_tmp(self, raw_table_alias, base_table_alias):
+    return f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'
 
 
 class PrePostChange(PercentChange):
@@ -1155,18 +1178,30 @@ class MH(Comparison):
                include_base: bool = False,
                name_tmpl: Text = '{} MH Ratio',
                **kwargs):
-    self.stratified_by = stratified_by if isinstance(stratified_by,
-                                                     list) else [stratified_by]
+    stratified_by = (
+        stratified_by if isinstance(stratified_by, list) else [stratified_by]
+    )
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
     super(MH, self).__init__(
-        condition_column + self.stratified_by,
+        condition_column + stratified_by,
         baseline_key,
         metric,
         include_base,
         name_tmpl,
         extra_index=condition_column,
         **kwargs)
+
+  @property
+  def stratified_by(self):
+    return self.extra_split_by[len(self.extra_index):]
+
+  @stratified_by.setter
+  def stratified_by(self, stratified_by):
+    stratified_by = (
+        stratified_by if isinstance(stratified_by, list) else [stratified_by]
+    )
+    self.extra_split_by[len(self.extra_index):] = stratified_by
 
   def check_is_ratio(self, metric, allow_metriclist=True):
     if isinstance(metric, metrics.MetricList) and allow_metriclist:
@@ -3504,8 +3539,6 @@ def modify_descendants_for_jackknife_fast(
   if isinstance(metric, Operation):
     metric.extra_index = sql.Columns(metric.extra_index).aliases
     metric.extra_split_by = sql.Columns(metric.extra_split_by).aliases
-    if isinstance(metric, MH):
-      metric.stratified_by = sql.Column(metric.stratified_by).alias
 
   new_children = []
   for m in metric.children:
