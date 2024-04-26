@@ -176,9 +176,9 @@ def _sorted_long_to_wide(df, dims, sort_by):
     df = df.sort_values(sorting_cols, ascending=ascending)
   # Collects [Value, Ratio, CI_Lower, CI_Upper] for each Metric * slice. val_col
   # might be dropped during pivot b/c of na, so we make a dict first.
-  df = df.groupby(level=1, axis=1, observed=True).apply(
-      lambda x: x.droplevel(1, 1).apply(lambda row: row.to_dict(), 1))
-  df = df.applymap(lambda x: [x.get(k) for k in val_cols]).reset_index()
+  df = df.T.groupby(level=1, observed=True).apply(
+      lambda x: x.T.droplevel(1, 1).apply(lambda row: row.to_dict(), 1).T).T
+  df = df.map(lambda x: [x.get(k) for k in val_cols]).reset_index()
   if '_placeholder' == existing_index_cols[0]:
     df.drop(columns='_placeholder', inplace=True)
 
@@ -498,7 +498,7 @@ def add_control_rows(df, dims):
   grp = control_vals.groupby(['Metric', 'Control_Id'] + dims, observed=True)[
       'Control_Value'
   ]
-  control_vals = grp.agg([max, min])
+  control_vals = grp.agg(['max', 'min'])
   thresh = 1**-5
   ambiguous_vals = control_vals[control_vals['max'] -
                                 control_vals['min'] > thresh]
