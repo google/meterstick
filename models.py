@@ -75,7 +75,6 @@ class Model(operations.Operation):
       raise ValueError(
           'y must be a 1D array but is %iD!' % operations.count_features(y)
       )
-    self.group_by = [group_by] if isinstance(group_by, str) else group_by or []
     if isinstance(x, Sequence):
       x = metrics.MetricList(x)
     child = None
@@ -154,6 +153,10 @@ class Model(operations.Operation):
 
   def compute_on_sql_magic_mode(self, table, split_by, execute):
     raise NotImplementedError
+
+  @property
+  def group_by(self):
+    return self.extra_split_by
 
   def __call__(self, child):
     if not isinstance(child, metrics.MetricList):

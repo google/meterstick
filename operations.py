@@ -1175,18 +1175,30 @@ class MH(Comparison):
                include_base: bool = False,
                name_tmpl: Text = '{} MH Ratio',
                **kwargs):
-    self.stratified_by = stratified_by if isinstance(stratified_by,
-                                                     list) else [stratified_by]
+    stratified_by = (
+        stratified_by if isinstance(stratified_by, list) else [stratified_by]
+    )
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
     super(MH, self).__init__(
-        condition_column + self.stratified_by,
+        condition_column + stratified_by,
         baseline_key,
         metric,
         include_base,
         name_tmpl,
         extra_index=condition_column,
         **kwargs)
+
+  @property
+  def stratified_by(self):
+    return self.extra_split_by[len(self.extra_index):]
+
+  @stratified_by.setter
+  def stratified_by(self, stratified_by):
+    stratified_by = (
+        stratified_by if isinstance(stratified_by, list) else [stratified_by]
+    )
+    self.extra_split_by[len(self.extra_index):] = stratified_by
 
   def check_is_ratio(self, metric, allow_metriclist=True):
     if isinstance(metric, metrics.MetricList) and allow_metriclist:
@@ -3524,8 +3536,6 @@ def modify_descendants_for_jackknife_fast(
   if isinstance(metric, Operation):
     metric.extra_index = sql.Columns(metric.extra_index).aliases
     metric.extra_split_by = sql.Columns(metric.extra_split_by).aliases
-    if isinstance(metric, MH):
-      metric.stratified_by = sql.Column(metric.stratified_by).alias
 
   new_children = []
   for m in metric.children:
