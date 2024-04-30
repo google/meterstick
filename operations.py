@@ -487,8 +487,6 @@ class Comparison(Operation):
       The global with_data which holds all datasources we need in the WITH
         clause.
     """
-    if not isinstance(self, (PercentChange, AbsoluteChange)):
-      raise ValueError('Not a PercentChange nor AbsoluteChange!')
     cond_cols = sql.Columns(self.extra_index)
     raw_table_sql, with_data = self.get_change_raw_sql(
         table, split_by, global_filter, indexes, local_filter, with_data
@@ -509,16 +507,9 @@ class Comparison(Operation):
     base_table_alias = with_data.merge(base_table)
 
     cond = None if self.include_base else sql.Filters([f'NOT ({base_cond})'])
-    if isinstance(self, AbsoluteChange):
-      col_tmp = f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'
-    else:
-      col_tmp = (
-          sql.SAFE_DIVIDE.format(
-              numer=f'{raw_table_alias}.%(r)s',
-              denom=f'{base_table_alias}.%(b)s',
-          )
-          + ' * 100 - 100'
-      )
+    sql_template_for_comparison = self.get_sql_template_for_comparison(
+        raw_table_alias, base_table_alias
+    )
     columns = sql.Columns()
     val_col_len = len(raw_table_sql.all_columns) - len(indexes)
     for r, b in zip(
@@ -526,7 +517,7 @@ class Comparison(Operation):
         base_value.columns[-val_col_len:],
     ):
       col = sql.Column(
-          col_tmp % {'r': r.alias, 'b': b.alias},
+          sql_template_for_comparison % {'r': r.alias, 'b': b.alias},
           alias=self.name_tmpl.format(r.alias_raw),
       )
       columns.add(col)
@@ -549,6 +540,23 @@ class Comparison(Operation):
         table, groupby, global_filter, indexes, local_filter, with_data
     )
     return raw_table_sql, with_data
+
+  def get_sql_template_for_comparison(self, raw_table_alias, base_table_alias):
+    """Gets a string template to compute the comparison between columns.
+
+    The template needs to use "%(r)s" to represent the column from
+    raw_table_alias and "%(b)s" to represent that from base_table_alias.
+    For example, AbsoluteChange returns
+    f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'.
+
+    Args:
+      raw_table_alias: The alias of the raw table for comparison.
+      base_table_alias: The alias of the base table for comparison.
+
+    Returns:
+      A string template to compute the comparison between two columns.
+    """
+    raise NotImplementedError
 
 
 class PercentChange(Comparison):
@@ -592,6 +600,15 @@ class PercentChange(Comparison):
       res = res[~idx_to_match.isin([self.baseline_key])]
     return res
 
+  def get_sql_template_for_comparison(self, raw_table_alias, base_table_alias):
+    return (
+        sql.SAFE_DIVIDE.format(
+            numer=f'{raw_table_alias}.%(r)s',
+            denom=f'{base_table_alias}.%(b)s',
+        )
+        + ' * 100 - 100'
+    )
+
 
 class AbsoluteChange(Comparison):
   """Absolute change estimator on a Metric.
@@ -634,6 +651,9 @@ class AbsoluteChange(Comparison):
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
       res = res[~idx_to_match.isin([self.baseline_key])]
     return res
+
+  def get_sql_template_for_comparison(self, raw_table_alias, base_table_alias):
+    return f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'
 
 
 class PrePostChange(PercentChange):
