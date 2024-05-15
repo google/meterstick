@@ -3280,9 +3280,9 @@ def get_jackknife_data_general(
     WHERE global_filter),
     JackknifeResampledData AS (SELECT
       *
-    FROM Buckets
+    FROM $DATA
     CROSS JOIN
-    $DATA
+    Buckets
     WHERE
     meterstick_resample_idx != unit AND global_filter)
 
@@ -3296,9 +3296,9 @@ def get_jackknife_data_general(
     GROUP BY jk_split_by),
     JackknifeResampledData AS (SELECT
       *
-    FROM Buckets
+    FROM $DATA
     JOIN
-    $DATA
+    Buckets
     ON jk_split_by = split_by AND meterstick_resample_idx != unit
     WHERE global_filter)
 
@@ -3327,7 +3327,7 @@ def get_jackknife_data_general(
     on = sql.Filters(('%s.%s = %s' % (buckets_alias, c.alias, s.expression)
                       for c, s in zip(groupby, split_by)))
     on.add('meterstick_resample_idx != %s' % unit)
-    jk_from = sql.Join(buckets_alias, table, on)
+    jk_from = sql.Join(table, buckets_alias, on)
     jk_data_table = sql.Sql(
         sql.Columns(sql.Column('*', auto_alias=False)),
         jk_from,
@@ -3338,7 +3338,7 @@ def get_jackknife_data_general(
   else:
     buckets = sql.Sql(unique_units, table, where=global_filter)
     buckets_alias = with_data.add(sql.Datasource(buckets, 'Buckets'))
-    jk_from = sql.Join(buckets_alias, table, join='CROSS')
+    jk_from = sql.Join(table, buckets_alias, join='CROSS')
     jk_data_table = sql.Sql(
         sql.Column('*', auto_alias=False),
         jk_from,

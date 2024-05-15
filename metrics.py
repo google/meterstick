@@ -2181,6 +2181,7 @@ class Quantile(SimpleMetric):
           - 0.5 * weight,
           SUM(weight) OVER (PARTITION BY split_by)) AS weight
       FROM AggregatedQuantileWeights
+      WHERE weight IS NOT NULL
       ORDER BY split_by, val),
       PairedQuantileWeights AS (SELECT
         split_by,
@@ -2191,8 +2192,8 @@ class Quantile(SimpleMetric):
         LEAD(val) OVER (PARTITION BY split_by ORDER BY val) AS next_value
       FROM QuantileWeights)
     2. For each quantile q, SELECT
-    SUM(IF((prev_weight IS NULL AND q <= weight) OR
-             (next_weight IS NULL AND q >= weight),
+    SUM(IF((prev_weight IS NULL AND q < weight) OR
+             (next_weight IS NULL AND q > weight),
            val,
            IF(q BETWEEN weight AND next_weight,
               (next_value * (q - weight) + (next_weight - q) * val) /
@@ -2254,7 +2255,10 @@ class Quantile(SimpleMetric):
     normalized_weights = (cum_weight - 0.5 * sql.Column(w)) / total_weight
     cols = sql.Columns(split_by_and_value).add(normalized_weights.set_alias(w))
     normalized_weights_sql = sql.Sql(
-        cols, deduped_weight_alias, orderby=split_by_and_value
+        cols,
+        deduped_weight_alias,
+        where=f'{w} IS NOT NULL',
+        orderby=split_by_and_value,
     )
     normalized_weights_alias = with_data.merge(
         sql.Datasource(normalized_weights_sql, 'QuantileWeights')
@@ -2301,7 +2305,7 @@ class Quantile(SimpleMetric):
       )
       cols.add(
           sql.Column(
-              f"""SUM(IF(({prev_w} IS NULL AND {q} <= {w}) OR ({next_w} IS NULL AND {q} >= {w}), {v},
+              f"""SUM(IF(({prev_w} IS NULL AND {q} < {w}) OR ({next_w} IS NULL AND {q} > {w}), {v},
     IF({q} BETWEEN {w} AND {next_w}, {interp}, 0)))""",
               alias=f'{self.weight}-weighted quantile({self.var}, {q})',
           )
