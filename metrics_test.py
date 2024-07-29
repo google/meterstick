@@ -397,7 +397,7 @@ class TestMetricsMiscellaneous(absltest.TestCase):
     df = pd.DataFrame({'x': [np.nan, 1], 'w': [1, 0]})
     m = metrics.Nth('x', 1, 'w')
     output = m.compute_on(df)
-    expected = pd.DataFrame({'2nd(x) sort by w asc': [np.NaN]})
+    expected = pd.DataFrame({'2nd(x) sort by w asc': [np.nan]})
     testing.assert_frame_equal(output, expected)
 
   def test_nth_dropna(self):
@@ -411,7 +411,7 @@ class TestMetricsMiscellaneous(absltest.TestCase):
     df = pd.DataFrame({'x': [np.nan, 1], 'w': [0, 1]})
     m = metrics.Nth('x', 2, 'w')
     output = m.compute_on(df)
-    expected = pd.DataFrame({'3rd(x) sort by w asc': [np.NaN]})
+    expected = pd.DataFrame({'3rd(x) sort by w asc': [np.nan]})
     testing.assert_frame_equal(output, expected)
 
   def test_nth_negative_n(self):
