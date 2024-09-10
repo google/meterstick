@@ -97,7 +97,10 @@ def unmelt(df):
     names = df.index
   single_value_col = len(df.columns) == 1 and df.columns[0] == 'Value'
   if len(df.index.names) == 1:
-    df = pd.DataFrame(df.stack(0, dropna=False)).T
+    # This is for pandas 2.1.0
+    # https://pandas.pydata.org/docs/whatsnew/v2.1.0.html#new-implementation-of-dataframe-stack
+    # It should be removed when future_stack becomes the default in pandas 3.0.
+    df = pd.DataFrame(df.stack(0, future_stack=True)).T
   else:
     df = pd.concat([df.loc[n] for n in names],
                    axis=1,
