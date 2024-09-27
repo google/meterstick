@@ -2469,7 +2469,7 @@ class Jackknife(MetricWithCI):
     if split_by:
       slice_and_units.set_index(split_by, inplace=True)
     replicates = []
-    unique_units = slice_and_units[self.unit].unique()
+    unique_units = slice_and_units[self.unit].unique().tolist()
     if batch_size == 1:
       loo_sql = sql.Sql(None, table, where=self.where_)
       where = copy.deepcopy(loo_sql.where)
@@ -2491,7 +2491,7 @@ class Jackknife(MetricWithCI):
       if split_by:
         slice_and_units.set_index(self.unit, append=True, inplace=True)
       for i in range(int(np.ceil(len(unique_units) / batch_size))):
-        units = list(unique_units[i * batch_size:(i + 1) * batch_size])
+        units = unique_units[i * batch_size:(i + 1) * batch_size]
         loo = sql.Sql(
             sql.Column('*', auto_alias=False),
             sql.Datasource(

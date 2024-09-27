@@ -123,18 +123,18 @@ class DisplayMetricsTest(absltest.TestCase):
         'CI_Upper': [2.235, 4.85, np.nan, np.nan],
         'Control_Id': ['expr_foo'] * 4,
         'Control_Value': [0.780933, 0.21599, np.nan, np.nan],
-        'Country': ['GB', 'US', 'US', 'GB'],
+        'Country': ['GB', 'US', 'GB', 'US'],
+        'Type': ['WEB'] * 4,
         'Experiment_Id': [42, 42, 'expr_foo', 'expr_foo'],
         'Is_Control': [False, False, True, True],
         'Metric': ['PLA_CONV_CVR'] * 4,
         'Ratio': [-1.4, 2.79, np.nan, np.nan],
-        'Type': ['WEB'] * 4,
-        'Value': [0.77, 0.222026, 0.216, 0.780933]
+        'Value': [0.77, 0.222026, 0.780933, 0.216],
     })
     actual = confidence_interval_display.add_control_rows(
-        DF_WITH_DIMENSIONS[1:], ['Country', 'Type']).reset_index(drop=True)
-    # Merging with nonoverlapping dfs returns different orders in PY2 and 3.
-    testing.assert_frame_equal(expected, actual, check_like=True)
+        DF_WITH_DIMENSIONS[1:], ['Country', 'Type']
+    ).reset_index(drop=True)
+    testing.assert_frame_equal(expected, actual)
 
   def test_add_control_rows_on_full_cotrol_rows(self):
     expected = pd.concat([
