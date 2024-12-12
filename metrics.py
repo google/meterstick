@@ -272,7 +272,7 @@ class Metric(object):
 
   def add_where(self, where):
     where = [where] if isinstance(where, str) else list(where) or []
-    if not self.where:
+    if not self.where_:
       self.where = where
     else:
       self.where = tuple(set(list(self.where_) + where))
@@ -1029,7 +1029,7 @@ class Metric(object):
       Metric.
     """
     fingerprint = {'class': self.__class__}
-    if self.where:
+    if self.where_:
       fingerprint['where'] = sorted(self.where_)
     # Caching across instances is tricky so only turned on for built-ins and
     # custom Metrics with cache_across_instances being True. Otherwise different
