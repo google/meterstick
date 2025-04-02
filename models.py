@@ -938,16 +938,15 @@ class LogisticRegression(Model):
       random_state=None,
       solver='lbfgs',
       max_iter=100,
-      multi_class='auto',
       verbose=0,
       warm_start=False,
       n_jobs=None,
       l1_ratio=None,
   ):
     """Initialize a sklearn.LogisticRegression model."""
-    if penalty not in ('none', 'l1', 'l2', 'elasticnet'):
+    if penalty not in (None, 'l1', 'l2', 'elasticnet'):
       raise ValueError(
-          "Penalty must be one of ('none', 'l1', 'l2', 'elasticnet') but is"
+          "Penalty must be one of (None, 'l1', 'l2', 'elasticnet') but is"
           f' {penalty}!'
       )
     if penalty == 'elasticnet' and (not l1_ratio or not 0 <= l1_ratio <= 1):
@@ -970,7 +969,6 @@ class LogisticRegression(Model):
         random_state=random_state,
         solver=solver,
         max_iter=max_iter,
-        multi_class=multi_class,
         verbose=verbose,
         warm_start=warm_start,
         n_jobs=n_jobs,
@@ -1047,8 +1045,6 @@ class LogisticRegression(Model):
     """
     if self.model.class_weight:
       raise ValueError("Magic mode doesn't support class_weight!")
-    if self.model.multi_class == 'multinomial':
-      raise ValueError("Magic mode doesn't support multi_class!")
     if self.intercept_scaling != 1:
       raise ValueError('intercept_scaling is not supported in magic mode!')
 
