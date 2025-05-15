@@ -65,6 +65,13 @@ def melt(df):
   df = pd.concat([df[n] for n in names], keys=names, names=['Metric'])
   df = pd.DataFrame(df)
   if flat_idx:
+    if len(df.columns) > 1:
+      raise ValueError(
+          f'Duplicate columns found: {df.columns}. You likely have'
+          ' duplicate names in your Metrics. This is a common error when you'
+          ' have different filters on the same Metric. Please give Metrics'
+          ' different names.'
+      )
     df.columns = ['Value']
   return remove_empty_level(df)
 

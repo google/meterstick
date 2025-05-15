@@ -1455,6 +1455,26 @@ class JackknifeTests(parameterized.TestCase):
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
+  def test_display_raises_for_duplicate_metric_names(self):
+    df = pd.DataFrame({
+        'x': list(range(0, 4)),
+        'cookie': list(range(0, 4)),
+        'grp': list('AABB'),
+    })
+    with self.assertRaises(ValueError) as cm:
+      (
+          metrics.MetricList((metrics.Sum('x'), metrics.Sum('x', where='x>0')))
+          | operations.PercentChange('grp', 'A')
+          | operations.Jackknife('cookie', confidence=0.9)
+      ).compute_on(df).display()
+    self.assertEqual(
+        str(cm.exception),
+        "Duplicate columns found: Index(['sum(x)', 'sum(x)'],"
+        " dtype='object'). You likely have duplicate names in your Metrics."
+        ' This is a common error when you have different filters on the same'
+        ' Metric. Please give Metrics different names.',
+    )
+
 
 class BootstrapTests(parameterized.TestCase):
   n = 100
