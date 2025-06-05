@@ -36,3 +36,11 @@ rate is 0.2 for the control group, 0.1 for the "treatment1" group, 0.25 for
 the "treatment2" group, and 0.3 for the "treatment3" group; and for region 'US',
 the churn rates are 0.03 higher than those for region 'EU'. The simulation is
 done by drawing from the uniform distribution between 0 and 1.
+
+The `Meterstick_example_implementations.ipynb` implements the `Metric`s and
+`Operations` mentioned in the paper, including `Sum`, `Count`, `PercentChange`
+and `Bootstrap`.
+
+The `Meterstick_minimum_wage.ipynb` replicates the minimum wage study.
+
+The `Meterstick_churn_rate.ipynb` analyzes user churn rate on a simulated data.
