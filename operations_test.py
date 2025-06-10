@@ -708,7 +708,7 @@ PRECOMPUTABLE_OPERATIONS = SIMPLE_OPERATIONS + [
         operations.PrePostChange(
             'grp',
             0,
-            metrics.Sum('x'),
+            [metrics.Sum('x'), metrics.Count('x')],
             [metrics.Sum('y'), metrics.Sum('y') ** 2],
             'cookie',
         ),
@@ -718,7 +718,7 @@ PRECOMPUTABLE_OPERATIONS = SIMPLE_OPERATIONS + [
         operations.CUPED(
             'grp',
             0,
-            metrics.Sum('x'),
+            [metrics.Sum('x'), metrics.Count('x')],
             [metrics.Sum('y'), metrics.Sum('y') ** 2],
             'cookie',
         ),

@@ -678,10 +678,13 @@ class PrePostChange(PercentChange):
       "Control"). All conditions will be compared to this baseline. If
       condition_column contains multiple columns, then baseline_key should be a
       tuple.
-    children: A MetricList whose first element is the Metric we want to compute
-      change on and the rest is the covariates for adjustment.
+    child: A Metric(List) we want to compute change on. If it returns multiple
+      columns, the result is same as applying the method to every column in it.
+    covariates: A MetricList of the covariates for adjustment.
+    children: MetricList([child, covariates]).
     include_base: A boolean for whether the baseline condition should be
       included in the output.
+    k_covariates: The number of covariates to use for adjustment.
     And all other attributes inherited from Operation.
   """
 
@@ -694,10 +697,12 @@ class PrePostChange(PercentChange):
                include_base=False,
                name_tmpl: Text = '{} PrePost Percent Change',
                **kwargs):
+    if isinstance(child, (List, Tuple)):
+      child = metrics.MetricList(child)
     if isinstance(covariates, (List, Tuple)):
       covariates = metrics.MetricList(covariates)
     if child and covariates:
-      child = metrics.MetricList((child, covariates)) if child else covariates
+      child = metrics.MetricList((child, covariates))
     else:
       child = None
     stratified_by = [stratified_by] if isinstance(stratified_by,
@@ -713,6 +718,18 @@ class PrePostChange(PercentChange):
         **kwargs,
     )
     self.extra_index = condition_column
+
+  @property
+  def child(self):
+    return self.children[0][0] if self.children else None
+
+  @property
+  def covariates(self):
+    return self.children[0][1] if self.children else None
+
+  @property
+  def k_covariates(self) -> int:
+    return count_features(self.covariates)
 
   def compute_children(
       self,
@@ -808,8 +825,8 @@ class PrePostChange(PercentChange):
   def compute_children_sql(self, table, split_by, execute, mode=None):
     child = super(PrePostChange,
                   self).compute_children_sql(table, split_by, execute, mode)
-    covariates = child.iloc[:, 1:]
-    child = child.iloc[:, :1]
+    covariates = child.iloc[:, -self.k_covariates:]
+    child = child.iloc[:, :self.k_covariates]
     return self.adjust_value(child, covariates, split_by)
 
   def get_change_raw_sql(
@@ -923,8 +940,10 @@ class CUPED(AbsoluteChange):
       "Control"). All conditions will be compared to this baseline. If
       condition_column contains multiple columns, then baseline_key should be a
       tuple.
-    children: A MetricList whose first element is the Metric we want to compute
-      change on and the rest is the covariates for adjustment.
+    child: A Metric we want to compute change on. If it returns multiple
+      columns, the result is same as applying the method to every column in it.
+    covariates: A MetricList of the covariates for adjustment.
+    children: MetricList([child, covariates]).
     include_base: A boolean for whether the baseline condition should be
       included in the output.
     And all other attributes inherited from Operation.
@@ -939,10 +958,12 @@ class CUPED(AbsoluteChange):
                include_base=False,
                name_tmpl: Text = '{} CUPED Change',
                **kwargs):
+    if isinstance(child, (List, Tuple)):
+      child = metrics.MetricList(child)
     if isinstance(covariates, (List, Tuple)):
       covariates = metrics.MetricList(covariates)
     if child and covariates:
-      child = metrics.MetricList((child, covariates)) if child else covariates
+      child = metrics.MetricList((child, covariates))
     else:
       child = None
     stratified_by = [stratified_by] if isinstance(stratified_by,
@@ -958,6 +979,18 @@ class CUPED(AbsoluteChange):
         **kwargs,
     )
     self.extra_index = condition_column
+
+  @property
+  def child(self):
+    return self.children[0][0] if self.children else None
+
+  @property
+  def covariates(self):
+    return self.children[0][1] if self.children else None
+
+  @property
+  def k_covariates(self) -> int:
+    return count_features(self.covariates)
 
   def compute_children(self,
                        df,
@@ -1039,8 +1072,8 @@ class CUPED(AbsoluteChange):
   def compute_children_sql(self, table, split_by, execute, mode=None):
     child = super(CUPED, self).compute_children_sql(table, split_by, execute,
                                                     mode)
-    covariates = child.iloc[:, 1:]
-    child = child.iloc[:, :1]
+    covariates = child.iloc[:, -self.k_covariates:]
+    child = child.iloc[:, :self.k_covariates]
     return self.adjust_value(child, covariates, split_by)
 
   def get_change_raw_sql(
@@ -1402,8 +1435,8 @@ class MH(Comparison):
         denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
     )
     col_tmpl = f"""100 * {sql.SAFE_DIVIDE.format(
-      numer=f'COALESCE(SUM({numerator}), 0)',
-      denom=f'COALESCE(SUM({denominator}), 0)')} - 100"""
+        numer=f'COALESCE(SUM({numerator}), 0)',
+        denom=f'COALESCE(SUM({denominator}), 0)')} - 100"""
     columns = sql.Columns()
     alias_tmpl = self.name_tmpl
     # The columns might get consolidated and have different aliases. We need to
@@ -2206,7 +2239,7 @@ class MetricWithCI(Operation):
             with_data,
         )
         base_alias = with_data.merge(
-            sql.Datasource(base, '_ShouldAlreadyExists')
+            sql.Datasource(base, 'BaseValues')
         )
         columns.add(
             sql.Column(f'{base_alias}.{c.alias}', alias=c.alias_raw)
