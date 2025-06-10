@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for Metrics."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -645,7 +644,7 @@ class TestCompositeMetric(absltest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class TestMetricList(absltest.TestCase):
+class TestMetricList(parameterized.TestCase):
 
   def test_return_list(self):
     df = pd.DataFrame({'X': [0, 1, 2, 3]})
@@ -675,17 +674,26 @@ class TestMetricList(absltest.TestCase):
         }, columns=['sum(X)', 'mean(X)'])
     testing.assert_frame_equal(output, expected)
 
-  def test_with_name_tmpl(self):
+  @parameterized.parameters(
+      ([metrics.Sum('X')],), ([metrics.Sum('X'), metrics.Mean('X')],)
+  )
+  def test_name_tmpl(self, children):
     df = pd.DataFrame({'X': [0, 1, 2, 3]})
-    ms = [metrics.Sum('X'), metrics.Mean('X')]
-    m = metrics.MetricList(ms, name_tmpl='a{}b')
+    m = metrics.MetricList(children, name_tmpl='a{}b')
     output = m.compute_on(df)
-    expected = pd.DataFrame(
-        data={
-            'asum(X)b': [6],
-            'amean(X)b': [1.5]
-        },
-        columns=['asum(X)b', 'amean(X)b'])
+    expected = metrics.MetricList(children).compute_on(df)
+    expected.columns = [f'a{c}b' for c in expected.columns]
+    testing.assert_frame_equal(output, expected)
+
+  @parameterized.parameters(
+      ([metrics.Sum('X')],), ([metrics.Sum('X'), metrics.Mean('X')],)
+  )
+  def test_nested_name_tmpl(self, children):
+    df = pd.DataFrame({'X': [0, 1, 2, 3]})
+    m = metrics.MetricList(children, name_tmpl='a {}')
+    m = metrics.MetricList(m, name_tmpl='b {}')
+    output = m.compute_on(df)
+    expected = metrics.MetricList(children, name_tmpl='b a {}').compute_on(df)
     testing.assert_frame_equal(output, expected)
 
   def test_operations(self):
@@ -709,6 +717,19 @@ class TestMetricList(absltest.TestCase):
     ms = [metrics.Sum('X'), metrics.Mean('X')]
     m = metrics.MetricList(ms)
     self.assertLen(m, 2)
+
+  def test_unwrap(self):
+    s = metrics.Sum('x', where='bar')
+    m = metrics.MetricList([s, metrics.Count('y')])
+    m = metrics.MetricList([m, metrics.Sum('z')], where='foo')
+    actual = m.unwrap()
+    expected = [
+        metrics.Sum('x', where=('bar', 'foo')),
+        metrics.Count('y', where='foo'),
+        metrics.Sum('z', where='foo'),
+    ]
+    self.assertEqual(actual, expected)
+    self.assertEqual(s.where, 'bar')  # orignal instance is not changed
 
   def test_split_by_return_df(self):
     df = pd.DataFrame({'X': [0, 1, 2, 3], 'grp': ['A', 'A', 'B', 'B']})
