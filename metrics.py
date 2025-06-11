@@ -196,6 +196,7 @@ class Metric(object):
 
   Attributes:
     name: Name of the Metric.
+    name_: Name of the Metric without the where clause.
     children: An iterable of Metric(s) this Metric based upon.
     cache: A dict to store cached results.
     where_: A string or list/tuple of strings to be concatenated that will be
@@ -223,15 +224,19 @@ class Metric(object):
     cache_key: The key currently being used in computation.
   """
 
-  def __init__(self,
-               name: Text,
-               children: Optional[Union['Metric', Sequence[Union['Metric', int,
-                                                                 float]]]] = (),
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               name_tmpl=None,
-               extra_split_by: Optional[Union[Text, Iterable[Text]]] = None,
-               extra_index: Optional[Union[Text, Iterable[Text]]] = None,
-               additional_fingerprint_attrs: Optional[List[str]] = None):
+  def __init__(
+      self,
+      name: Text,
+      children: Optional[
+          Union['Metric', Sequence[Union['Metric', int, float]]]
+      ] = (),
+      where: Optional[Union[Text, Sequence[Text]]] = None,
+      name_tmpl=None,
+      extra_split_by: Optional[Union[Text, Iterable[Text]]] = None,
+      extra_index: Optional[Union[Text, Iterable[Text]]] = None,
+      additional_fingerprint_attrs: Optional[List[str]] = None,
+  ):
+    self.name_ = None
     self.name = name
     self.cache = {}
     self.cache_key = None
@@ -1062,12 +1067,20 @@ class Metric(object):
         fingerprint[k] = tuple(list(v))
     return tuple(sorted(fingerprint.items()))
 
-  def __str__(self):
+  @property
+  def name(self):
     where = f' where {self.where}' if self.where else ''
-    return self.name + where
+    return self.name_ + where
+
+  @name.setter
+  def name(self, name):
+    self.name_ = name
+
+  def __str__(self):
+    return self.name
 
   def __repr__(self):
-    return self.__str__()
+    return self.name
 
   def __deepcopy__(self, memo):
     # We don't copy self.cache, for two reasons.
