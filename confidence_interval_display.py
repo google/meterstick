@@ -442,7 +442,7 @@ def dimension_formatter(x,
   d = []
   if description:
     d.append(span(description, 'ci-display-description-text'))
-  if expr_id:
+  if expr_id is not None:
     d.append(span(expr_id, 'ci-display-experiment-id'))
   if slice_info:
     d.append(span(slice_info, 'ci-display-dimension'))

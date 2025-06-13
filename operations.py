@@ -1500,23 +1500,19 @@ class MH(Comparison):
 
 
 def get_display_fn(name,
+                   changes,
                    split_by=None,
                    melted=False,
-                   value='Value',
-                   condition_column: Optional[List[Text]] = None,
-                   ctrl_id=None,
-                   default_metric_formats=None):
+                   value='Value'):
   """Returns a function that displays confidence interval nicely.
 
   Args:
     name: 'Jackknife' or 'Bootstrap'.
+    changes: A list of instances of PercentChange, AbsoluteChange or their
+      derived classes.
     split_by: The split_by passed to Jackknife().compute_on().
     melted: Whether the input res is in long format.
     value: The name of the value column.
-    condition_column: Present if the child is PercentChange or AbsoluteChange.
-    ctrl_id: Present if the child is PercentChange or AbsoluteChange. It's the
-      baseline_key of the comparison.
-    default_metric_formats: How to format the numbers in the display.
 
   Returns:
     A funtion that takes a DataFrame and displays confidence intervals.
@@ -1577,35 +1573,42 @@ def get_display_fn(name,
       return_pre_agg_df/return_formatted_df is True.
     """
     base = res.meterstick_change_base
-    if not melted:
-      res = utils.melt(res)
-    if base is not None:
-      # base always has the baseline so needs to be at left.
-      res = base.join(res)
-      comparison_suffix = [
-          AbsoluteChange('', '').name_tmpl.format(''),
-          PercentChange('', '').name_tmpl.format('')
-      ]
-      comparison_suffix = '(%s)$' % '|'.join(comparison_suffix)
-      # Don't use inplace=True. It will change the index of 'base' too.
-      res.index = res.index.set_levels(
-          res.index.levels[0].str.replace(comparison_suffix, '', regex=True),
-          level=0,
-      )
-      show_control = True if show_control is None else show_control
+    change = changes[0]
+    control = None
+    if base is None:
+      if not melted:
+        res = utils.melt(res)
+    else:
+      if melted:
+        res = utils.unmelt(res)
+      if isinstance(change, (AbsoluteChange, PercentChange)):
+        try:
+          res.columns = res.columns.set_levels(base.columns, level=0)
+        except ValueError as exc:
+          raise ValueError(
+              'The number of columns of res and base must be the same. '
+              f'res columns: {res.columns}, base columns: {base.columns}'
+          ) from exc
+        base = utils.melt(base)
+        base.columns = ['_base_value']
+        res = base.join(utils.melt(res))
+        control = change.baseline_key
+        show_control = True if show_control is None else show_control
     metric_order = list(res.index.get_level_values(
         0).unique()) if metric_order is None else metric_order
     res = res.reset_index()
-    control = ctrl_id
-    condition_col = condition_column
-    if condition_column:
-      if len(condition_column) == 1:
-        condition_col = condition_column[0]
+    condition_col = None
+    if change.extra_index:
+      if len(change.extra_index) == 1:
+        condition_col = change.extra_index[0]
       else:
-        res['_expr_id'] = res[condition_column].agg(tuple, axis=1).astype(str)
+        res['_expr_id'] = res[change.extra_index].agg(tuple, axis=1).astype(str)
         control = str(control)
         condition_col = '_expr_id'
 
+    default_metric_formats = (
+        {'Ratio': 'percent'} if isinstance(change, PercentChange) else None
+    )
     metric_formats = (
         default_metric_formats if metric_formats is None else metric_formats)
     formatted_df = confidence_interval_display.get_formatted_df(
@@ -1763,28 +1766,78 @@ class MetricWithCI(Operation):
     """Computes the base values for Change. It's used in res.display()."""
     if not self.confidence:
       return None
-    if len(self.children) != 1 or not isinstance(
-        self.children[0], (PercentChange, AbsoluteChange)):
+    base_metrics, extra_index = self.get_base_metrics()
+    if not isinstance(base_metrics, metrics.Metric):
       return None
-    change = self.children[0]
-    util_metric = change.children[0]
-    if isinstance(self.children[0], (PrePostChange, CUPED)):
-      util_metric = metrics.MetricList(
-          [util_metric.children[0]], where=util_metric.where_
-      )
-    util_metric = metrics.MetricList([util_metric], where=change.where_)
-    to_split = (
-        split_by + change.extra_index if split_by else change.extra_index)
+    to_split = split_by + extra_index if split_by else extra_index
     if execute is None:
-      base = self.compute_util_metric_on(
-          util_metric, df, to_split, cache_key=cache_key)
-    else:
-      base = self.compute_util_metric_on_sql(
-          util_metric, df, to_split, execute, mode=mode, cache_key=cache_key)
-    base.columns = [change.name_tmpl.format(c) for c in base.columns]
-    base = utils.melt(base)
-    base.columns = ['_base_value']
-    return base
+      return self.compute_util_metric_on(
+          base_metrics, df, to_split, cache_key=cache_key)
+    return self.compute_util_metric_on_sql(
+        base_metrics, df, to_split, execute, mode=mode, cache_key=cache_key
+    )
+
+  def get_base_metrics(self):
+    """Returns the information about the base metrics of Comparisons.
+
+    In MetricWithCI(Comparison).display(), we not only display the
+    comparison results, but also the base values. This function returns the
+    needed information for the base values.
+
+    Returns:
+      If any of the direct children of self is not a PercentChange,
+      AbsoluteChange, or their derived classes, returns None.
+      Otherwise, a tuple of (base_metrics, extra_index).
+      base_metrics is a MetricList of the base metrics. The filters of
+      Comparisons are pushed down to the base metrics.
+      extra_index is a list of the extra dimensions of the introduced by
+      Comparisons.
+      For example, the return of
+      1. Jackknife(AbsoluteChange('grp', 0, Sum(x, where='x > 0'))) is
+         MetricList([Sum(x, where='x > 0')], name_tmpl='{} Absolute Change'),
+         ['grp'];
+      2. Jackknife(AbsoluteChange('grp', 0, MetricList([Sum(x), Sum(y)]))) is
+         MetricList([Sum(x), Sum(y)], name_tmpl='{} Absolute Change'), ['grp'];
+      3. Jackknife(MetricList([AbsoluteChange('grp', 0, Sum(x)),
+                               AbsoluteChange('grp', 0, Sum(y))])) is
+         equivalent to #2, but with different MetricList structure.
+      4. Jackknife(MetricList([AbsoluteChange('grp', 0,
+                                  MetricList([Sum(x, where='foo'), Sum(y)],
+                                             where='bar')),
+                               PercentChange('grp', 0, Sum(z), where='z > 0')])
+                               ) is
+         MetricList([
+             MetricList([Sum(x, where='foo'), Sum(y)], where='bar',
+             name_tmpl='{} Absolute Change'),
+             MetricList([Sum(z)], where='z > 0', name_tmpl='{} Percent
+             Change')]),
+         ['grp'].
+
+    Raises:
+      ValueError: If the Comparison has different comparison dimensions.
+    """
+    # The results are used as the control values in res.display().
+    changes = metrics.MetricList(self.children).unwrap()
+    extra_index = changes[0].extra_index
+    for c in changes:
+      if not isinstance(c, (PercentChange, AbsoluteChange)):
+        return None, []
+      if c.extra_index != extra_index:
+        raise ValueError(
+            'Comparisons need to compare along the same dimensions but got %s'
+            ' and %s' % (c.extra_index, extra_index)
+        )
+    base_metrics = []
+    for change in changes:
+      util_metric = metrics.MetricList(
+          [change.children[0]], where=change.where_
+      )
+      if isinstance(change, (PrePostChange, CUPED)):
+        util_metric = metrics.MetricList(
+            [util_metric[0][0]], where=util_metric.where_
+        )
+      base_metrics.append(util_metric)
+    return metrics.MetricList(base_metrics), extra_index
 
   @staticmethod
   def add_base_to_res(res, base):
@@ -1901,11 +1954,10 @@ class MetricWithCI(Operation):
       indexes = list(res.index.names)
       if melted:
         indexes = indexes[1:]
-      if len(self.children) == 1 and isinstance(
-          self.children[0], (PercentChange, AbsoluteChange)):
-        change = self.children[0]
-        indexes = [i for i in indexes if i not in change.extra_index]
-      res = self.add_display_fn(res, indexes, melted)
+      base_metric, extra_index = self.get_base_metrics()
+      if base_metric:
+        indexes = [i for i in indexes if i not in extra_index]
+      res = self._add_display_fn(res, indexes, extra_index, melted)
     else:
       msg = (
           'You need to specify a confidence level in order to use `.display()`'
@@ -1914,22 +1966,17 @@ class MetricWithCI(Operation):
       res.display = warn.__get__(res)  # pytype: disable=attribute-error
     return res
 
-  def add_display_fn(self, res, split_by, melted):
+  def _add_display_fn(self, res, split_by, extra_index, melted):
     """Bounds a display function to res so res.display() works."""
     value = res.columns[0] if melted else res.columns[0][1]
-    ctrl_id = None
-    condition_col = None
-    metric_formats = None
-    if len(self.children) == 1 and isinstance(self.children[0],
-                                              (PercentChange, AbsoluteChange)):
-      change = self.children[0]
-      ctrl_id = change.baseline_key
-      condition_col = change.extra_index
-      if isinstance(self.children[0], PercentChange):
-        metric_formats = {'Ratio': 'percent'}
-
-    fn = get_display_fn(self.prefix, split_by, melted, value, condition_col,
-                        ctrl_id, metric_formats)
+    changes = metrics.MetricList(self.children).unwrap()
+    fn = get_display_fn(
+        self.prefix,
+        changes,
+        split_by,
+        melted,
+        value,
+    )
     # pylint: disable=no-value-for-parameter
     res.display = fn.__get__(res)  # pytype: disable=attribute-error
     # pylint: enable=no-value-for-parameter
@@ -2012,8 +2059,8 @@ class MetricWithCI(Operation):
     sub_dfs = []
     base = None
     if self.confidence:
-      if len(self.children) == 1 and isinstance(
-          self.children[0], (PercentChange, AbsoluteChange)):
+      base_metrics, _ = self.get_base_metrics()
+      if base_metrics:
         # The first 3n columns are Value, SE, dof for n Metrics. The
         # last n columns are the base values of Change.
         if len(res.columns) % 4:
@@ -2021,10 +2068,6 @@ class MetricWithCI(Operation):
         n_metrics = len(res.columns) // 4
         base = res.iloc[:, -n_metrics:]
         res = res.iloc[:, :3 * n_metrics]
-        change = self.children[0]
-        base.columns = [change.name_tmpl.format(c) for c in base.columns]
-        base = utils.melt(base)
-        base.columns = ['_base_value']
 
       if len(res.columns) % 3:
         raise ValueError('Wrong shape for a MetricWithCI with confidence!')
@@ -2218,21 +2261,13 @@ class MetricWithCI(Operation):
       cols = zip(pt_est_col, se_cols)
     columns.add(cols)
 
-    has_base_vals = False
+    base_alias = None
     if self.confidence:
-      child = self.children[0]
-      if len(self.children) == 1 and isinstance(
-          child, (PercentChange, AbsoluteChange)
-      ):
-        has_base_vals = True
-        base_metric = copy.deepcopy(child.children[0])
-        if isinstance(child, (CUPED, PrePostChange)):
-          base_metric = base_metric[0]
-        if child.where:
-          base_metric.add_where(child.where_)
+      base_metric, extra_index = self.get_base_metrics()
+      if base_metric:
         base, with_data = base_metric.get_sql_and_with_clause(
             table,
-            sql.Columns(split_by).add(child.extra_index),
+            sql.Columns(split_by).add(extra_index),
             global_filter,
             indexes,
             local_filter,
@@ -2248,7 +2283,7 @@ class MetricWithCI(Operation):
 
     join = 'LEFT' if using else 'CROSS'
     from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
-    if has_base_vals:
+    if base_alias:
       from_data = from_data.join(base_alias, join=join, using=using)
     return sql.Sql(using.add(columns), from_data), with_data
 

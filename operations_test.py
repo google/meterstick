@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for Operations."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -1355,9 +1354,9 @@ class JackknifeTests(parameterized.TestCase):
     df = pd.DataFrame({
         'x': [1, 100, 2, 100, 3, 100],
         'cookie': [1, 2, 3, 1, 2, 3],
-        'grp': ['A', 'B'] * 3,
+        'grp': [1, 0] * 3,
     })
-    change = metrics.Sum('x') | operations.PercentChange('grp', 'A')
+    change = metrics.Sum('x') | operations.PercentChange('grp', 1)
     m = operations.Jackknife('cookie', change, 0.9)
     res = m.compute_on(df)
     output = res.display(return_formatted_df=True)
@@ -1365,11 +1364,11 @@ class JackknifeTests(parameterized.TestCase):
         {
             'Dimensions': [
                 (
-                    '<div><div><span class="ci-display-experiment-id">A</span>'
+                    '<div><div><span class="ci-display-experiment-id">1</span>'
                     '</div></div>'
                 ),
                 (
-                    '<div><div><span class="ci-display-experiment-id">B</span>'
+                    '<div><div><span class="ci-display-experiment-id">0</span>'
                     '</div></div>'
                 ),
             ],
@@ -1474,6 +1473,150 @@ class JackknifeTests(parameterized.TestCase):
         ' This is a common error when you have different filters on the same'
         ' Metric. Please give Metrics different names.',
     )
+
+  def test_display_raises_for_different_change_indexes(self):
+    df = pd.DataFrame({
+        'x': list(range(0, 4)),
+        'cookie': list(range(0, 4)),
+        'grp': list('AABB'),
+        'grp2': list('AABB'),
+    })
+    with self.assertRaises(ValueError) as cm:
+      (
+          metrics.MetricList((
+              operations.AbsoluteChange('grp', 'A', metrics.Sum('x')),
+              operations.AbsoluteChange('grp2', 'A', metrics.Mean('x')),
+          ))
+          | operations.Jackknife('cookie', confidence=0.9)
+      ).compute_on(df).display()
+    self.assertEqual(
+        str(cm.exception),
+        "Comparisons need to compare along the same dimensions but got ['grp2']"
+        " and ['grp']",
+    )
+
+  @parameterized.parameters(
+      [operations.PercentChange, operations.AbsoluteChange]
+  )
+  def test_get_base_metrics_no_covariate_simple_metric(self, op):
+    m = metrics.Sum('x', where='sum filter')
+    comp = op('g', 'a', m, where='op filter')
+    jk = operations.Jackknife('unit', comp)
+    base_metric, extra_index = jk.get_base_metrics()
+    expected = [metrics.Sum('x', where=('op filter', 'sum filter'))]
+    self.assertEqual(base_metric.unwrap(), expected)
+    self.assertEqual(extra_index, ['g'])
+
+  @parameterized.parameters(
+      [operations.PercentChange, operations.AbsoluteChange]
+  )
+  def test_get_base_metrics_no_covariate_metriclist(self, op):
+    m = metrics.MetricList(
+        (metrics.Sum('x', where='sum filter'), metrics.Sum('y')),
+        where='list filter',
+    )
+    comp = op('g', 'a', m, where='op filter')
+    jk = operations.Jackknife('unit', comp)
+    base_metric, extra_index = jk.get_base_metrics()
+    expected = [
+        metrics.Sum('x', where=('op filter', 'list filter', 'sum filter')),
+        metrics.Sum('y', where=('op filter', 'list filter')),
+    ]
+    self.assertEqual(base_metric.unwrap(), expected)
+    self.assertEqual(extra_index, ['g'])
+
+  @parameterized.parameters(
+      [operations.CUPED, operations.PrePostChange]
+  )
+  def test_get_base_metrics_with_covariate_simple_metric(self, op):
+    m = metrics.Sum('x', where='sum filter')
+    comp = op('g', 'a', m, metrics.Sum('y'), where='op filter')
+    jk = operations.Jackknife('unit', comp)
+    base_metric, extra_index = jk.get_base_metrics()
+    expected = [metrics.Sum('x', where=('op filter', 'sum filter'))]
+    self.assertEqual(base_metric.unwrap(), expected)
+    self.assertEqual(extra_index, ['g'])
+
+  @parameterized.parameters(
+      [operations.CUPED, operations.PrePostChange]
+  )
+  def test_get_base_metrics_with_covariate_metriclist(self, op):
+    m = metrics.MetricList(
+        (metrics.Sum('x', where='sum filter'), metrics.Sum('y')),
+        where='list filter',
+    )
+    comp = op('g', 'a', m, metrics.Mean('y'), where='op filter')
+    jk = operations.Jackknife('unit', comp)
+    base_metric, extra_index = jk.get_base_metrics()
+    expected = [
+        metrics.Sum('x', where=('op filter', 'list filter', 'sum filter')),
+        metrics.Sum('y', where=('op filter', 'list filter')),
+    ]
+    self.assertEqual(base_metric.unwrap(), expected)
+    self.assertEqual(extra_index, ['g'])
+
+  @parameterized.parameters([
+      operations.AbsoluteChange('g', 'a', metrics.Sum('x')),
+      operations.PercentChange('g', 'a', metrics.Sum('x')),
+      operations.CUPED('g', 'a', metrics.Sum('x'), metrics.Sum('y')),
+      operations.PrePostChange('g', 'a', metrics.Sum('x'), metrics.Sum('y')),
+  ])
+  def test_get_base_metrics_metriclist_filter_passed_down(self, op):
+    op.where = 'f1'
+    jk = operations.Jackknife('unit', metrics.MetricList([op], where='f2'))
+    base_metric, extra_index = jk.get_base_metrics()
+    expected = [metrics.Sum('x', where=('f1', 'f2'))]
+    self.assertEqual(base_metric.unwrap(), expected)
+    self.assertEqual(extra_index, ['g'])
+
+  def test_get_base_metrics_complex(self):
+    comp1 = operations.AbsoluteChange('g', 'a', metrics.Sum('x'), where='f1')
+    comp2 = operations.CUPED(
+        'g',
+        'a',
+        metrics.Mean('x', where='f4'),
+        metrics.Mean('y', where='f5'),
+        where='f6',
+    )
+    comp3 = operations.PercentChange(
+        'g',
+        'a',
+        metrics.MetricList((metrics.Sum('x', where='f2'), metrics.Sum('y'))),
+        where='f3',
+    )
+    comp4 = operations.PrePostChange(
+        'g',
+        'a',
+        metrics.MetricList(
+            (metrics.Count('x', where='f7'), metrics.Count('y'))
+        ),
+        metrics.Variance('y', where='f8'),
+        where='f9',
+    )
+    comp_grp1 = metrics.MetricList((comp1, comp2), where='f10')
+    comp_grp2 = metrics.MetricList((comp3, comp4), where='f11')
+    comps = metrics.MetricList((comp_grp1, comp_grp2), where='f12')
+    jk = operations.Jackknife('unit')
+    base_metric, extra_index = jk(comps).get_base_metrics()
+
+    comp1.add_where(('f12', 'f10'))
+    comp2.add_where(('f12', 'f10'))
+    comp3.add_where(('f12', 'f11'))
+    comp4.add_where(('f12', 'f11'))
+
+    self.assertEqual(
+        base_metric[0].unwrap(), jk(comp1).get_base_metrics()[0].unwrap()
+    )
+    self.assertEqual(
+        base_metric[1].unwrap(), jk(comp2).get_base_metrics()[0].unwrap()
+    )
+    self.assertEqual(
+        base_metric[2].unwrap(), jk(comp3).get_base_metrics()[0].unwrap()
+    )
+    self.assertEqual(
+        base_metric[3].unwrap(), jk(comp4).get_base_metrics()[0].unwrap()
+    )
+    self.assertEqual(extra_index, ['g'])
 
 
 class BootstrapTests(parameterized.TestCase):
