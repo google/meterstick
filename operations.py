@@ -799,6 +799,10 @@ class PrePostChange(PercentChange):
 
       def compute_slices(self, df, split_by: Optional[List[Text]] = None):
         child = df.iloc[:, :len_child]
+        prefix = utils.get_unique_prefix(child)
+        df.columns = list(child.columns) + [
+            prefix + c for c in df.columns[len_child:]
+        ]
         covariate = df.iloc[:, len_child:]
         if len(covariate.columns) > 1:
           return super(Adjust, self).compute_slices(df, split_by)
@@ -826,7 +830,7 @@ class PrePostChange(PercentChange):
     child = super(PrePostChange,
                   self).compute_children_sql(table, split_by, execute, mode)
     covariates = child.iloc[:, -self.k_covariates:]
-    child = child.iloc[:, :self.k_covariates]
+    child = child.iloc[:, :-self.k_covariates]
     return self.adjust_value(child, covariates, split_by)
 
   def get_change_raw_sql(
@@ -1045,6 +1049,10 @@ class CUPED(AbsoluteChange):
 
       def compute_slices(self, df, split_by: Optional[List[Text]] = None):
         child = df.iloc[:, :len_child]
+        prefix = utils.get_unique_prefix(child)
+        df.columns = list(child.columns) + [
+            prefix + c for c in df.columns[len_child:]
+        ]
         covariate = df.iloc[:, len_child:]
         if len(covariate.columns) > 1:
           return super(Adjust, self).compute_slices(df, split_by)
@@ -1073,7 +1081,7 @@ class CUPED(AbsoluteChange):
     child = super(CUPED, self).compute_children_sql(table, split_by, execute,
                                                     mode)
     covariates = child.iloc[:, -self.k_covariates:]
-    child = child.iloc[:, :self.k_covariates]
+    child = child.iloc[:, :-self.k_covariates]
     return self.adjust_value(child, covariates, split_by)
 
   def get_change_raw_sql(

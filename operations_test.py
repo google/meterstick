@@ -256,7 +256,7 @@ class SimpleOperationTests(absltest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class PrePostChangeTests(absltest.TestCase):
+class PrePostChangeTests(parameterized.TestCase):
   n = 40
   df = pd.DataFrame({
       'x': np.random.choice(range(20), n),
@@ -428,7 +428,7 @@ class PrePostChangeTests(absltest.TestCase):
     testing.assert_frame_equal(output, expected)
 
 
-class CUPEDTests(absltest.TestCase):
+class CUPEDTests(parameterized.TestCase):
   n = 40
   df = pd.DataFrame({
       'x': np.random.choice(range(20), n),
@@ -2361,6 +2361,33 @@ class CommonTest(parameterized.TestCase):
         [m(metrics.Ratio('x', 'y')).get_fingerprint() for m in distinct_ops]
     )
     self.assertLen(fingerprints, len(distinct_ops))
+
+  @parameterized.parameters([operations.CUPED, operations.PrePostChange])
+  def test_cuped_prepost_with_duplicate_names_one_covariate(self, op):
+    s = metrics.Sum('x')
+    cov = metrics.Sum('x', where='x>0.1', name='foo')
+    cov_dup = metrics.Sum('x', where='x>0.1')
+    jk = operations.Jackknife('cookie', confidence=0.9)
+    op_dup = op('grp', 1, s, cov_dup, 'grp4')
+    op = op('grp', 1, s, cov, 'grp4')
+    output = jk(op_dup).compute_on(self.df).display(return_formatted_df=True)
+    expected = jk(op).compute_on(self.df).display(return_formatted_df=True)
+    testing.assert_frame_equal(output, expected)
+
+  @parameterized.parameters([operations.CUPED, operations.PrePostChange])
+  def test_cuped_prepost_with_duplicate_names_multiple_covariates(self, op):
+    s = metrics.Sum('x', name='foo')
+    cov_dup = [
+        metrics.Sum('x', where='x>0.1', name='foo'),
+        metrics.Sum('y', name='foo'),
+    ]
+    cov = [metrics.Sum('x', where='x>0.1'), metrics.Sum('y')]
+    jk = operations.Jackknife('cookie', confidence=0.9)
+    op_dup = op('grp', 1, s, cov_dup, 'grp4')
+    op = op('grp', 1, s, cov, 'grp4')
+    output = jk(op_dup).compute_on(self.df).display(return_formatted_df=True)
+    expected = jk(op).compute_on(self.df).display(return_formatted_df=True)
+    testing.assert_frame_equal(output, expected)
 
 
 if __name__ == '__main__':
