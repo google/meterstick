@@ -1355,9 +1355,9 @@ class JackknifeTests(parameterized.TestCase):
     df = pd.DataFrame({
         'x': [1, 100, 2, 100, 3, 100],
         'cookie': [1, 2, 3, 1, 2, 3],
-        'grp': ['A', 'B'] * 3,
+        'grp': [1, 0] * 3,
     })
-    change = metrics.Sum('x') | operations.PercentChange('grp', 'A')
+    change = metrics.Sum('x') | operations.PercentChange('grp', 1)
     m = operations.Jackknife('cookie', change, 0.9)
     res = m.compute_on(df)
     output = res.display(return_formatted_df=True)
@@ -1365,11 +1365,11 @@ class JackknifeTests(parameterized.TestCase):
         {
             'Dimensions': [
                 (
-                    '<div><div><span class="ci-display-experiment-id">A</span>'
+                    '<div><div><span class="ci-display-experiment-id">1</span>'
                     '</div></div>'
                 ),
                 (
-                    '<div><div><span class="ci-display-experiment-id">B</span>'
+                    '<div><div><span class="ci-display-experiment-id">0</span>'
                     '</div></div>'
                 ),
             ],
