@@ -1115,6 +1115,7 @@ class MetricList(Metric):
     tmpl = name_tmpl or 'MetricList({})'
     if len(children) == 1:
       name = children[0].name
+      name = name_tmpl.format(name) if name_tmpl else name
     else:
       name = tmpl.format(', '.join(m.name for m in children))
     super(MetricList, self).__init__(name, children, where, name_tmpl)
@@ -1154,8 +1155,11 @@ class MetricList(Metric):
   def compute_on_children(self, children, split_by):
     if isinstance(children, list):
       children = self.to_dataframe(children)
-    if self.name_tmpl:
-      children.columns = [self.name_tmpl.format(c) for c in children.columns]
+    if isinstance(children, pd.DataFrame):
+      if self.name_tmpl:
+        children.columns = [self.name_tmpl.format(c) for c in children.columns]
+    elif not isinstance(children, pd.Series):
+      children = pd.DataFrame({self.name: [children]})
     if self.columns:
       if len(children.columns) != len(self.columns):
         raise ValueError(
@@ -1262,8 +1266,7 @@ class MetricList(Metric):
                 return_dataframe=self.children_return_dataframe,
             )
         )
-    # When there is only one child, returns the result of the child.
-    return children[0] if len(self.children) == 1 else children
+    return children
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
