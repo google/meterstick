@@ -1455,6 +1455,60 @@ class JackknifeTests(parameterized.TestCase):
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
 
+  @parameterized.parameters([operations.CUPED, operations.PrePostChange])
+  def test_cuped_prepost_multiple_covariates_false_display(self, op):
+    df = pd.DataFrame({
+        'x': list(range(0, 5)) + list(range(1000, 1004)),
+        'y': range(9),
+        'cookie': [1, 2, 3] * 3,
+        'grp': list('AB') * 4 + ['C'],
+        'expr': ['foo'] * 5 + ['bar'] * 4,
+    })
+    base = [metrics.Sum('x'), metrics.Mean('x')]
+    cov = [metrics.Sum('y'), metrics.Mean('y')]
+    comp = op(
+        'expr',
+        'bar',
+        base,
+        cov,
+        'grp',
+        multiple_covariates=False,
+    )
+    jk = operations.Jackknife('cookie', confidence=0.9)
+
+    actual = jk(comp).compute_on(df).display(return_formatted_df=True)
+    expected1 = (
+        jk(
+            op(
+                'expr',
+                'bar',
+                base[0],
+                cov[0],
+                'grp',
+                multiple_covariates=False,
+            )
+        )
+        .compute_on(df)
+        .display(return_formatted_df=True)
+    )
+    expected2 = (
+        jk(
+            op(
+                'expr',
+                'bar',
+                base[1],
+                cov[1],
+                'grp',
+                multiple_covariates=False,
+            )
+        )
+        .compute_on(df)
+        .display(return_formatted_df=True)
+    )
+    expected = expected1.merge(expected2, on=['Dimensions'])
+
+    testing.assert_frame_equal(actual, expected)
+
   def test_display_raises_for_duplicate_metric_names(self):
     df = pd.DataFrame({
         'x': list(range(0, 4)),
@@ -2325,6 +2379,13 @@ class CommonTest(parameterized.TestCase):
         operations.PrePostChange(
             'x', 'a', covariates=metrics.Count('x'), stratified_by='q'
         ),
+        operations.PrePostChange(
+            'x',
+            'a',
+            covariates=metrics.Count('x'),
+            stratified_by='q',
+            multiple_covariates=False,
+        ),
         operations.CUPED(
             'x', 'y', covariates=metrics.Count('x'), stratified_by='q'
         ),
@@ -2336,6 +2397,13 @@ class CommonTest(parameterized.TestCase):
         ),
         operations.CUPED(
             'x', 'a', covariates=metrics.Count('x'), stratified_by='q'
+        ),
+        operations.CUPED(
+            'x',
+            'a',
+            covariates=metrics.Count('x'),
+            stratified_by='q',
+            multiple_covariates=False,
         ),
         operations.Jackknife('x'),
         operations.Jackknife('y'),
