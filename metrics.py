@@ -271,6 +271,8 @@ class Metric(object):
       self.where_ = tuple(where)
 
   def add_where(self, where):
+    if where is None:
+      return self
     where = [where] if isinstance(where, str) else list(where) or []
     if not self.where_:
       self.where = where
@@ -883,7 +885,7 @@ class Metric(object):
     res = self.get_equivalent_without_filter(*auxiliary_cols)  # pylint: disable=assignment-from-none
     if res:
       res.name = self.name
-      res.where = self.where_
+      res.add_where(self.where_)
     return res
 
   def get_equivalent_without_filter(self, *auxiliary_cols):

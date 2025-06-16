@@ -433,6 +433,17 @@ class Comparison(Operation):
         additional_fingerprint_attrs,
         **kwargs)
 
+  @property
+  def stratified_by(self):
+    return self.extra_split_by[len(self.extra_index):]
+
+  @stratified_by.setter
+  def stratified_by(self, stratified_by):
+    stratified_by = (
+        stratified_by if isinstance(stratified_by, list) else [stratified_by]
+    )
+    self.extra_split_by[len(self.extra_index):] = stratified_by
+
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
     """Gets the SQL for PercentChange or AbsoluteChange.
@@ -656,6 +667,16 @@ class AbsoluteChange(Comparison):
     return f'{raw_table_alias}.%(r)s - {base_table_alias}.%(b)s'
 
 
+def _check_covariates_match_base(base, cov):
+  len_base = len(base) if isinstance(base, metrics.MetricList) else 1
+  len_cov = len(cov) if isinstance(cov, metrics.MetricList) else 1
+  if len_cov != len_base:
+    raise ValueError(
+        'Covariates and base metric must have the same length. Got'
+        f' {len_cov} and {len_base}'
+    )
+
+
 class PrePostChange(PercentChange):
   """PrePost Percent change estimator on a Metric.
 
@@ -684,7 +705,13 @@ class PrePostChange(PercentChange):
     children: MetricList([child, covariates]).
     include_base: A boolean for whether the baseline condition should be
       included in the output.
-    k_covariates: The number of covariates to use for adjustment.
+    multiple_covariates: If True, all covariates are used together as in the
+      adjustment. If False, we zip the child and covariates and create a list of
+      one-covariate PrePostChange. Namely,
+      PrePostChange(child=[x1, x2], covariates=[y1, y2],
+                    multiple_covariates=False) is equivalent to
+      MetricList([PrePostChange(x1, y1), PrePostChange(x2, y2)]).
+    k_covariates: The length of covariates.
     And all other attributes inherited from Operation.
   """
 
@@ -695,6 +722,7 @@ class PrePostChange(PercentChange):
                covariates=None,
                stratified_by=None,
                include_base=False,
+               multiple_covariates=True,
                name_tmpl: Text = '{} PrePost Percent Change',
                **kwargs):
     if isinstance(child, (List, Tuple)):
@@ -702,19 +730,27 @@ class PrePostChange(PercentChange):
     if isinstance(covariates, (List, Tuple)):
       covariates = metrics.MetricList(covariates)
     if child and covariates:
+      if not multiple_covariates:
+        _check_covariates_match_base(child, covariates)
       child = metrics.MetricList((child, covariates))
     else:
       child = None
+    self.multiple_covariates = multiple_covariates
     stratified_by = [stratified_by] if isinstance(stratified_by,
                                                   str) else stratified_by or []
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
+    additional_fingerprint_attrs = kwargs.pop(
+        'additional_fingerprint_attrs', []
+    )
+    additional_fingerprint_attrs += ['multiple_covariates']
     super(PrePostChange, self).__init__(
-        stratified_by + condition_column,
+        condition_column + stratified_by,
         baseline_key,
         child,
         include_base,
         name_tmpl,
+        additional_fingerprint_attrs=additional_fingerprint_attrs,
         **kwargs,
     )
     self.extra_index = condition_column
@@ -731,6 +767,15 @@ class PrePostChange(PercentChange):
   def k_covariates(self) -> int:
     return count_features(self.covariates)
 
+  def compute_slices(self, df, split_by=None):
+    if self.multiple_covariates:
+      return super(PrePostChange, self).compute_slices(df, split_by)
+    equiv, _ = utils.get_equivalent_metric(self)
+    res = self.compute_util_metric_on(equiv, df, split_by)
+    tmpl_len = len(self.name_tmpl.format(''))
+    res.columns = [c[:-tmpl_len] for c in res.columns]
+    return res
+
   def compute_children(
       self,
       df,
@@ -739,6 +784,8 @@ class PrePostChange(PercentChange):
       return_dataframe=True,
       cache_key=None,
   ):
+    if not self.multiple_covariates:
+      raise NotImplementedError  # shouldn't be called.
     child, covariates = super(PrePostChange, self).compute_children(
         df, split_by, return_dataframe=False, cache_key=cache_key)
     original_split_by = [s for s in split_by if s not in self.extra_split_by]
@@ -826,12 +873,40 @@ class PrePostChange(PercentChange):
 
     return Adjust('').compute_on(aligned, split_by + self.extra_index)
 
+  def compute_through_sql(self, table, split_by, execute, mode):
+    if self.multiple_covariates:
+      return super(PrePostChange, self).compute_through_sql(
+          table, split_by, execute, mode
+      )
+    equiv, _ = utils.get_equivalent_metric(self)
+    res = self.compute_util_metric_on_sql(
+        equiv, table, split_by, execute, False, mode
+    )
+    # The column name got messed up when there is only one base metric because
+    # we squeeze the dataframe to a series.
+    if len(res.columns) == 1:
+      res.columns = [self.name_tmpl.format(self.children[0][0].name)]
+    return res
+
   def compute_children_sql(self, table, split_by, execute, mode=None):
+    if not self.multiple_covariates:
+      raise NotImplementedError  # shouldn't be called.
     child = super(PrePostChange,
                   self).compute_children_sql(table, split_by, execute, mode)
     covariates = child.iloc[:, -self.k_covariates:]
     child = child.iloc[:, :-self.k_covariates]
     return self.adjust_value(child, covariates, split_by)
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    if self.multiple_covariates:
+      return super(PrePostChange, self).get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, local_filter, with_data
+      )
+    equiv, _ = utils.get_equivalent_metric(self)
+    return equiv.get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data
+    )
 
   def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
@@ -924,6 +999,38 @@ class PrePostChange(PercentChange):
         with_data,
     )
 
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    if self.multiple_covariates:
+      return
+    _check_covariates_match_base(self.child, self.covariates)
+    if (
+        not isinstance(self.covariates, metrics.MetricList)
+        or len(self.covariates) == 1
+    ):
+      res = copy.deepcopy(self)
+      res.multiple_covariates = True
+      return metrics.MetricList([res])
+    if not isinstance(self.child, metrics.MetricList) or not isinstance(
+        self.covariates, metrics.MetricList
+    ):
+      raise ValueError(
+          "child and covariates are not MetricList. This shouldn't happen."
+      )
+    return metrics.MetricList([
+        PrePostChange(
+            self.extra_index,
+            self.baseline_key,
+            metrics.MetricList([b], where=self.child.where_),
+            metrics.MetricList([c], where=self.covariates.where_),
+            self.stratified_by,
+            self.include_base,
+            False,
+            self.name_tmpl,
+        )
+        for b, c in zip(self.child, self.covariates)
+    ], where=self.children[0].where_)
+
 
 class CUPED(AbsoluteChange):
   """CUPED change estimator on a Metric.
@@ -950,6 +1057,12 @@ class CUPED(AbsoluteChange):
     children: MetricList([child, covariates]).
     include_base: A boolean for whether the baseline condition should be
       included in the output.
+    multiple_covariates: If True, all covariates are used together as in the
+      adjustment. If False, we zip the child and covariates and create a list of
+      one-covariate CUPED. Namely,
+      CUPED(child=[x1, x2], covariates=[y1, y2], multiple_covariates=False) is
+      equivalent to MetricList([CUPED(x1, y1), CUPED(x2, y2)]).
+    k_covariates: The length of covariates.
     And all other attributes inherited from Operation.
   """
 
@@ -960,6 +1073,7 @@ class CUPED(AbsoluteChange):
                covariates=None,
                stratified_by=None,
                include_base=False,
+               multiple_covariates=True,
                name_tmpl: Text = '{} CUPED Change',
                **kwargs):
     if isinstance(child, (List, Tuple)):
@@ -967,19 +1081,27 @@ class CUPED(AbsoluteChange):
     if isinstance(covariates, (List, Tuple)):
       covariates = metrics.MetricList(covariates)
     if child and covariates:
+      if not multiple_covariates:
+        _check_covariates_match_base(child, covariates)
       child = metrics.MetricList((child, covariates))
     else:
       child = None
+    self.multiple_covariates = multiple_covariates
     stratified_by = [stratified_by] if isinstance(stratified_by,
                                                   str) else stratified_by or []
     condition_column = [condition_column] if isinstance(
         condition_column, str) else condition_column
+    additional_fingerprint_attrs = kwargs.pop(
+        'additional_fingerprint_attrs', []
+    )
+    additional_fingerprint_attrs += ['multiple_covariates']
     super(CUPED, self).__init__(
-        stratified_by + condition_column,
+        condition_column + stratified_by,
         baseline_key,
         child,
         include_base,
         name_tmpl,
+        additional_fingerprint_attrs=additional_fingerprint_attrs,
         **kwargs,
     )
     self.extra_index = condition_column
@@ -996,12 +1118,25 @@ class CUPED(AbsoluteChange):
   def k_covariates(self) -> int:
     return count_features(self.covariates)
 
-  def compute_children(self,
-                       df,
-                       split_by=None,
-                       melted=False,
-                       return_dataframe=True,
-                       cache_key=None):
+  def compute_slices(self, df, split_by=None):
+    if self.multiple_covariates:
+      return super(CUPED, self).compute_slices(df, split_by)
+    equiv, _ = utils.get_equivalent_metric(self)
+    res = self.compute_util_metric_on(equiv, df, split_by)
+    tmpl_len = len(self.name_tmpl.format(''))
+    res.columns = [c[:-tmpl_len] for c in res.columns]
+    return res
+
+  def compute_children(
+      self,
+      df,
+      split_by=None,
+      melted=False,
+      return_dataframe=True,
+      cache_key=None,
+  ):
+    if not self.multiple_covariates:
+      raise NotImplementedError  # shouldn't be called.
     child, covariates = super(CUPED, self).compute_children(
         df, split_by, return_dataframe=False, cache_key=cache_key)
     original_split_by = [s for s in split_by if s not in self.extra_split_by]
@@ -1077,12 +1212,40 @@ class CUPED(AbsoluteChange):
 
     return Adjust('').compute_on(aligned, split_by)
 
+  def compute_through_sql(self, table, split_by, execute, mode):
+    if self.multiple_covariates:
+      return super(CUPED, self).compute_through_sql(
+          table, split_by, execute, mode
+      )
+    equiv, _ = utils.get_equivalent_metric(self)
+    res = self.compute_util_metric_on_sql(
+        equiv, table, split_by, execute, False, mode
+    )
+    # The column name got messed up when there is only one base metric because
+    # we squeeze the dataframe to a series.
+    if len(res.columns) == 1:
+      res.columns = [self.name_tmpl.format(self.children[0][0].name)]
+    return res
+
   def compute_children_sql(self, table, split_by, execute, mode=None):
+    if not self.multiple_covariates:
+      raise NotImplementedError  # shouldn't be called.
     child = super(CUPED, self).compute_children_sql(table, split_by, execute,
                                                     mode)
     covariates = child.iloc[:, -self.k_covariates:]
     child = child.iloc[:, :-self.k_covariates]
     return self.adjust_value(child, covariates, split_by)
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    if self.multiple_covariates:
+      return super(CUPED, self).get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, local_filter, with_data
+      )
+    equiv, _ = utils.get_equivalent_metric(self)
+    return equiv.get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data
+    )
 
   def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
@@ -1184,6 +1347,38 @@ class CUPED(AbsoluteChange):
     )
     return adjusted_sql, with_data
 
+  def get_equivalent_without_filter(self, *auxiliary_cols):
+    del auxiliary_cols  # unused
+    if self.multiple_covariates:
+      return
+    _check_covariates_match_base(self.child, self.covariates)
+    if (
+        not isinstance(self.covariates, metrics.MetricList)
+        or len(self.covariates) == 1
+    ):
+      res = copy.deepcopy(self)
+      res.multiple_covariates = True
+      return metrics.MetricList([res])
+    if not isinstance(self.child, metrics.MetricList) or not isinstance(
+        self.covariates, metrics.MetricList
+    ):
+      raise ValueError(
+          "child and covariates are not MetricList. This shouldn't happen."
+      )
+    return metrics.MetricList([
+        CUPED(
+            self.extra_index,
+            self.baseline_key,
+            metrics.MetricList([b], where=self.child.where_),
+            metrics.MetricList([c], where=self.covariates.where_),
+            self.stratified_by,
+            self.include_base,
+            False,
+            self.name_tmpl,
+        )
+        for b, c in zip(self.child, self.covariates)
+    ], where=self.children[0].where_)
+
 
 class MH(Comparison):
   """Cochran-Mantel-Haenszel statistics estimator on a Metric.
@@ -1229,17 +1424,6 @@ class MH(Comparison):
         name_tmpl,
         extra_index=condition_column,
         **kwargs)
-
-  @property
-  def stratified_by(self):
-    return self.extra_split_by[len(self.extra_index):]
-
-  @stratified_by.setter
-  def stratified_by(self, stratified_by):
-    stratified_by = (
-        stratified_by if isinstance(stratified_by, list) else [stratified_by]
-    )
-    self.extra_split_by[len(self.extra_index):] = stratified_by
 
   def check_is_ratio(self, metric, allow_metriclist=True):
     if isinstance(metric, metrics.MetricList) and allow_metriclist:
