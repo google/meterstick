@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
 import itertools
 from typing import List, Optional, Sequence, Text, Union
 
@@ -75,22 +76,13 @@ class Model(operations.Operation):
       raise ValueError(
           'y must be a 1D array but is %iD!' % operations.count_features(y)
       )
-    if isinstance(x, Sequence):
-      x = metrics.MetricList(x)
+    if isinstance(x, metrics.Metric):
+      x = [x]
     child = None
     if x and y:
-      self.x = x
-      self.y = y
-      child = metrics.MetricList((y, x))
+      child = metrics.MetricList([y] + x)
     self.model = model
-    self.k = operations.count_features(x)
     self.model_name = model_name
-    if not name and x and y:
-      x_names = (
-          [m.name for m in x] if isinstance(x, metrics.MetricList) else [x.name]
-      )
-      name = '%s(%s ~ %s)' % (model_name, y.name, ' + '.join(x_names))
-    name_tmpl = '%s Coefficient: {}' % name
     additional_fingerprint_attrs = (
         [additional_fingerprint_attrs]
         if isinstance(additional_fingerprint_attrs, str)
@@ -98,7 +90,7 @@ class Model(operations.Operation):
     )
     super(Model, self).__init__(
         child,
-        name_tmpl,
+        None,
         group_by,
         [],
         name=name,
@@ -131,6 +123,17 @@ class Model(operations.Operation):
 
   def compute_through_sql(self, table, split_by, execute, mode):
     try:
+      if (
+          not mode
+          and isinstance(self, (LinearRegression, Ridge))
+          and not self.normalize
+          and self.k > 5
+      ):
+        print(
+            'INFO: SQL generation for your Model can be slow because the number'
+            ' of features > 5. Try compute_on_sql(mode="mixed") (for small'
+            ' data) or compute_on_sql(mode="magic") (for large data).'
+        )
       if mode == 'magic':
         if self.where:
           table = sql.Sql(None, table, self.where_)
@@ -155,24 +158,64 @@ class Model(operations.Operation):
     raise NotImplementedError
 
   @property
+  def y(self):
+    if not self.children or not isinstance(
+        self.children[0], metrics.MetricList
+    ):
+      raise ValueError('y must be a Metric!')
+    return self.children[0][0]
+
+  @property
+  def x(self):
+    if not self.children or not isinstance(
+        self.children[0], metrics.MetricList
+    ):
+      raise ValueError('x must be a MetricList!')
+    return metrics.MetricList(self.children[0][1:])
+
+  @property
+  def k(self):
+    return operations.count_features(self.x)
+
+  @property
+  def name(self):
+    if self.name_:  # pytype: disable=attribute-error
+      return self.name_  # pytype: disable=attribute-error
+    if not self.children:
+      return self.model_name
+    x_names = [m.name for m in self.x]
+    return '%s(%s ~ %s)' % (
+        self.model_name,
+        self.y.name,
+        ' + '.join(x_names),
+    )
+
+  @name.setter
+  def name(self, name):
+    self.name_ = name
+
+  @property
+  def name_tmpl(self):
+    if self.name_tmpl_:  # pytype: disable=attribute-error
+      return self.name_tmpl_  # pytype: disable=attribute-error
+    return self.name + ' Coefficient: {}'
+
+  @name_tmpl.setter
+  def name_tmpl(self, name_tmpl):
+    self.name_tmpl_ = name_tmpl
+
+  @property
   def group_by(self):
     return self.extra_split_by
 
-  def __call__(self, child):
-    if not isinstance(child, metrics.MetricList):
-      raise ValueError(f'Model can only take a MetricList but got {child}!')
-    model = super(Model, self).__call__(child)
-    model.y = child[0]
-    model.x = metrics.MetricList(child[1:])
-    model.k = operations.count_features(model.x)
-    x_names = [m.name for m in model.x]
-    model.name = '%s(%s ~ %s)' % (
-        model.model_name,
-        model.y.name,
-        ' + '.join(x_names),
-    )
-    model.name_tmpl = model.name + ' Coefficient: {}'
+  def __call__(self, child: metrics.Metric):
+    model = copy.deepcopy(self) if self.children else self
+    model.children = (child,)
     return model
+
+  def get_extra_idx(self, return_superset=False):
+    # Model blocks the propagation of extra split_by from the descendants.
+    return ()
 
 
 class LinearRegression(Model):
@@ -194,6 +237,21 @@ class LinearRegression(Model):
     model = linear_model.LinearRegression(fit_intercept=fit_intercept)
     super(LinearRegression, self).__init__(
         y, x, group_by, model, 'OLS', where, name, fit_intercept, normalize
+    )
+
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    return Ridge(
+        self.y,
+        self.x,
+        self.group_by,
+        0,
+        self.fit_intercept,
+        self.normalize,
+        self.where_,
+        self.name,
+    ).get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data
     )
 
   def compute_on_sql_magic_mode(self, table, split_by, execute):
@@ -254,11 +312,134 @@ class Ridge(Model):
     )
     self.alpha = alpha
 
+  def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
+                              local_filter, with_data):
+    """Gets the SQL query and WITH clause.
+
+    First we get the query that computes all the elements of X'X and X'y. This
+    step is same to that in the 'magic' mode. Then we get the elements of
+    (X'X)^(-1)*(X'y) by doing symbolic computation in SymPy, and translate
+    them to SQL queries.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      global_filter: The sql.Filters that can be applied to the whole Metric
+        tree.
+      indexes: The columns that we shouldn't apply any arithmetic operation.
+      local_filter: The sql.Filters that have been accumulated so far.
+      with_data: A global variable that contains all the WITH clauses we need.
+
+    Returns:
+      The SQL instance for metric, without the WITH clause component.
+      The global with_data which holds all datasources we need in the WITH
+        clause.
+    """
+    import sympy  # pylint: disable=g-import-not-at-top
+
+    normalize = self.fit_intercept and self.normalize and self.alpha
+    if normalize:
+      data_to_fit, with_data = get_data_to_fit(
+          self, table, split_by, global_filter, indexes, local_filter, with_data
+      )
+      data_to_fit_alias = with_data.merge(
+          sql.Datasource(data_to_fit, 'DataToFit')
+      )
+      split_by = sql.Columns(split_by.aliases)
+      indexes = sql.Columns(indexes.aliases)
+      groupby = sql.Columns(self.group_by).aliases
+      all_split_by = sql.Columns(split_by).add(indexes).add(groupby)
+      cols = []
+      xs = sql.Columns()
+      for c in data_to_fit.all_columns:
+        if c.alias in all_split_by:
+          cols.append(c.alias)
+        else:
+          cols.append(c.alias)
+          y = c.alias
+          break  # y is the 1st column that is not in all_split_by.
+      partition_by = ', '.join([c for c in cols[:-1] if c not in groupby])
+      for x in data_to_fit.all_columns[len(cols):]:
+        x = x.alias
+        centered = sql.Column(x) - sql.Column(
+            x, 'AVG({})', partition=partition_by
+        )
+        cols.append(centered.set_alias(x))
+        xs.add(x)
+      centered_sql = sql.Sql(cols, data_to_fit_alias)
+      centered_sql_table = sql.Datasource(centered_sql, 'DataWithXCentered')
+      table = with_data.merge(centered_sql_table)
+
+      x_t_x, x_t_y = utils.get_x_t_x_and_x_t_y_cols(xs, y, normalize=True)
+      cols = sql.Columns(x_t_x + x_t_y)
+      cols.add(sql.Column('COUNT(*)', alias='n_obs'))
+      sufficient_stats = sql.Sql(cols, table, groupby=split_by)
+      sufficient_stats_table = sql.Datasource(
+          sufficient_stats, 'SufficientStatElements'
+      )
+      sufficient_stats_alias = with_data.merge(sufficient_stats_table)
+    else:
+      xs, sufficient_stats, _, _ = get_sufficient_stats_elements_sql(
+          self,
+          table,
+          split_by,
+          False,
+          self.alpha,
+          global_filter,
+          indexes,
+          local_filter,
+          with_data,
+      )
+      with_data.merge(sufficient_stats.with_data)
+      sufficient_stats.with_data = None
+      sufficient_stats_table = sql.Datasource(
+          sufficient_stats, 'SufficientStatElements'
+      )
+      sufficient_stats_alias = with_data.merge(sufficient_stats_table)
+    n = len(xs) + bool(self.fit_intercept)
+    split_by = sql.Columns(split_by.aliases)
+    sufficient_stats_cols = [
+        c for c in sufficient_stats.columns.aliases if c not in split_by
+    ]
+    n_x_t_x_elements = n * (n + 1) // 2 - bool(self.fit_intercept)
+    x_t_x_elements = sufficient_stats_cols[:n_x_t_x_elements]
+    x_t_y_elements = sufficient_stats_cols[
+        n_x_t_x_elements : n_x_t_x_elements + n
+    ]
+    if self.fit_intercept:
+      x_t_x_elements = [1] + x_t_x_elements
+    penalty = 0
+    if isinstance(self, Ridge) and self.alpha:
+      # if normalize:
+      #   penalty = self.alpha
+      # else:
+      n_obs = sufficient_stats_cols[-1]
+      # We use AVG() to compute x_t_x so the penalty needs to be scaled.
+      penalty = self.alpha / sympy.Symbol(n_obs)
+    coefs = utils.get_ridge_coefficients(
+        x_t_x_elements, x_t_y_elements, self.fit_intercept, penalty, normalize
+    )
+    xs = xs.raw_aliases
+    cols = sql.Columns(split_by)
+    if self.fit_intercept:
+      xs = ['intercept'] + xs
+    for x, c in zip(xs, coefs):
+      # ccode prints x**2 to pow(x, 2) which works in SQL.
+      cols.add(
+          [sql.Column(sympy.printing.ccode(c), alias=self.name_tmpl.format(x))]
+      )
+    return sql.Sql(cols, sufficient_stats_alias), with_data
+
   def compute_on_sql_magic_mode(self, table, split_by, execute):
     # Never normalize for the sufficient_stats. Normalization is handled in
     # compute_ridge_coefs() instead.
     xs, sufficient_stats, _, _ = get_sufficient_stats_elements(
-        self, table, split_by, execute, normalize=False, include_n_obs=True
+        self,
+        table,
+        split_by,
+        execute,
+        normalize=False,
+        include_n_obs=self.alpha,
     )
     return apply_algorithm_to_sufficient_stats_elements(
         sufficient_stats, split_by, compute_ridge_coefs, xs, self
@@ -270,7 +451,6 @@ def get_sufficient_stats_elements(
     table,
     split_by,
     execute,
-    fit_intercept=None,
     normalize=None,
     include_n_obs=False,
 ):
@@ -281,7 +461,6 @@ def get_sufficient_stats_elements(
     table: The table we want to query from.
     split_by: The columns that we use to split the data.
     execute: A function that can executes a SQL query and returns a DataFrame.
-    fit_intercept: If to include intercept in the model.
     normalize: If to normalize the X. Note that only has effect when
       m.fit_intercept is True, which is consistent to sklearn.
     include_n_obs: If to include the number of observations in the return.
@@ -306,35 +485,21 @@ def get_sufficient_stats_elements(
     norms: Nonempty only when normalize. A pd.DataFrame which holds the l2-norm
       values of all centered-x columns.
   """
-  fit_intercept = m.fit_intercept if fit_intercept is None else fit_intercept
   if normalize is None:
     normalize = m.normalize and m.fit_intercept
-  table, with_data, xs_cols, y, avg_x, norms = get_data(
-      m, table, split_by, execute, normalize
-  )
-  xs = xs_cols.aliases
-  x_t_x = []
-  x_t_y = []
-  if m.fit_intercept:
-    if not normalize:
-      x_t_x = [sql.Column(f'AVG({x})', alias=f'x{i}') for i, x in enumerate(xs)]
-    x_t_y = [sql.Column(f'AVG({y})', alias='y')]
-  for i, x1 in enumerate(xs):
-    for j, x2 in enumerate(xs[i:]):
-      x_t_x.append(sql.Column(f'AVG({x1} * {x2})', alias=f'x{i}x{i + j}'))
-  x_t_y += [
-      sql.Column(f'AVG({x} * {y})', alias=f'x{i}y') for i, x in enumerate(xs)
-  ]
-  cols = sql.Columns(x_t_x + x_t_y)
-  if include_n_obs:
-    cols.add(sql.Column('COUNT(*)', alias='n_obs'))
-  sufficient_stats_elements = sql.Sql(
-      cols, table, groupby=sql.Columns(split_by).aliases, with_data=with_data
+  xs_cols, sufficient_stats_elements, avg_x, norms = (
+      get_sufficient_stats_elements_sql(
+          m,
+          table,
+          split_by,
+          normalize,
+          include_n_obs,
+      )
   )
   sufficient_stats_elements = execute(str(sufficient_stats_elements))
   if normalize:
     col_names = list(sufficient_stats_elements.columns)
-    avg_x_names = [f'x{i}' for i in range(len(xs))]
+    avg_x_names = [f'x{i}' for i in range(len(xs_cols))]
     sufficient_stats_elements[avg_x_names] = 0
     sufficient_stats_elements = sufficient_stats_elements[
         col_names[: len(split_by)] + avg_x_names + col_names[len(split_by) :]
@@ -342,7 +507,85 @@ def get_sufficient_stats_elements(
   return xs_cols, sufficient_stats_elements, avg_x, norms
 
 
-def get_data(m, table, split_by, execute, normalize=False):
+def get_sufficient_stats_elements_sql(
+    m,
+    table,
+    split_by,
+    normalize=None,
+    include_n_obs=False,
+    global_filter=None,
+    indexes=None,
+    local_filter=None,
+    with_data=None,
+):
+  """Generates the SQL columns for the elements of X'X and X'y.
+
+  Args:
+    m: A Model instance.
+    table: The table we want to query from.
+    split_by: The columns that we use to split the data.
+    normalize: If to normalize the X. Note that only has effect when
+      m.fit_intercept is True, which is consistent to sklearn.
+    include_n_obs: If to include the number of observations in the return.
+    global_filter: The sql.Filters that can be applied to the whole Metric
+      tree.
+    indexes: The columns that we shouldn't apply any arithmetic operation.
+    local_filter: The sql.Filters that have been accumulated so far.
+    with_data: A global variable that contains all the WITH clauses we need.
+
+  Returns:
+    xs: A list of the column names of x1, x2, ...
+    sufficient_stats_elements: A SQL query that has all unique elements of
+      sufficient stats. Each row corresponds to one slice in split_by. The
+      columns are
+        split_by,
+        avg(x0), avg(x1), ...,  # if fit_intercept
+        avg(x0 * x0), avg(x0 * x1), avg(x0 * x2), avg(x1 * x2), ...,
+        avg(y),  # if fit_intercept
+        avg(x0 * y), avg(x1 * y), ...,
+        n_observation  # if include_n_obs.
+      The column are named as
+        split_by, x0, x1,..., x0x0, x0x1,..., y, x0y, x1y,..., n_obs.
+    avg_x: Nonempty only when normalize. A pd.DataFrame which holds the
+      avg(x0), avg(x1), ... of the UNNORMALIZED x.
+      Don't confuse it with the ones in the sufficient_stats_elements, which are
+      the average of normalized x, which are just 0s.
+    norms: Nonempty only when normalize. A pd.DataFrame which holds the l2-norm
+      values of all centered-x columns.
+  """
+  table, with_data, xs_cols, y, avg_x, norms = get_data(
+      m,
+      table,
+      split_by,
+      normalize,
+      global_filter,
+      indexes,
+      local_filter,
+      with_data,
+  )
+  xs = xs_cols.aliases
+  x_t_x, x_t_y = utils.get_x_t_x_and_x_t_y_cols(
+      xs, y, '', m.fit_intercept, normalize
+  )
+  cols = sql.Columns(x_t_x + x_t_y)
+  if include_n_obs:
+    cols.add(sql.Column('COUNT(*)', alias='n_obs'))
+  sufficient_stats_elements = sql.Sql(
+      cols, table, groupby=sql.Columns(split_by).aliases, with_data=with_data
+  )
+  return xs_cols, sufficient_stats_elements, avg_x, norms
+
+
+def get_data(
+    m,
+    table,
+    split_by,
+    normalize=False,
+    global_filter=None,
+    indexes=None,
+    local_filter=None,
+    with_data=None,
+):
   """Retrieves the data that the model will be fit on.
 
   We compute a Model by first computing its children, and then fitting
@@ -357,8 +600,13 @@ def get_data(m, table, split_by, execute, normalize=False):
     m: A Model instance.
     table: The table we want to query from.
     split_by: The columns that we use to split the data.
-    execute: A function that can executes a SQL query and returns a DataFrame.
     normalize: If the Model normalizes x.
+    global_filter: The sql.Filters that can be applied to the whole Metric
+      tree.
+    indexes: The columns that we shouldn't apply any arithmetic operation.
+    local_filter: The sql.Filters that have been accumulated so far.
+    with_data: The WITH clause that holds all necessary subqueries so we can
+      query the `table`.
 
   Returns:
     table: A string representing the table name which we can query from. The
@@ -373,9 +621,9 @@ def get_data(m, table, split_by, execute, normalize=False):
     norms: Nonempty only when normalize is True. A pd.DataFrame which holds the
       l2-norm values of all centered-x columns.
   """
-  data = m.children[0].to_sql(table, split_by + m.group_by)
-  with_data = data.with_data
-  data.with_data = None
+  data, with_data = get_data_to_fit(
+      m, table, split_by, global_filter, indexes, local_filter, with_data
+  )
   table = with_data.merge(sql.Datasource(data, 'DataToFit'))
   y = data.columns[-m.k - 1].alias
   xs_cols = sql.Columns(data.columns[-m.k :])
@@ -387,9 +635,7 @@ def get_data(m, table, split_by, execute, normalize=False):
   avg_x_and_y = sql.Columns([sql.Column(f'AVG({x})', alias=x) for x in xs])
   avg_x_and_y.add(sql.Column(f'AVG({y})', alias=y))
   cols = sql.Columns(split_by).add(avg_x_and_y)
-  avgs = execute(
-      str(sql.Sql(cols, table, groupby=split_by, with_data=with_data))
-  )
+  avgs = sql.Sql(cols, table, groupby=split_by, with_data=with_data)
   avg_table = sql.Sql(
       cols,
       table,
@@ -422,7 +668,6 @@ def get_data(m, table, split_by, execute, normalize=False):
       groupby=split_by,
       with_data=with_data,
   )
-  norms = execute(str(norms))
 
   x_norm_squared = [sql.Column(f'SUM(POWER({x}, 2))', alias=x) for x in xs]
   norm_squared_table = sql.Sql(
@@ -454,6 +699,32 @@ def get_data(m, table, split_by, execute, normalize=False):
   )
 
   return table, with_data, xs_cols, y, avgs, norms
+
+
+def get_data_to_fit(
+    m,
+    table,
+    split_by,
+    global_filter=None,
+    indexes=None,
+    local_filter=None,
+    with_data=None,
+):
+  """Gets data for model fitting."""
+  # All filters are global when getting data to fit.
+  global_filter = sql.Filters(global_filter).add(local_filter).add(m.where_)
+  if indexes is None:
+    indexes = sql.Columns(split_by)
+  return m.children[0].get_sql_and_with_clause(
+      table,
+      sql.Columns(split_by).add(m.extra_split_by),
+      global_filter,
+      sql.Columns(indexes)
+      .add(m.extra_split_by)
+      .add(m.children[0].get_extra_idx()),
+      sql.Filters(),
+      sql.Datasources(with_data),
+  )
 
 
 def apply_algorithm_to_sufficient_stats_elements(
@@ -491,7 +762,7 @@ def compute_ridge_coefs(sufficient_stats, xs, m):
   if fit_intercept and m.normalize:
     return compute_coef_for_normalize_ridge(sufficient_stats, xs, m)
   x_t_x, x_t_y = construct_matrix_from_elements(sufficient_stats, fit_intercept)
-  if isinstance(m, Ridge):
+  if isinstance(m, Ridge) and m.alpha:
     n_obs = sufficient_stats['n_obs']
     penalty = np.identity(len(x_t_y))
     if fit_intercept:
@@ -758,6 +1029,8 @@ class ElasticNet(Model):
         self.max_iter,
     )
     if self.fit_intercept and self.normalize:
+      avgs = execute(str(avgs))
+      norms = execute(str(norms))
       coef = compute_normalized_coef(coef, norms, avgs, split_by)
     columns = list(coef.columns)
     columns[-len(xs) :] = [x.alias_raw for x in xs]
@@ -1064,9 +1337,7 @@ class LogisticRegression(Model):
           self, table, split_by, execute, include_n_obs=True
       )
 
-    table, with_data, xs_cols, y, _, _ = get_data(
-        self, table, split_by, execute
-    )
+    table, with_data, xs_cols, y, _, _ = get_data(self, table, split_by)
     xs = xs_cols.aliases
     if self.fit_intercept:
       xs.append('1')
