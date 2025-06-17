@@ -293,6 +293,9 @@ confidence, the output can be displayed in a way that highlights significant cha
 You can customize the `display`. It takes the same arguments as the underlying
 visualization
 [library](https://colab.research.google.com/github/google/meterstick/blob/master/confidence_interval_display_demo.ipynb).
+[Arguments](https://colab.research.google.com/github/google/meterstick/blob/master/confidence_interval_display_demo.ipynb#scrollTo=3RdDlmTznJ0n&line=4&uniqifier=1) `return_pre_agg_df` and `return_formatted_df`, are
+particularly valuable for advanced use cases. They offer nearly unlimited
+customization of the output.
 
 You can visualize the Metric tree by calling
 `visualize_metric_tree(rendering_fn)`, where `rendering_fn` is a function that
