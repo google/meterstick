@@ -2277,7 +2277,7 @@ class MetricWithCI(Operation):
     """The return should be similar to compute_children()."""
     raise NotImplementedError
 
-  def to_sql(self, table, split_by=None):
+  def to_sql(self, table, split_by=None, create_tmp_table_for_volatile_fn=None):
     if not isinstance(self, (Jackknife, Bootstrap)):
       raise NotImplementedError
     split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
@@ -2285,15 +2285,19 @@ class MetricWithCI(Operation):
     self._is_root_node = True
     if self.has_been_preaggregated or not self.can_precompute():
       if not self.where:
-        return super(MetricWithCI, self).to_sql(table, split_by)
+        return super(MetricWithCI, self).to_sql(
+            table, split_by, create_tmp_table_for_volatile_fn
+        )
       table = sql.Sql(None, table, self.where)
       self_no_filter = copy.deepcopy(self)
       self_no_filter.where = None
-      return self_no_filter.to_sql(table, split_by)
+      return self_no_filter.to_sql(
+          table, split_by, create_tmp_table_for_volatile_fn
+      )
 
     expanded, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
     if self != expanded:
-      return expanded.to_sql(table, split_by)
+      return expanded.to_sql(table, split_by, create_tmp_table_for_volatile_fn)
 
     expanded.where = None  # The filter has been taken care of in preaggregation
     expanded = utils.push_filters_to_leaf(expanded)
@@ -2322,7 +2326,7 @@ class MetricWithCI(Operation):
         equiv.unit = None
     else:
       equiv.has_local_filter = any([l.where for l in leaf])
-    return equiv.to_sql(preagg, split_by)
+    return equiv.to_sql(preagg, split_by, create_tmp_table_for_volatile_fn)
 
   def get_sql_and_with_clause(
       self, table, split_by, global_filter, indexes, local_filter, with_data

@@ -25,6 +25,11 @@ from typing import Iterable, Optional, Text, Union
 
 
 SAFE_DIVIDE = 'IF(({denom}) = 0, NULL, ({numer}) / ({denom}))'
+# If to use CREATE TEMP TABLE. Setting it to False disables CREATE TEMP TABLE
+# even when it's needed.
+ALLOW_TEMP_TABLE = True
+# If the engine supports CREATE TEMP TABLE
+TEMP_TABLE_SUPPORTED = None
 
 
 def is_compatible(sql0, sql1):
@@ -65,6 +70,80 @@ def add_suffix(alias):
     return alias
   else:
     return alias + '_1'
+
+
+def rand_run_only_once_in_with_clause(execute):
+  """Check if the RAND() is only evaluated once in the WITH clause."""
+  d = execute(
+      '''WITH T AS (SELECT RAND() AS r)
+      SELECT t1.r - t2.r AS d
+      FROM T t1 CROSS JOIN T t2'''
+  )
+  return bool(d.iloc[0, 0] == 0)
+
+
+def dep_on_rand_table(query, rand_tables):
+  """Returns if a SQL query depends on any stochastic table in rand_tables."""
+  for rand_table in rand_tables:
+    if re.search(r'\b%s\b' % rand_table, str(query)):
+      return True
+  return False
+
+
+def get_temp_tables(with_data: 'Datasources'):
+  """Gets all the subquery tables that need to be materialized.
+
+  When generating the query, we assume that volatile functions like RAND() in
+  the WITH clause behave as if they are evaluated only once. Unfortunately, not
+  all engines behave like that. In those cases, we need to CREATE TEMP TABLE to
+  materialize the subqueries that have volatile functions, so that the same
+  result is used in all places. An example is
+    WITH T AS (SELECT RAND() AS r)
+    SELECT t1.r - t2.r AS d
+    FROM T t1 CROSS JOIN T t2.
+  If it doesn't always evaluates to 0, we need to create a temp table for T.
+  A subquery needs to be materialized if
+    1. it depends on any stochastic table
+    (e.g. RAND()) and
+    2. the random column is referenced in the same query multiple times.
+  #2 is hard to check so we check if the stochastic table is referenced in the
+  same query multiple times instead.
+  An exception is the BootstrapRandomChoices table, which refers to a stochastic
+  table twice but only one refers to the stochasic column, so we don't need to
+  materialize it.
+  This function finds all the subquery tables in the WITH clause that need to be
+  materialized by
+  1. finding all the stochastic tables,
+  2. finding all the tables that depend, even indirectly, on a stochastic table,
+  3. finding all the tables in #2 that are referenced in the same query multiple
+    times.
+
+  Args:
+    with_data: The with clause.
+
+  Returns:
+    A set of table names that need to be materialized.
+  """
+  tmp_tables = set()
+  for rand_table in with_data:
+    query = with_data[rand_table]
+    if 'RAND' not in str(query):
+      continue
+    dep_on_rand = set([rand_table])
+    for alias in with_data:
+      if dep_on_rand_table(with_data[alias].from_data, dep_on_rand):
+        dep_on_rand.add(alias)
+    for t in dep_on_rand:
+      from_data = with_data[t].from_data
+      if isinstance(from_data, Join) and not t.startswith(
+          'BootstrapRandomChoices'
+      ):
+        if dep_on_rand_table(from_data.ds1, dep_on_rand) and dep_on_rand_table(
+            from_data.ds2, dep_on_rand
+        ):
+          tmp_tables.add(rand_table)
+          break
+  return tmp_tables
 
 
 def get_alias(c):
@@ -571,6 +650,7 @@ class Datasources(SqlComponents):
   def __init__(self, datasources=None):
     super(Datasources, self).__init__()
     self.children = collections.OrderedDict()
+    self.temp_tables = set()
     self.add(datasources)
 
   @property
@@ -676,6 +756,23 @@ class Datasources(SqlComponents):
       children.alias = add_suffix(alias)
       return self.add(children)
 
+  def add_temp_table(self, table: Union[str, 'Sql', Join, Datasource]):
+    """Marks alias and all its data dependencies as temp tables."""
+    if isinstance(table, str):
+      self.temp_tables.add(table)
+      if table in self.children:
+        self.add_temp_table(self.children[table])
+      return
+    if isinstance(table, Join):
+      self.add_temp_table(table.ds1)
+      self.add_temp_table(table.ds2)
+      return
+    if isinstance(table, Datasource):
+      return self.add_temp_table(table.table)
+    if isinstance(table, Sql):
+      return self.add_temp_table(table.from_data)
+    return self
+
   def extend(self, other: 'Datasources'):
     """Merge other to self. Adjust the query if a new alias is needed."""
     datasources = list(other.datasources)
@@ -691,7 +788,18 @@ class Datasources(SqlComponents):
     return self
 
   def __str__(self):
-    return ',\n'.join((d.get_expression('WITH') for d in self.datasources if d))
+    temp_tables = []
+    with_tables = []
+    for d in self.datasources:
+      expression = d.get_expression('WITH')
+      if d.alias in self.temp_tables:
+        temp_tables.append(f'CREATE OR REPLACE TEMP TABLE {expression};')
+      else:
+        with_tables.append(expression)
+    res = '\n'.join(temp_tables)
+    if with_tables:
+      res += '\nWITH\n' + ',\n'.join(with_tables)
+    return res.strip()
 
 
 class Sql(SqlComponent):
@@ -766,7 +874,7 @@ class Sql(SqlComponent):
     return True
 
   def __str__(self):
-    with_clause = 'WITH\n%s' % self.with_data if self.with_data else None
+    with_clause = str(self.with_data) if self.with_data else None
     all_columns = self.all_columns or '*'
     select_clause = f'SELECT\n{all_columns}'
     from_clause = ('FROM %s'
