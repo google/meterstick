@@ -255,6 +255,29 @@ class SimpleOperationTests(absltest.TestCase):
     )
     testing.assert_frame_equal(output, expected)
 
+  def test_get_extra_idx(self):
+    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
+    ab = operations.AbsoluteChange('foo', 'f', metrics.Sum('c'))
+    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
+    self.assertEqual(m.get_extra_idx(), ('foo',))
+
+  def test_get_extra_idx_return_superset(self):
+    s = metrics.Sum('x')
+    m = metrics.MetricList((
+        operations.AbsoluteChange('g', 0, s),
+        operations.AbsoluteChange('g2', 1, s),
+    ))
+    actual = m.get_extra_idx(True)
+    self.assertEqual(set(actual), set(('g', 'g2')))
+
+  def test_get_extra_idx_raises(self):
+    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
+    ab = operations.AbsoluteChange('baz', 'f', metrics.Sum('c'))
+    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
+    with self.assertRaises(ValueError) as cm:
+      m.get_extra_idx()
+    self.assertEqual(str(cm.exception), 'Incompatible indexes!')
+
 
 class PrePostChangeTests(parameterized.TestCase):
   n = 40

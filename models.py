@@ -17,6 +17,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
 import itertools
 from typing import List, Optional, Sequence, Text, Union
 
@@ -75,30 +76,23 @@ class Model(operations.Operation):
       raise ValueError(
           'y must be a 1D array but is %iD!' % operations.count_features(y)
       )
-    if isinstance(x, Sequence):
-      x = metrics.MetricList(x)
+    if isinstance(x, metrics.Metric):
+      x = [x]
     child = None
     if x and y:
-      self.x = x
-      self.y = y
-      child = metrics.MetricList((y, x))
+      child = metrics.MetricList([y] + x)
     self.model = model
-    self.k = operations.count_features(x)
     self.model_name = model_name
-    if not name and x and y:
-      x_names = (
-          [m.name for m in x] if isinstance(x, metrics.MetricList) else [x.name]
-      )
-      name = '%s(%s ~ %s)' % (model_name, y.name, ' + '.join(x_names))
-    name_tmpl = '%s Coefficient: {}' % name
     additional_fingerprint_attrs = (
         [additional_fingerprint_attrs]
         if isinstance(additional_fingerprint_attrs, str)
         else list(additional_fingerprint_attrs or [])
     )
+    self.name_ = None
+    self.name_tmpl_ = None
     super(Model, self).__init__(
         child,
-        name_tmpl,
+        None,
         group_by,
         [],
         name=name,
@@ -155,24 +149,64 @@ class Model(operations.Operation):
     raise NotImplementedError
 
   @property
+  def y(self):
+    if not self.children or not isinstance(
+        self.children[0], metrics.MetricList
+    ):
+      raise ValueError('y must be a Metric!')
+    return self.children[0][0]
+
+  @property
+  def x(self):
+    if not self.children or not isinstance(
+        self.children[0], metrics.MetricList
+    ):
+      raise ValueError('x must be a MetricList!')
+    return metrics.MetricList(self.children[0][1:])
+
+  @property
+  def k(self):
+    return operations.count_features(self.x)
+
+  @property
+  def name(self):
+    if self.name_:
+      return self.name_
+    if not self.children:
+      return self.model_name
+    x_names = [m.name for m in self.x]
+    return '%s(%s ~ %s)' % (
+        self.model_name,
+        self.y.name,
+        ' + '.join(x_names),
+    )
+
+  @name.setter
+  def name(self, name):
+    self.name_ = name
+
+  @property
+  def name_tmpl(self):
+    if self.name_tmpl_:
+      return self.name_tmpl_
+    return self.name + ' Coefficient: {}'
+
+  @name_tmpl.setter
+  def name_tmpl(self, name_tmpl):
+    self.name_tmpl_ = name_tmpl
+
+  @property
   def group_by(self):
     return self.extra_split_by
 
-  def __call__(self, child):
-    if not isinstance(child, metrics.MetricList):
-      raise ValueError(f'Model can only take a MetricList but got {child}!')
-    model = super(Model, self).__call__(child)
-    model.y = child[0]
-    model.x = metrics.MetricList(child[1:])
-    model.k = operations.count_features(model.x)
-    x_names = [m.name for m in model.x]
-    model.name = '%s(%s ~ %s)' % (
-        model.model_name,
-        model.y.name,
-        ' + '.join(x_names),
-    )
-    model.name_tmpl = model.name + ' Coefficient: {}'
+  def __call__(self, child: metrics.Metric):
+    model = copy.deepcopy(self) if self.children else self
+    model.children = (child,)
     return model
+
+  def get_extra_idx(self, return_superset=False):
+    # Model's extra indexes don't apply to descendants.
+    return ()
 
 
 class LinearRegression(Model):
@@ -270,7 +304,6 @@ def get_sufficient_stats_elements(
     table,
     split_by,
     execute,
-    fit_intercept=None,
     normalize=None,
     include_n_obs=False,
 ):
@@ -281,7 +314,6 @@ def get_sufficient_stats_elements(
     table: The table we want to query from.
     split_by: The columns that we use to split the data.
     execute: A function that can executes a SQL query and returns a DataFrame.
-    fit_intercept: If to include intercept in the model.
     normalize: If to normalize the X. Note that only has effect when
       m.fit_intercept is True, which is consistent to sklearn.
     include_n_obs: If to include the number of observations in the return.
@@ -306,7 +338,6 @@ def get_sufficient_stats_elements(
     norms: Nonempty only when normalize. A pd.DataFrame which holds the l2-norm
       values of all centered-x columns.
   """
-  fit_intercept = m.fit_intercept if fit_intercept is None else fit_intercept
   if normalize is None:
     normalize = m.normalize and m.fit_intercept
   table, with_data, xs_cols, y, avg_x, norms = get_data(
