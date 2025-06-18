@@ -713,6 +713,19 @@ class TestMetricList(parameterized.TestCase):
     expected.index.name = 'Y'
     testing.assert_frame_equal(output, expected)
 
+  def test_unwrap(self):
+    s = metrics.Sum('x', where='bar')
+    m = metrics.MetricList([s, metrics.Count('y')])
+    m = metrics.MetricList([m, metrics.Sum('z')], where='foo')
+    actual = m.unwrap()
+    expected = [
+        metrics.Sum('x', where=('bar', 'foo')),
+        metrics.Count('y', where='foo'),
+        metrics.Sum('z', where='foo'),
+    ]
+    self.assertEqual(actual, expected)
+    self.assertEqual(s.where, 'bar')  # orignal instance is not changed
+
   def test_len(self):
     ms = [metrics.Sum('X'), metrics.Mean('X')]
     m = metrics.MetricList(ms)

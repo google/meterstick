@@ -1293,6 +1293,28 @@ class MetricList(Metric):
     res_all.index.names = res[0].index.names
     return res_all
 
+  def unwrap(self) -> List[Metric]:
+    """Unwraps a MetricList and returns a list of all child Metrics.
+
+    It recursively removes the MetricList wrapper and collects all children
+    Metrics into a list.
+
+    Returns:
+      A list of Metric instances.
+    """
+    result = []
+    for child in self.children:
+      if not isinstance(child, Metric):
+        raise ValueError('%s is not a Metric so cannot be unwrapped.' % child)
+      if self.where_:
+        child = copy.deepcopy(child)
+        child.add_where(self.where_)
+      if isinstance(child, MetricList):
+        result.extend(child.unwrap())
+      else:
+        result.append(child)
+    return result
+
   def rename_columns(self, rename_columns: List[Text]):
     """Rename the columns of the MetricList.
 
