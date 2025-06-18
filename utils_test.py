@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Tests for meterstick.v2.utils."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -286,6 +287,29 @@ class UtilsTest(absltest.TestCase):
     expected = df.droplevel(0)
     actual = utils.remove_empty_level(df)
     testing.assert_frame_equal(expected, actual)
+
+  def test_get_extra_idx(self):
+    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
+    ab = operations.AbsoluteChange('foo', 'f', metrics.Sum('c'))
+    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
+    self.assertEqual(utils.get_extra_idx(m), ('foo',))
+
+  def test_get_extra_idx_return_superset(self):
+    s = metrics.Sum('x')
+    m = metrics.MetricList((
+        operations.AbsoluteChange('g', 0, s),
+        operations.AbsoluteChange('g2', 1, s),
+    ))
+    actual = utils.get_extra_idx(m, True)
+    self.assertEqual(set(actual), set(('g', 'g2')))
+
+  def test_get_extra_idx_raises(self):
+    mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
+    ab = operations.AbsoluteChange('baz', 'f', metrics.Sum('c'))
+    m = operations.Jackknife('unit', metrics.MetricList((mh, ab)))
+    with self.assertRaises(ValueError) as cm:
+      utils.get_extra_idx(m)
+    self.assertEqual(str(cm.exception), 'Incompatible indexes!')
 
   def test_get_extra_split_by(self):
     mh = operations.MH('foo', 'f', 'bar', metrics.Ratio('a', 'b'))
