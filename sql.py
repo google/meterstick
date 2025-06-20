@@ -376,7 +376,10 @@ class Column(SqlComponent):
       frame = self.window_frame
       window_clause = ' '.join(c for c in (partition, order, frame) if c)
       over = ' OVER (%s)' % window_clause
-    column = ('IF(%s, %s, NULL)' % (self.filters, c) if self.filters else c
+    # Some Beam engines don't support SUM(IF(cond, var, NULL)) well so we use 0
+    # as the base to make it work.
+    base = '0' if self.fn.upper() == 'SUM({})' else 'NULL'
+    column = (f'IF(%s, %s, {base})' % (self.filters, c) if self.filters else c
               for c in self.column)
     res = self.fn.format(*column)
     return res + over if over else res

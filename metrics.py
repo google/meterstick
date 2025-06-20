@@ -659,8 +659,19 @@ class Metric(object):
         pass
     if self.where:
       table = sql.Sql(None, table, self.where)
-    res = self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
-    return self.to_series_or_number_if_not_operation(res)
+    try:
+      res = self.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+      return self.to_series_or_number_if_not_operation(res)
+    except NotImplementedError:
+      raise
+    except Exception as e:  # pylint: disable=broad-except
+      if mode:
+        raise ValueError(
+            'Please see the root cause of the failure above. You can try'
+            ' `mode=None` to see if it helps.'
+        ) from e
+      else:
+        raise
 
   def to_series_or_number_if_not_operation(self, df):
     return self.to_series_or_number(df) if not self.is_operation else df
@@ -814,8 +825,11 @@ class Metric(object):
     children = self.compute_children_sql(table, split_by, execute, mode)
     return self.compute_on_children(children, split_by)
 
-  def compute_children_sql(self, table, split_by, execute, mode=None):
+  def compute_children_sql(
+      self, table, split_by, execute, mode, *args, **kwargs
+  ):
     """The return should be similar to compute_children()."""
+    del args, kwargs  # unused
     children = []
     for c in self.children:
       if not isinstance(c, Metric):
@@ -2286,7 +2300,7 @@ class Quantile(SimpleMetric):
         val,
         SUM(weight) AS weight
       FROM T
-      WHERE val IS NOT NULL AND weight IS NOT NULL
+      WHERE val IS NOT NULL AND weight IS NOT NULL AND weight != 0
       GROUP BY split_by, val),
       QuantileWeights AS (SELECT
         split_by,
@@ -2296,7 +2310,7 @@ class Quantile(SimpleMetric):
           - 0.5 * weight,
           SUM(weight) OVER (PARTITION BY split_by)) AS weight
       FROM AggregatedQuantileWeights
-      WHERE weight IS NOT NULL
+      WHERE weight IS NOT NULL AND weight != 0
       ORDER BY split_by, val),
       PairedQuantileWeights AS (SELECT
         split_by,
@@ -2346,9 +2360,11 @@ class Quantile(SimpleMetric):
     deduped_weight_sql = sql.Sql(
         cols,
         table,
-        sql.Filters(global_filter).add(
-            (f'{self.var} IS NOT NULL', f'{self.weight} IS NOT NULL')
-        ),
+        sql.Filters(global_filter).add((
+            f'{self.var} IS NOT NULL',
+            f'{self.weight} IS NOT NULL',
+            f'{self.weight} != 0',
+        )),
         split_by_and_value,
     )
     deduped_weight_alias = with_data.merge(
@@ -2372,7 +2388,7 @@ class Quantile(SimpleMetric):
     normalized_weights_sql = sql.Sql(
         cols,
         deduped_weight_alias,
-        where=f'{w} IS NOT NULL',
+        where=(f'{w} IS NOT NULL', f'{w} != 0'),
         orderby=split_by_and_value,
     )
     normalized_weights_alias = with_data.merge(

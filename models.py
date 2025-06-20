@@ -1078,6 +1078,8 @@ class LogisticRegression(Model):
       raise ValueError("Magic mode doesn't support class_weight!")
     if self.intercept_scaling != 1:
       raise ValueError('intercept_scaling is not supported in magic mode!')
+    if not self.y:
+      raise ValueError('y is not set!')
 
     y = self.y.to_sql(table, self.group_by + split_by)
     n_y = metrics.Count(y.columns[-1].alias, distinct=True)

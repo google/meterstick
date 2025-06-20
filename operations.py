@@ -2198,7 +2198,31 @@ class MetricWithCI(Operation):
       ) from e
 
   def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
-    """Computes self in a SQL query and process the result."""
+    """Computes self in a SQL query and process the result.
+
+    We first execute the SQL query then process the result.
+    When confidence is not specified, for each child Metric, the SQL query
+    returns two columns. The result columns are like
+      metric1, metric1 jackknife SE, metric2, metric2 jackknife SE, ...
+    When confidence is specified, for each child Metric, the SQL query
+    returns four columns. The result columns are like
+      metric1, metric1 CI lower, metric1 CI upper,
+      metric2, metric2 CI lower, metric2 CI upper,
+      ...
+      metricN, metricN CI lower, metricN CI upper,
+      metric 1 base value, metric 2 base value, ..., metricN base value.
+    The base value columns only exist when the child is an instance of
+    PercentChange, AbsoluteChange, or their derived classes. Base values are the
+    raw value the comparison is carried out.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+
+    Returns:
+      The result DataFrame of Jackknife/Bootstrap.
+    """
     res = super(MetricWithCI,
                 self).compute_on_sql_sql_mode(table, split_by, execute)
     sub_dfs = []
@@ -2252,21 +2276,94 @@ class MetricWithCI(Operation):
     return self.add_base_to_res(res, base)
 
   def compute_on_sql_mixed_mode(self, table, split_by, execute, mode=None):
+    """Computes the child in SQL and the rest in Python.
+
+    There are two parts. First we compute the standard errors. Then we join it
+    with point estimate. When the child is a Comparison, we also compute the
+    base value for the display().
+    For the first part, we preaggregate the data when possible. See the docs of
+    Bootstrap.compute_slices about the details of the preaggregation. The
+    structure of this part is similar to to_sql(). Note that we apply
+    preaggregation to both Jackknife and Bootstrap even though
+    Jackknife.compute_slices doesn't have preaggregation. We don't do
+    preaggregation in Jackknife.compute_slices because it already cuts the
+    corner to get leave-one-out-estimates. Adding preaggregation actually slow
+    things down. Here in 'mixed' mode we don't cut the corner to get LOO so
+    preaggregation makes sense.
+    Then we compute the point estimate, join it with the standard error, and do
+    some data manipulations.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      mode: It's always 'mixed' or 'magic' otherwise we won't be here.
+
+    Returns:
+      The result DataFrame of Jackknife/Bootstrap.
+    """
     batch_size = self._runtime_batch_size or self.sql_batch_size
-    replicates = self.compute_children_sql(
-        table, split_by, execute, mode, batch_size
+    if self.has_been_preaggregated or not self.can_precompute():
+      if self.where:
+        table = sql.Sql(None, table, self.where)
+        self_no_filter = copy.deepcopy(self)
+        self_no_filter.where = None
+        return self_no_filter.compute_on_sql_mixed_mode(
+            table, split_by, execute, mode
+        )
+
+      replicates = self.compute_children_sql(
+          table, split_by, execute, mode, batch_size
+      )
+      std = self.compute_on_children(replicates, split_by)
+      point_est = self.compute_child_sql(
+          table, split_by, execute, True, mode=mode
+      )
+      res = point_est.join(utils.melt(std))
+      if self.confidence:
+        res[self.prefix + ' CI-lower'] = (
+            res.iloc[:, 0] - res[self.prefix + ' CI-lower']
+        )
+        res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
+      res = utils.unmelt(res)
+      base = self.compute_change_base(table, split_by, execute, mode)
+      return self.add_base_to_res(res, base)
+
+    expanded, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
+    if self != expanded:
+      return expanded.compute_on_sql_mixed_mode(table, split_by, execute, mode)
+
+    # The filter has been taken care of in preaggregation.
+    expanded.where = None
+    expanded = utils.push_filters_to_leaf(expanded)
+    all_split_by = (
+        split_by
+        + list(utils.get_extra_split_by(expanded, return_superset=True))
+        + [expanded.unit]
     )
-    std = self.compute_on_children(replicates, split_by)
-    point_est = self.compute_child_sql(
-        table, split_by, execute, True, mode=mode)
-    res = point_est.join(utils.melt(std))
-    if self.confidence:
-      res[self.prefix +
-          ' CI-lower'] = res.iloc[:, 0] - res[self.prefix + ' CI-lower']
-      res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
-    res = utils.unmelt(res)
-    base = self.compute_change_base(table, split_by, execute, mode)
-    return self.add_base_to_res(res, base)
+    leaf = utils.get_leaf_metrics(expanded)
+    for m in leaf:
+      m.where = sql.Filters(m.where_).remove(self.where_)
+    cols = [
+        l.get_sql_columns(l.where_).set_alias(get_preaggregated_metric_var(l))
+        for l in leaf
+    ]
+    preagg = sql.Sql(cols, table, self.where_, all_split_by)
+    equiv = get_preaggregated_metric_tree(expanded)
+    equiv.unit = sql.Column(equiv.unit).alias
+    split_by = sql.Columns(split_by).aliases
+    for m in equiv.traverse():
+      if isinstance(m, metrics.Metric):
+        m.extra_index = sql.Columns(m.extra_index).aliases
+        m.extra_split_by = sql.Columns(m.extra_split_by).aliases
+    if isinstance(equiv, Bootstrap):
+      # When each unit only has one row after preaggregation, we sample by
+      # rows.
+      if not utils.get_extra_split_by(equiv, return_superset=True):
+        equiv.unit = None
+    else:
+      equiv.has_local_filter = any([l.where for l in leaf])
+    return equiv.compute_on_sql_mixed_mode(preagg, split_by, execute, mode)
 
   def compute_children_sql(self,
                            table,
@@ -2278,6 +2375,23 @@ class MetricWithCI(Operation):
     raise NotImplementedError
 
   def to_sql(self, table, split_by=None, create_tmp_table_for_volatile_fn=None):
+    """Generates SQL query for the metric.
+
+    The SQL generation is actually delegated to get_sql_and_with_clause(). This
+    function does the preaggregation when possible. See the docs of
+    Bootstrap.compute_slices() about the details of the preaggregation. The
+    structure of this function is similar to compute_on_sql_mixed_mode().
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      create_tmp_table_for_volatile_fn: If to put subqueries that contain
+      volatile functions, namely, RAND(), into a CREATE TEMP TABLE, or leave
+      them in the WITH clause.
+
+    Returns:
+      The query that does Jackknife/Bootstrap.
+    """
     if not isinstance(self, (Jackknife, Bootstrap)):
       raise NotImplementedError
     split_by = [split_by] if isinstance(split_by, str) else list(split_by or [])
@@ -2308,6 +2422,9 @@ class MetricWithCI(Operation):
         + [expanded.unit]
     )
     leaf = utils.get_leaf_metrics(expanded)
+    # The root filter has already been applied in preaggregation.
+    for m in leaf:
+      m.where = sql.Filters(m.where_).remove(self.where_)
     cols = [
         l.get_sql_columns(l.where_).set_alias(get_preaggregated_metric_var(l))
         for l in leaf
@@ -2685,7 +2802,83 @@ class Jackknife(MetricWithCI):
   def compute_children_sql(
       self, table, split_by, execute, mode=None, batch_size=None
   ):
-    """Compute the children on leave-one-out data in SQL."""
+    """Compute the children on leave-one-out data in SQL.
+
+    When
+    1. the data have been preaggregated, which means all the leaf Metrics are
+    Sum and Count,
+    2. batch_size is None,
+    we compute all the leaf nodes on the preaggregated date, grouped by all the
+    split_by columns we ever need, including self.unit. Then we cut the corner
+    to get the leave-one-out estimates. See the doc of compute_slices() for more
+    details.
+    Otherwise, if batch_size is None or 1, we iterate unique units in the data.
+    In iteration k, we compute the child on
+    'SELECT * FROM table WHERE unit != k' to get the leave-k-out estimate.
+    If batch_size is larger than 1, in each iteration, we compute the child on
+    SELECT
+      *
+    FROM UNNEST([1, 2, ..., batch_size]) AS meterstick_resample_idx
+    JOIN
+    table
+    ON meterstick_resample_idx != unit), split by meterstick_resample_idx in
+    addition.
+    At last we concat the estimates.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      mode: It's always 'mixed' or 'magic' otherwise we won't be here.
+      batch_size: The number of units we handle in one iteration.
+
+    Returns:
+      A DataFrame contains all the leave-one-out estimates. Each row is a child
+      metric * split_by slice and each column is an estimate.
+    """
+    if self.has_been_preaggregated and not batch_size:
+      all_split_by = (
+          split_by
+          + [self.unit]
+          + list(utils.get_extra_split_by(self, return_superset=True))
+      )
+      all_split_by_no_unit = split_by + list(
+          utils.get_extra_split_by(self, return_superset=True)
+      )
+      filter_in_leaf = utils.push_filters_to_leaf(self)
+      leafs = utils.get_leaf_metrics(filter_in_leaf)
+      for m in leafs:  # filters have been handled in preaggregation
+        m.where = None
+      # Make sure the output column names are the same as the var so we can
+      # compute_child on it later. has_been_preaggregated being True means that
+      # all leaf metrics are Sum or Count.
+      leafs = copy.deepcopy(leafs)
+      for m in leafs:
+        m.name = m.var
+      leafs = metrics.MetricList(tuple(set(leafs)))
+      if len(leafs) == 1:
+        leafs.name = leafs.children[0].name
+      bucket_res = self.compute_util_metric_on_sql(
+          leafs, table, all_split_by, execute, mode=mode
+      )
+
+      if all_split_by_no_unit:
+        total = bucket_res.groupby(
+            level=all_split_by_no_unit, observed=True
+        ).sum()
+      else:
+        total = bucket_res.sum()
+      bucket_res = bucket_res.fillna(0)
+      bucket_res = utils.adjust_slices_for_loo(bucket_res, split_by, bucket_res)
+      loo = total - bucket_res
+      if all_split_by_no_unit:
+        # The levels might get messed up.
+        loo = loo.reorder_levels(all_split_by)
+      res = filter_in_leaf.children[0].compute_on(
+          loo, split_by + [self.unit], melted=True
+      )
+      return [res.unstack(self.unit)]
+
     batch_size = batch_size or 1
     slice_and_units = sql.Sql(
         sql.Columns(split_by + [self.unit], distinct=True),
@@ -2922,7 +3115,23 @@ class Bootstrap(MetricWithCI):
   def compute_children_sql(
       self, table, split_by, execute, mode=None, batch_size=None
   ):
-    """Compute the children on resampled data in SQL."""
+    """Compute the children on resampled data in SQL.
+
+    We compute the child on bootstrapped data in a batched way. We bootstrap for
+    batch_size in one iteration. Namely, it's equivalent to compute self but
+    setting n_replicates to batch_size.
+
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can executes a SQL query and returns a DataFrame.
+      mode: It's always 'mixed' or 'magic' otherwise we won't be here.
+      batch_size: The number of units we handle in one iteration.
+
+    Returns:
+      A DataFrame contains all the bootstrap estimates. Each row is a child
+      metric * split_by slice and each column is an estimate.
+    """
     batch_size = batch_size or 1000
     global_filter = utils.get_global_filter(self)
     util_metric = copy.deepcopy(self)
