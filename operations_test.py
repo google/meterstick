@@ -1867,8 +1867,7 @@ class BootstrapTests(parameterized.TestCase):
   def test_bootstrap_no_unit_where(self):
     df = pd.DataFrame({'x': range(1, 7), 'grp': ['B'] * 3 + ['A'] * 3})
     metric = operations.Bootstrap(
-        None, metrics.Sum('x'), self.n, where='grp == "A"'
-    )
+        None, metrics.Sum('x'), self.n, where="grp == 'A'")
     metric_no_filter = operations.Bootstrap(None, metrics.Sum('x'), self.n)
     np.random.seed(42)
     output = metric.compute_on(df)
