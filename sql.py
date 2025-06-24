@@ -22,9 +22,23 @@ from collections import abc
 import functools
 import re
 from typing import Iterable, Optional, Text, Union
+from meterstick import sql_dialect
 
 
-SAFE_DIVIDE = 'IF(({denom}) = 0, NULL, ({numer}) / ({denom}))'
+class _SafeDivideTemplate:
+  """Dialect-aware SAFE_DIVIDE template that maintains string behavior."""
+  
+  def format(self, numer: str, denom: str) -> str:
+    """Format method that uses dialect-aware safe division."""
+    return sql_dialect.get_sql_dialect().safe_divide(numer, denom)
+  
+  def __call__(self, numerator: str, denominator: str) -> str:
+    """Support function-style calls for backwards compatibility."""
+    return sql_dialect.get_sql_dialect().safe_divide(numerator, denominator)
+
+
+# Main SAFE_DIVIDE object - behaves like the original string template but is dialect-aware
+SAFE_DIVIDE = _SafeDivideTemplate()
 # If to use CREATE TEMP TABLE. Setting it to False disables CREATE TEMP TABLE
 # even when it's needed.
 ALLOW_TEMP_TABLE = True
@@ -291,8 +305,8 @@ class Column(SqlComponent):
   Column('click', 'SUM({})') => SUM(click) AS `sum(click)`
   Column('click * weight', 'SUM({})', 'foo') => SUM(click * weight) AS foo
   Column('click', 'SUM({})', auto_alias=False) => SUM(click)
-  Column('click', 'SUM({})', filters='region = "US"') =>
-    SUM(IF(region = "US", click, NULL)) AS `sum(click)`
+  Column('click', 'SUM({})', filters="region = 'US'") =>
+    SUM(IF(region = 'US', click, NULL)) AS `sum(click)`
   Column('region') => region  # No alias because it's same as the column.
   Column('* EXCEPT (click)', auto_alias=False) => * EXCEPT (click)
   Column(('click', 'impression'), 'SAFE_DIVIDE({}, {})', 'ctr') =>
@@ -366,8 +380,9 @@ class Column(SqlComponent):
     over = None
     if not (self.partition is None and self.order is None and
             self.window_frame is None):
+      dialect = sql_dialect.get_sql_dialect()
       partition_cols_str = [
-          'CAST(%s AS STRING)' % c for c in Columns(self.partition).expressions
+          dialect.cast_to_string(c) for c in Columns(self.partition).expressions
       ]
       partition = 'PARTITION BY %s' % ', '.join(
           partition_cols_str) if self.partition else ''
@@ -429,9 +444,7 @@ class Column(SqlComponent):
 
   def __div__(self, other):
     return Column(
-        SAFE_DIVIDE.format(
-            numer=self.expression, denom=getattr(other, 'expression', other)
-        ),
+        SAFE_DIVIDE(self.expression, getattr(other, 'expression', other)),
         alias='%s / %s' % (self.alias_raw, get_alias(other)),
     )
 
@@ -441,9 +454,7 @@ class Column(SqlComponent):
   def __rdiv__(self, other):
     alias = '%s / %s' % (get_alias(other), self.alias_raw)
     return Column(
-        SAFE_DIVIDE.format(
-            numer=getattr(other, 'expression', other), denom=self.expression
-        ),
+        SAFE_DIVIDE(getattr(other, 'expression', other), self.expression),
         alias=alias,
     )
 
@@ -451,20 +462,20 @@ class Column(SqlComponent):
     return self.__rdiv__(other)
 
   def __pow__(self, other):
+    dialect = sql_dialect.get_sql_dialect()
     if isinstance(other, float) and other == 0.5:
       return Column(
-          'SAFE.SQRT({})'.format(self.expression),
+          dialect.safe_sqrt(self.expression),
           alias='sqrt(%s)' % self.alias_raw)
     return Column(
-        'SAFE.POWER({}, {})'.format(self.expression,
-                                    getattr(other, 'expression', other)),
+        dialect.safe_power(self.expression, getattr(other, 'expression', other)),
         alias='%s ^ %s' % (self.alias_raw, get_alias(other)))
 
   def __rpow__(self, other):
+    dialect = sql_dialect.get_sql_dialect()
     alias = '%s ^ %s' % (get_alias(other), self.alias_raw)
     return Column(
-        'SAFE.POWER({}, {})'.format(
-            getattr(other, 'expression', other), self.expression),
+        dialect.safe_power(getattr(other, 'expression', other), self.expression),
         alias=alias)
 
 

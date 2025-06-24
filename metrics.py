@@ -24,6 +24,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Text, Union
 
 from meterstick import sql
 from meterstick import utils
+from meterstick import sql_dialect
 import numpy as np
 import pandas as pd
 
@@ -2169,14 +2170,17 @@ class Nth(SimpleMetric):
           'This case should be handled by get_sql_and_with_clause() already.'
       )
     order = '' if self.ascending else ' DESC'
-    dropna = ' IGNORE NULLS' if self.dropna else ''
-    sql_tmpl = 'ARRAY_AGG({}%s ORDER BY %s%s LIMIT %s)[SAFE_OFFSET(%s)]' % (
-        dropna,
-        self.sort_by,
-        order,
-        self.n + 1,
-        self.n,
-    )
+    
+    dialect = sql_dialect.get_sql_dialect()
+    
+    # Use dialect-aware array operations
+    if self.dropna:
+      # For dropna, use the dialect's nth value with ignore nulls
+      sql_tmpl = dialect.nth_value_with_ignore_nulls('{}', self.sort_by, self.n, self.ascending)
+    else:
+      # For non-dropna, use the dialect's array aggregation with limit
+      sql_tmpl = dialect.array_agg_with_limit('{}', f'{self.sort_by}{order}', self.n + 1, self.n)
+    
     return sql.Column(
         self.var,
         sql_tmpl,
@@ -2272,21 +2276,22 @@ class Quantile(SimpleMetric):
     """Get SQL columns."""
     if self.weight:
       raise ValueError('SQL for weighted quantile should already be handled!')
+    
+    dialect = sql_dialect.get_sql_dialect()
+    
     if self.one_quantile:
       alias = 'quantile(%s, %s)' % (self.var, self.quantile)
-      return sql.Column(
-          self.var,
-          'APPROX_QUANTILES({}, 100)[OFFSET(%s)]' % int(100 * self.quantile),
-          alias, local_filter)
+      query = dialect.approx_quantile('{}', self.quantile)
+      return sql.Column(self.var, query, alias, local_filter)
 
-    query = 'APPROX_QUANTILES({}, 100)[OFFSET(%s)]'
     quantiles = []
     for q in self.quantile:
       alias = 'quantile(%s, %s)' % (self.var, q)
       if alias.startswith('0.'):
         alias = 'point_' + alias[2:]
+      query = dialect.approx_quantile('{}', q)
       quantiles.append(
-          sql.Column(self.var, query % int(100 * q), alias, local_filter))
+          sql.Column(self.var, query, alias, local_filter))
     return sql.Columns(quantiles)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,

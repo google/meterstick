@@ -1,7 +1,9 @@
 # Meterstick Documentation
 
 The meterstick package provides a concise syntax to describe and execute
-routine data analysis tasks. Please see [meterstick_demo.ipynb](https://colab.research.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb) for examples.
+routine data analysis tasks. Meterstick supports multiple SQL dialects, including BigQuery (default) and Trino, allowing you to generate SQL compatible with different database systems while maintaining a unified Python API.
+
+Please see [meterstick_demo.ipynb](https://colab.research.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb) for examples.
 
 ## Disclaimer
 
@@ -307,9 +309,34 @@ It can help you to sanity check complex Metrics.
 
 You can get the SQL query for all built-in Metrics and Operations by calling
 `to_sql(sql_data_source, split_by)` on the Metric. `sql_data_source` could be a
-table or a subquery. The dialect it uses is the
+table or a subquery. 
+
+### SQL Dialects
+
+Meterstick supports multiple SQL dialects. By default, it generates BigQuery-compatible SQL, but you can switch to other dialects:
+
+```python
+from meterstick import *
+
+# Set SQL dialect (default is 'bigquery')
+set_sql_dialect('trino')
+
+# Your metrics will now generate Trino-compatible SQL
+revenue_per_user = Sum('revenue') / Count('user_id')
+sql = revenue_per_user.to_sql('user_events')
+```
+
+**Supported Dialects:**
+- `bigquery` (default): Google BigQuery SQL syntax
+- `trino`: Trino/Presto SQL syntax
+
+You can also register custom dialects for other database systems by creating a class that inherits from `SqlDialect` and calling `register_sql_dialect(your_dialect)`.
+
+### SQL Examples
+
+The dialect it uses is the
 [standard SQL](https://cloud.google.com/bigquery/docs/reference/standard-sql)
-in Google Cloud's BigQuery. For example,
+in Google Cloud's BigQuery by default. For example,
 
 ```python
 MetricList((Sum('X', where='Y > 0'), Sum('X'))).to_sql('table', 'grp')

@@ -534,8 +534,8 @@ class TestCompositeMetric(absltest.TestCase):
         'Condition': [0, 0, 0, 1, 1, 1],
         'grp': ['A', 'A', 'B', 'A', 'B', 'C']
     })
-    suma = metrics.Sum('X', where='grp == "A"')
-    sumb = metrics.Sum('X', where='grp == "B"')
+    suma = metrics.Sum('X', where="grp == 'A'")
+    sumb = metrics.Sum('X', where="grp == 'B'")
     pct = operations.PercentChange('Condition', 0)
     output = (pct(suma) - pct(sumb)).compute_on(df)
     expected = pct(suma).compute_on(df) - pct(sumb).compute_on(df)
@@ -558,8 +558,8 @@ class TestCompositeMetric(absltest.TestCase):
         'grp': ['A', 'A', 'B', 'A', 'B', 'C']
     })
     sumx = metrics.Sum('X')
-    pcta = operations.PercentChange('Condition', 0, sumx, where='grp == "A"')
-    pctb = operations.PercentChange('Condition', 0, sumx, where='grp == "B"')
+    pcta = operations.PercentChange('Condition', 0, sumx, where="grp == 'A'")
+    pctb = operations.PercentChange('Condition', 0, sumx, where="grp == 'B'")
     output = (pcta - pctb).compute_on(df)
     expected = pcta.compute_on(df) - pctb.compute_on(df)
     expected.columns = ['%s - %s' % (c, c) for c in expected.columns]
@@ -574,10 +574,10 @@ class TestCompositeMetric(absltest.TestCase):
     })
     np.random.seed(42)
     sumx = metrics.Sum('X')
-    pcta = operations.PercentChange('Condition', 0, sumx, where='grp == "A"')
+    pcta = operations.PercentChange('Condition', 0, sumx, where="grp == 'A'")
     pctb = operations.PercentChange('Condition', 0, sumx)
     jk = operations.Jackknife('cookie', pcta)
-    bst = operations.Bootstrap(None, pctb, 20, where='grp != "C"')
+    bst = operations.Bootstrap(None, pctb, 20, where="grp != 'C'")
     m = (jk / bst).rename_columns(
         pd.MultiIndex.from_product((('sum(X)',), ('Value', 'SE'))))
     output = m.compute_on(df)
@@ -635,8 +635,8 @@ class TestCompositeMetric(absltest.TestCase):
 
   def test_duplicate_column_names(self):
     df = pd.DataFrame({'g': ['a', 'b'], 'x': [1, 3]})
-    a = metrics.Sum('x', where='g == "a"')
-    b = metrics.Sum('x', where='g == "b"')
+    a = metrics.Sum('x', where="g == 'a'")
+    b = metrics.Sum('x', where="g == 'b'")
     output = (metrics.MetricList((a, b)) / (a + b)).compute_on(df)
     expected = pd.DataFrame(
         [[0.25, 0.75]], columns=['sum(x) / sum(x) + sum(x)'] * 2
@@ -714,17 +714,17 @@ class TestMetricList(parameterized.TestCase):
     testing.assert_frame_equal(output, expected)
 
   def test_unwrap(self):
-    s = metrics.Sum('x', where='bar')
+    s = metrics.Sum('x', where="bar")
     m = metrics.MetricList([s, metrics.Count('y')])
-    m = metrics.MetricList([m, metrics.Sum('z')], where='foo')
+    m = metrics.MetricList([m, metrics.Sum('z')], where="foo")
     actual = m.unwrap()
     expected = [
-        metrics.Sum('x', where=('bar', 'foo')),
-        metrics.Count('y', where='foo'),
-        metrics.Sum('z', where='foo'),
+        metrics.Sum('x', where=("bar", "foo")),
+        metrics.Count('y', where="foo"),
+        metrics.Sum('z', where="foo"),
     ]
     self.assertEqual(actual, expected)
-    self.assertEqual(s.where, 'bar')  # orignal instance is not changed
+    self.assertEqual(s.where, "bar")  # orignal instance is not changed
 
   def test_len(self):
     ms = [metrics.Sum('X'), metrics.Mean('X')]
@@ -790,10 +790,10 @@ class TestMetricList(parameterized.TestCase):
 
   def test_to_dot(self):
     m0 = 1
-    m1 = metrics.Sum('x', where='foo')
+    m1 = metrics.Sum('x', where="foo")
     m2 = m0 + m1
     m3 = metrics.Sum('y')
-    m4 = metrics.Count('z', where='bar')
+    m4 = metrics.Count('z', where="bar")
     m5 = m3 / m4
     m6 = metrics.MetricList((m2, m5))
     m6.name = 'baz'

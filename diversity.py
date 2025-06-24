@@ -19,6 +19,7 @@ from __future__ import print_function
 
 from meterstick import operations
 from meterstick import sql
+from meterstick import sql_dialect
 import numpy as np
 import pandas as pd
 
@@ -211,9 +212,11 @@ class TopK(DiversityBase):
       )
       top_k_array_col.set_alias(c.alias_raw)
       top_k_array_columns.add(top_k_array_col)
+      dialect = sql_dialect.get_sql_dialect()
+      unnest_expr = dialect.unnest_with_alias('{}', 'x')
       top_k_sum_col = sql.Column(
           top_k_array_col.alias,
-          '(SELECT SUM(x) FROM UNNEST({}) AS x)',
+          f'(SELECT SUM(x) FROM {unnest_expr})',
       )
       top_k_sum_col.set_alias(self.name_tmpl.format(c.alias_raw))
       top_k_sum_columns.add(top_k_sum_col)
@@ -267,7 +270,7 @@ class Nxx(DiversityBase):
        SUM(val_col) OVER
         (ORDER BY val_col DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
     4. Get the minimum number of players to achieve the share by SELECT
-       COUNTIF(cumulative_sum < share) + 1.
+       COUNT(CASE WHEN cumulative_sum < share THEN 1 END) + 1.
 
     Args:
       table: The table we want to query from.
@@ -307,9 +310,12 @@ class Nxx(DiversityBase):
       cumsum_col.set_alias('Cumulative %s' % c.alias_raw)
       cumsum_cols.add(cumsum_col)
 
+      dialect = sql_dialect.get_sql_dialect()
+      count_if_sql = dialect.count_if(f'{{}} < {self.share}')
+      
       nxx_col = sql.Column(
           cumsum_col.alias,
-          'COUNTIF({} < %s) + 1' % self.share,
+          count_if_sql + ' + 1',
       )
       nxx_col.set_alias(self.name_tmpl.format(c.alias_raw))
       nxx_cols.add(nxx_col)

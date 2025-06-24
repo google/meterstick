@@ -25,6 +25,7 @@ from meterstick import confidence_interval_display
 from meterstick import metrics
 from meterstick import sql
 from meterstick import utils
+from meterstick import sql_dialect
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -2898,7 +2899,7 @@ class Jackknife(MetricWithCI):
       loo_sql = sql.Sql(None, table, where=self.where_)
       where = copy.deepcopy(loo_sql.where)
       for unit in unique_units:
-        loo_where = '%s != "%s"' % (self.unit, unit)
+        loo_where = "%s != '%s'" % (self.unit, unit)
         if pd.api.types.is_numeric_dtype(slice_and_units[self.unit]):
           loo_where = '%s != %s' % (self.unit, unit)
         loo_sql.where = sql.Filters(where).add(loo_where)
@@ -2919,7 +2920,7 @@ class Jackknife(MetricWithCI):
         loo = sql.Sql(
             sql.Column('*', auto_alias=False),
             sql.Datasource(
-                'UNNEST(%s)' % units, 'meterstick_resample_idx'
+                sql_dialect.get_sql_dialect().unnest_with_alias(str(units), 'meterstick_resample_idx')
             ).join(table, on='meterstick_resample_idx != %s' % self.unit),
             self.where_,
         )
@@ -3422,6 +3423,10 @@ class PoissonBootstrap(Bootstrap):
         clause.
     """
     del indexes  # unused
+    
+    # Get dialect for SQL generation
+    dialect = sql_dialect.get_sql_dialect()
+    
     if self.has_been_preaggregated:
       uniform_columns = sql.Columns(with_data[table].all_columns.aliases).add(
           'meterstick_resample_idx'
@@ -3440,19 +3445,20 @@ class PoissonBootstrap(Bootstrap):
         else split_by.original_columns
     )
     if self.unit:
-      cols = ', '.join(
-          map(
-              'CAST({} AS STRING)'.format,
-              (split_by_cols or []) + [self.unit, 'meterstick_resample_idx'],
-          )
-      )
+      cols = [
+          dialect.cast_to_string(col) for col in 
+          (split_by_cols or []) + [self.unit, 'meterstick_resample_idx']
+      ]
       uniform_var = sql.Column(
-          f'FARM_FINGERPRINT(CONCAT({cols})) / 0xFFFFFFFFFFFFFFFF + 0.5',
+          dialect.poisson_bootstrap_uniform_hash(cols),
           alias='poisson_bootstrap_uniform_var',
       )
     uniform_columns.add(uniform_var)
+    
+    # Use dialect-aware array generation and UNNEST
+    array_expr = dialect.generate_array(1, self.n_replicates)
     replicates = sql.Datasource(
-        'UNNEST(GENERATE_ARRAY(1, %s))' % self.n_replicates,
+        dialect.unnest_with_alias(array_expr, 'meterstick_resample_idx'),
         'meterstick_resample_idx',
     )
     table_with_uniform_var = sql.Sql(
@@ -3471,7 +3477,7 @@ class PoissonBootstrap(Bootstrap):
     else:
       poisson_weight_columns = sql.Columns(
           sql.Column(
-              '* EXCEPT(poisson_bootstrap_uniform_var)', auto_alias=False
+              dialect.select_all_except(['poisson_bootstrap_uniform_var']), auto_alias=False
           )
       )
     # The cutoff values are obtained from
@@ -3531,15 +3537,16 @@ class PoissonBootstrap(Bootstrap):
     else:
       poisson_sampled_columns = sql.Columns(
           sql.Column(
-              (
-                  '* EXCEPT(poisson_bootstrap_weight,'
-                  ' poisson_bootstrap_weight_unnested)'
-              ),
+              dialect.select_all_except([
+                  'poisson_bootstrap_weight',
+                  'poisson_bootstrap_weight_unnested'
+              ]),
               auto_alias=False,
           )
       )
+      array_expr = dialect.generate_array(1, 'poisson_bootstrap_weight')
       replicates = sql.Datasource(
-          'UNNEST(GENERATE_ARRAY(1, poisson_bootstrap_weight))',
+          dialect.unnest_with_alias(array_expr, 'poisson_bootstrap_weight_unnested'),
           'poisson_bootstrap_weight_unnested',
       )
       poisson_sampled_table = sql.Sql(
@@ -4054,8 +4061,10 @@ def bootstrap_by_row(
   )
   columns.add((row_number, random_row_number))
   columns.add((i for i in split_by if i != i.alias))
+  dialect = sql_dialect.get_sql_dialect()
+  array_expr = dialect.generate_array(1, metric.n_replicates)
   replicates = sql.Datasource(
-      'UNNEST(GENERATE_ARRAY(1, %s))' % metric.n_replicates,
+      dialect.unnest_with_alias(array_expr, 'meterstick_resample_idx'),
       'meterstick_resample_idx',
   )
   random_choice_table = sql.Sql(columns, sql.Join(table, replicates))
