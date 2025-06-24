@@ -407,7 +407,9 @@ class CumulativeDistribution(Distribution):
 
 def _format_to_condition(val):
   if isinstance(val, str) and not val.startswith('$'):
-    return '"%s"' % val
+    # Use single quotes instead of double quotes for string literals as it's
+    # compatible with more SQL engines.
+    return "'%s'" % val
   return '%s' % val
 
 
