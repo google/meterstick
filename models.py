@@ -25,6 +25,7 @@ from meterstick import metrics
 from meterstick import operations
 from meterstick import sql
 from meterstick import utils
+from meterstick import sql_dialect
 import numpy as np
 import pandas as pd
 from sklearn import linear_model
@@ -1152,7 +1153,7 @@ class LogisticRegression(Model):
         for cond, slice_coef, done in zip(conds, coef, converged):
           if not done:
             condition = [
-                f'{c} = "{v}"' if isinstance(v, str) else f'{c} = {v}'
+                f"{c} = '{v}'" if isinstance(v, str) else f'{c} = {v}'
                 for c, v in zip(split_cols, cond)
             ]
             condition = ' AND '.join(condition)
@@ -1232,7 +1233,8 @@ class LogisticRegression(Model):
       # https://colab.research.google.com/drive/1Srfs4weM4LO9vt1HbOkGrD4kVbG8cso8
       # For 'l1' and 'elasticnet', we use FISTA, which uses unregularized
       # gradient.
-      n = f'COUNTIF({condition})' if condition else 'COUNT(*)'
+      dialect = sql_dialect.get_sql_dialect()
+      n = dialect.count_if(condition) if condition else 'COUNT(*)'
       if self.penalty == 'l2':
         for i in range(self.k):
           grads[i] += sql.Column(f'{coef[i]} / {n}') / self.c

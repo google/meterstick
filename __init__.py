@@ -21,3 +21,4 @@ from meterstick.diversity import *
 from meterstick.metrics import *
 from meterstick.operations import *
 from meterstick.sql import *
+from meterstick.sql_dialect import *
