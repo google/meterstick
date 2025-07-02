@@ -615,7 +615,7 @@ class PercentChange(Comparison):
 
   def get_sql_template_for_comparison(self, raw_table_alias, base_table_alias):
     return (
-        sql.SAFE_DIVIDE.format(
+        sql.SAFE_DIVIDE_FN(
             numer=f'{raw_table_alias}.%(r)s',
             denom=f'{base_table_alias}.%(b)s',
         )
@@ -1620,15 +1620,15 @@ class MH(Comparison):
                               for c, b in zip(cond_cols.aliases, base))
     exclude_base_condition = ' OR '.join(exclude_base_condition)
     cond = None if self.include_base else sql.Filters([exclude_base_condition])
-    numerator = sql.SAFE_DIVIDE.format(
+    numerator = sql.SAFE_DIVIDE_FN(
         numer=f'{raw_table_alias}.%(numer)s * {base_table_alias}.%(denom)s',
         denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
     )
-    denominator = sql.SAFE_DIVIDE.format(
+    denominator = sql.SAFE_DIVIDE_FN(
         numer=f'{base_table_alias}.%(numer)s * {raw_table_alias}.%(denom)s',
         denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
     )
-    col_tmpl = f"""100 * {sql.SAFE_DIVIDE.format(
+    col_tmpl = f"""100 * {sql.SAFE_DIVIDE_FN(
         numer=f'COALESCE(SUM({numerator}), 0)',
         denom=f'COALESCE(SUM({denominator}), 0)')} - 100"""
     columns = sql.Columns()
@@ -3442,21 +3442,24 @@ class PoissonBootstrap(Bootstrap):
     if self.unit:
       cols = ', '.join(
           map(
-              'CAST({} AS STRING)'.format,
+              sql.STRING_CAST_FN,
               (split_by_cols or []) + [self.unit, 'meterstick_resample_idx'],
           )
       )
       uniform_var = sql.Column(
-          f'FARM_FINGERPRINT(CONCAT({cols})) / 0xFFFFFFFFFFFFFFFF + 0.5',
+          sql.UNIFORM_MAPPING_FN(f'CONCAT({cols})'),
           alias='poisson_bootstrap_uniform_var',
       )
     uniform_columns.add(uniform_var)
     replicates = sql.Datasource(
-        'UNNEST(GENERATE_ARRAY(1, %s))' % self.n_replicates,
-        'meterstick_resample_idx',
+        sql.DUPLICATE_DATA_N_TIMES_FN(
+            self.n_replicates, 'meterstick_resample_idx'
+        )
     )
     table_with_uniform_var = sql.Sql(
-        uniform_columns, sql.Join(table, replicates), global_filter
+        uniform_columns,
+        sql.Join(table, replicates, join='CROSS'),
+        global_filter,
     )
     table_with_uniform_var_alias = with_data.add(
         sql.Datasource(
@@ -3469,11 +3472,10 @@ class PoissonBootstrap(Bootstrap):
           'poisson_bootstrap_uniform_var'
       )
     else:
-      poisson_weight_columns = sql.Columns(
-          sql.Column(
-              '* EXCEPT(poisson_bootstrap_uniform_var)', auto_alias=False
-          )
-      )
+      var = '*'
+      if sql.SUPPORT_COLUMN_EXCLUSION:
+        var = '* EXCEPT(poisson_bootstrap_uniform_var)'
+      poisson_weight_columns = sql.Columns(sql.Column(var, auto_alias=False))
     # The cutoff values are obtained from
     # scipy.stats.poisson.cdf(range(0, 19), 1) / scipy.stats.poisson.cdf(19, 1).
     # The cutoff value for 0 is not used here but used in the filter of
@@ -3529,22 +3531,21 @@ class PoissonBootstrap(Bootstrap):
             poisson_sampled_columns, table_with_poisson_weight_alias
         )
     else:
-      poisson_sampled_columns = sql.Columns(
-          sql.Column(
-              (
-                  '* EXCEPT(poisson_bootstrap_weight,'
-                  ' poisson_bootstrap_weight_unnested)'
-              ),
-              auto_alias=False,
-          )
-      )
+      var = '*'
+      if sql.SUPPORT_COLUMN_EXCLUSION:
+        var = (
+            '* EXCEPT(poisson_bootstrap_weight,'
+            ' poisson_bootstrap_weight_unnested)'
+        )
+      poisson_sampled_columns = sql.Columns(sql.Column(var, auto_alias=False))
       replicates = sql.Datasource(
-          'UNNEST(GENERATE_ARRAY(1, poisson_bootstrap_weight))',
-          'poisson_bootstrap_weight_unnested',
+          sql.DUPLICATE_DATA_N_TIMES_FN(
+              'poisson_bootstrap_weight', 'poisson_bootstrap_weight_unnested'
+          )
       )
       poisson_sampled_table = sql.Sql(
           poisson_sampled_columns,
-          sql.Join(table_with_poisson_weight_alias, replicates),
+          sql.Join(table_with_poisson_weight_alias, replicates, join='CROSS'),
       )
 
     poisson_sampled_table_alias = with_data.add(
@@ -3671,7 +3672,7 @@ def get_se_sql(
                       '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, Jackknife):
         adjustment = sql.Column(
-            sql.SAFE_DIVIDE.format(
+            sql.SAFE_DIVIDE_FN(
                 numer='COUNT({c}) - 1', denom='SQRT(COUNT({c}))'
             ).format(c=alias)
         )
@@ -4055,10 +4056,13 @@ def bootstrap_by_row(
   columns.add((row_number, random_row_number))
   columns.add((i for i in split_by if i != i.alias))
   replicates = sql.Datasource(
-      'UNNEST(GENERATE_ARRAY(1, %s))' % metric.n_replicates,
-      'meterstick_resample_idx',
+      sql.DUPLICATE_DATA_N_TIMES_FN(
+          metric.n_replicates, 'meterstick_resample_idx'
+      )
   )
-  random_choice_table = sql.Sql(columns, sql.Join(table, replicates))
+  random_choice_table = sql.Sql(
+      columns, sql.Join(table, replicates, join='CROSS')
+  )
   random_choice_table_alias = with_data.add(
       sql.Datasource(random_choice_table, 'BootstrapRandomRows'))
 

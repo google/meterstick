@@ -24,12 +24,166 @@ import re
 from typing import Iterable, Optional, Text, Union
 
 
-SAFE_DIVIDE = 'IF(({denom}) = 0, NULL, ({numer}) / ({denom}))'
 # If to use CREATE TEMP TABLE. Setting it to False disables CREATE TEMP TABLE
 # even when it's needed.
 ALLOW_TEMP_TABLE = True
 # If the engine supports CREATE TEMP TABLE
 TEMP_TABLE_SUPPORTED = None
+
+
+def quantile_fn_googlesql(percentile):
+  p = int(100 * percentile)
+  # The template will be applied to column name that quantile is computed on.
+  # Note that APPROX_QUANTILES(.., 99) creates an array of 100 elements.
+  return 'APPROX_QUANTILES({}, 99)[SAFE_OFFSET(%s)]' % p  # p is 0-based
+
+
+def array_agg_fn_googlesql(
+    sort_by: Optional[str],
+    ascending: Optional[bool],
+    dropna: Optional[bool],
+    limit: Optional[int],
+):
+  """ARRAY_AGG function in GoogleSQL."""
+  dropna = ' IGNORE NULLS' if dropna else ''
+  order_by = f' ORDER BY {sort_by}' if sort_by else ''
+  if order_by is not None:
+    order_by += '' if ascending else ' DESC'
+  limit = f' LIMIT {limit}' if limit else ''
+  return f'ARRAY_AGG({{}}{dropna}{order_by}{limit})'
+
+
+def array_agg_fn_postgresql(
+    sort_by: Optional[str],
+    ascending: Optional[bool],
+    dropna: Optional[bool],
+    limit: Optional[int],
+):
+  """ARRAY_AGG function in PostgreSQL."""
+  del limit  # LIMIT is not supported in PostgreSQL so just skip.
+  if dropna:
+    raise NotImplementedError('IGNORE NULLS is not supported in PostgreSQL.')
+  order_by = f' ORDER BY {sort_by}' if sort_by else ''
+  if order_by is not None:
+    order_by += '' if ascending else ' DESC'
+  return f'ARRAY_AGG({{}}{order_by})'
+
+
+def array_index_fn_googlesql(array: str, zero_based_idx: int):
+  return f'{array}[SAFE_OFFSET({zero_based_idx})]'
+
+
+def uniform_mapping_fn_googlesql(col: str):
+  """Maps deterministically `col` to a uniform random number in [0, 1)."""
+  return f'FARM_FINGERPRINT({col}) / 0xFFFFFFFFFFFFFFFF + 0.5'
+
+
+def unnest_array_fn_googlesql(array: str, alias: Optional[str] = None):
+  """Unnests an array in GoogleSQL."""
+  if alias is None:
+    return f'UNNEST({array})'
+  return f'UNNEST({array}) AS {alias}'
+
+
+def generate_array_fn_googlesql(n):
+  """Generates an array of n elements in GoogleSQL."""
+  return f'GENERATE_ARRAY(1, {n})'
+
+
+def generate_array_fn_postgresql(n):
+  """Generates an array of n elements in PostgreSQL."""
+  return f'GENERATE_SERIES(1, {n})'
+
+
+def duplicate_data_n_times_fn_googlesql(n, alias: Optional[str] = None):
+  """Duplicates the data n times in GoogleSQL."""
+  return UNNEST_ARRAY_FN(GENERATE_ARRAY_FN(n), alias)
+
+
+def duplicate_data_n_times_fn_postgresql(n, alias: Optional[str] = None):
+  """Duplicates the data n times in PostgreSQL."""
+  if not alias:
+    return generate_array_fn_postgresql(n)
+  return f'{generate_array_fn_postgresql(n)} AS {alias}'
+
+
+SUPPORT_COLUMN_EXCLUSION = True  # If 'SELECT * EXCEPT (columns)' is supported.
+SAFE_DIVIDE_GOOGLESQL = 'SAFE_DIVIDE({numer}, {denom})'
+SAFE_DIVIDE_FN = SAFE_DIVIDE_GOOGLESQL.format
+QUANTILE_FN = quantile_fn_googlesql
+ARRAY_AGG_FN = array_agg_fn_googlesql
+ARRAY_INDEX_FN = array_index_fn_googlesql
+COUNTIF_TMPL_GOOGLESQL = 'COUNTIF({})'
+COUNTIF_FN = COUNTIF_TMPL_GOOGLESQL.format
+STRING_CAST_TMPL_GOOGLESQL = 'CAST({} AS STRING)'
+STRING_CAST_FN = STRING_CAST_TMPL_GOOGLESQL.format
+UNIFORM_MAPPING_FN = uniform_mapping_fn_googlesql
+UNNEST_ARRAY_FN = unnest_array_fn_googlesql
+GENERATE_ARRAY_FN = generate_array_fn_googlesql
+DUPLICATE_DATA_N_TIMES_FN = duplicate_data_n_times_fn_googlesql
+
+GOOGLESQL_OPTIONS = {
+    'support_except_column': True,
+    'safe_divide': SAFE_DIVIDE_FN,
+    'quantile': quantile_fn_googlesql,
+    'array_agg': array_agg_fn_googlesql,
+    'array_index': array_index_fn_googlesql,
+    'countif': COUNTIF_FN,
+    'string_cast': STRING_CAST_FN,
+    'uniform_mapping': UNIFORM_MAPPING_FN,
+    'unnest_array': UNNEST_ARRAY_FN,
+    'generate_array': GENERATE_ARRAY_FN,
+    'duplicate_data': DUPLICATE_DATA_N_TIMES_FN,
+}
+COMMON_ALTERNATIVES = {
+    'support_except_column': False,
+    'safe_divide': (
+        'CASE WHEN {denom} = 0 THEN NULL ELSE CAST({numer} AS FLOAT) /'
+        ' CAST({denom} AS FLOAT) END'.format
+    ),
+    'quantile': lambda p: f'PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {{}})',
+    'array_agg': array_agg_fn_postgresql,
+    'array_index': lambda a, i: f'({a})[{i + 1}]',
+    'countif': 'COUNT(CASE WHEN {} THEN 1 END)'.format,
+    'string_cast': 'CAST({} AS TEXT)'.format,
+    # HASHTEXT returns a 32-bit integer and 2147483647 is 2^31 -1. Verified in
+    # https://colab.research.google.com/drive/1C1klaXsus0fWnOAT_vWzNHOT3Q21LZi7#scrollTo=O4--SViiuAv9&line=4&uniqifier=1.
+    'uniform_mapping': lambda c: f'ABS(HASHTEXT({c})::BIGINT) / 2147483647.',
+    'unnest_array': UNNEST_ARRAY_FN,
+    'generate_array': generate_array_fn_postgresql,
+    'duplicate_data': duplicate_data_n_times_fn_postgresql,
+}
+DIALECT_OPTIONS = {
+    'GoogleSQL': GOOGLESQL_OPTIONS,
+    'PostgreSQL': COMMON_ALTERNATIVES,
+    'Other': COMMON_ALTERNATIVES,
+}
+
+
+def set_dialect(dialect: str):
+  """Sets the dialect of the SQL query."""
+  global SUPPORT_COLUMN_EXCLUSION, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, COUNTIF_FN, STRING_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
+  if dialect not in DIALECT_OPTIONS:
+    raise ValueError(
+        f'Unsupported dialect: {dialect}. The supported dialects are:'
+        f' {list(DIALECT_OPTIONS.keys())}'
+    )
+  tmpls = DIALECT_OPTIONS[dialect]
+  SUPPORT_COLUMN_EXCLUSION = tmpls.get('support_except_column', True)
+  SAFE_DIVIDE_FN = tmpls.get('safe_divide', SAFE_DIVIDE_GOOGLESQL)
+  QUANTILE_FN = tmpls.get('quantile', quantile_fn_googlesql)
+  ARRAY_AGG_FN = tmpls.get('array_agg', array_agg_fn_googlesql)
+  ARRAY_INDEX_FN = tmpls.get('array_index', array_index_fn_googlesql)
+  COUNTIF_FN = tmpls.get('countif', COUNTIF_TMPL_GOOGLESQL.format)
+  STRING_CAST_FN = tmpls.get('string_cast', STRING_CAST_TMPL_GOOGLESQL.format)
+  UNIFORM_MAPPING_FN = tmpls.get(
+      'uniform_mapping', uniform_mapping_fn_googlesql
+  )
+  UNNEST_ARRAY_FN = tmpls.get('unnest_array', unnest_array_fn_googlesql)
+  GENERATE_ARRAY_FN = tmpls.get('generate_array', generate_array_fn_googlesql)
+  DUPLICATE_DATA_N_TIMES_FN = tmpls.get(
+      'duplicate_data', duplicate_data_n_times_fn_googlesql
+  )
 
 
 def is_compatible(sql0, sql1):
@@ -367,7 +521,7 @@ class Column(SqlComponent):
     if not (self.partition is None and self.order is None and
             self.window_frame is None):
       partition_cols_str = [
-          'CAST(%s AS STRING)' % c for c in Columns(self.partition).expressions
+          STRING_CAST_FN(c) for c in Columns(self.partition).expressions
       ]
       partition = 'PARTITION BY %s' % ', '.join(
           partition_cols_str) if self.partition else ''
@@ -429,7 +583,7 @@ class Column(SqlComponent):
 
   def __div__(self, other):
     return Column(
-        SAFE_DIVIDE.format(
+        SAFE_DIVIDE_FN(
             numer=self.expression, denom=getattr(other, 'expression', other)
         ),
         alias='%s / %s' % (self.alias_raw, get_alias(other)),
@@ -441,7 +595,7 @@ class Column(SqlComponent):
   def __rdiv__(self, other):
     alias = '%s / %s' % (get_alias(other), self.alias_raw)
     return Column(
-        SAFE_DIVIDE.format(
+        SAFE_DIVIDE_FN(
             numer=getattr(other, 'expression', other), denom=self.expression
         ),
         alias=alias,
