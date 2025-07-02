@@ -2168,15 +2168,9 @@ class Nth(SimpleMetric):
       raise ValueError(
           'This case should be handled by get_sql_and_with_clause() already.'
       )
-    order = '' if self.ascending else ' DESC'
-    dropna = ' IGNORE NULLS' if self.dropna else ''
-    sql_tmpl = 'ARRAY_AGG({}%s ORDER BY %s%s LIMIT %s)[SAFE_OFFSET(%s)]' % (
-        dropna,
-        self.sort_by,
-        order,
-        self.n + 1,
-        self.n,
-    )
+
+    ar = sql.ARRAY_AGG_FN(self.sort_by, self.ascending, self.dropna, self.n + 1)
+    sql_tmpl = sql.ARRAY_INDEX_FN(ar, self.n)
     return sql.Column(
         self.var,
         sql_tmpl,
@@ -2276,17 +2270,18 @@ class Quantile(SimpleMetric):
       alias = 'quantile(%s, %s)' % (self.var, self.quantile)
       return sql.Column(
           self.var,
-          'APPROX_QUANTILES({}, 100)[OFFSET(%s)]' % int(100 * self.quantile),
-          alias, local_filter)
+          sql.QUANTILE_FN(self.quantile),
+          alias,
+          local_filter,
+      )
 
-    query = 'APPROX_QUANTILES({}, 100)[OFFSET(%s)]'
     quantiles = []
     for q in self.quantile:
       alias = 'quantile(%s, %s)' % (self.var, q)
       if alias.startswith('0.'):
         alias = 'point_' + alias[2:]
       quantiles.append(
-          sql.Column(self.var, query % int(100 * q), alias, local_filter))
+          sql.Column(self.var, sql.QUANTILE_FN(q), alias, local_filter))
     return sql.Columns(quantiles)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,

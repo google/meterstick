@@ -308,8 +308,7 @@ class Nxx(DiversityBase):
       cumsum_cols.add(cumsum_col)
 
       nxx_col = sql.Column(
-          cumsum_col.alias,
-          'COUNTIF({} < %s) + 1' % self.share,
+          cumsum_col.alias, sql.COUNTIF_FN('{} < %s' % self.share) + ' + 1'
       )
       nxx_col.set_alias(self.name_tmpl.format(c.alias_raw))
       nxx_cols.add(nxx_col)
