@@ -3,6 +3,13 @@ This folder contains the data analysis scripts for the paper
 
 In the "datasets" folder, you will find the raw data used in the paper.
 
+- The "baseball_pitches_to_SEA_batters.csv" file contains all pitches thrown
+  to the batters in the 2019 opening day starting lineup of the Seattle Mariners
+  from 2015-18. The data was extracted from this
+  [Kaggle data set](https://www.kaggle.com/datasets/pschale/mlb-pitch-data-20152018).
+  This file only contains player IDs, so the results can be joined to
+  "baseball_player_names.csv" for readability.
+
 - The "minimum_wage.csv" file contains the minimum wage data used in the
   paper. It's taken from the https://davidcard.berkeley.edu/data_sets.html
   with modification that
