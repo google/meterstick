@@ -394,14 +394,14 @@ class TestMetricsMiscellaneous(absltest.TestCase):
 
   def test_nth_na(self):
     df = pd.DataFrame({'x': [np.nan, 1], 'w': [1, 0]})
-    m = metrics.Nth('x', 1, 'w')
+    m = metrics.Nth('x', 1, 'w', dropna=False)
     output = m.compute_on(df)
     expected = pd.DataFrame({'2nd(x) sort by w asc': [np.nan]})
     testing.assert_frame_equal(output, expected)
 
   def test_nth_dropna(self):
     df = pd.DataFrame({'x': [np.nan, 1], 'w': [0, 1]})
-    m = metrics.Nth('x', 0, 'w', dropna=True)
+    m = metrics.Nth('x', 0, 'w')
     output = m.compute_on(df)
     expected = pd.DataFrame({'1st(x) sort by w asc': [1.0]})
     testing.assert_frame_equal(output, expected)
@@ -941,7 +941,7 @@ class TestCaching(parameterized.TestCase):
         metrics.Nth('z', 2, 'y'),
         metrics.Nth('x', 2, 'z'),
         metrics.Nth('x', 2, 'z', False),
-        metrics.Nth('x', 2, 'z', False, True),
+        metrics.Nth('x', 2, 'z', False, False),
         metrics.Quantile('x'),
         metrics.Quantile('x', 0.2),
         metrics.Variance('x', True),

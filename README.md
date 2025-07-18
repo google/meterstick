@@ -59,8 +59,9 @@ Currently built-in metrics include:
 +   `Max(variable)`: calculates the max of the `variable` column.
 +   `Min(variable)`: calculates the min of the `variable` column.
 +   `Ratio(numerator, denominator)` : calculates `Sum(numerator) / Sum(denominator)`.
-+   `Nth(variable, n, sort_by, ascending=True, dropna=False)` computes the `n`th
-    value (0-based indexing) in the `variable` column after sorting by the `sort_by` column.
++   `Nth(variable, n, sort_by, ascending=True, dropna=True)` computes the `n`th
+    value (0-based indexing) in the `variable` column after sorting by the
+    `sort_by` column.
 +   `Variance(variable, unbiased=True)`: calculates the variance of the
     `variable` column `unbiased` determines whether the unbiased (sample) or
     population estimate is used.

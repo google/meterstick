@@ -2041,7 +2041,7 @@ class Nth(SimpleMetric):
 
   Attributes:
     var: Column to compute on.
-    n: The `n`-th value to get.
+    n: The `n`-th  (0-based indexing) value to get.
     sort_by: Column to sort by.
     ascending: If to sort in ascending order.
     dropna: If to drop NA in var before counting.
@@ -2057,7 +2057,7 @@ class Nth(SimpleMetric):
       n: int,
       sort_by: Text,
       ascending: bool = True,
-      dropna: bool = False,
+      dropna: bool = True,
       name: Optional[Text] = None,
       where: Optional[Union[Text, Sequence[Text]]] = None,
       additional_fingerprint_attrs: Optional[List[str]] = None,
