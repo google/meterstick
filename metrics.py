@@ -693,22 +693,14 @@ class Metric(object):
     query = self.to_sql(table, split_by, False)
     # We try to avoid using CREATE TEMP TABLE when possible. It's only used when
     # - the query contains RAND();
-    # - the execute doesn't evaluate RAND() only once in the WITH clause;
-    # - ALLOW_TEMP_TABLE is True.
-    if sql.ALLOW_TEMP_TABLE and 'RAND()' in str(query):
+    # - the execute doesn't evaluate RAND() only once in the WITH clause.
+    # - NEED_TEMP_TABLE is True.
+    if sql.NEED_TEMP_TABLE and sql.RAND_FN() in str(query):
       query_with_tmp_table = self.to_sql(table, split_by, True)
       if str(query) != str(
           query_with_tmp_table
       ) and not sql.rand_run_only_once_in_with_clause(execute):
-        try:
-          execute('CREATE OR REPLACE TEMP TABLE T AS (SELECT 42 AS ans);')
-          sql.TEMP_TABLE_SUPPORTED = True
-          query = self.to_sql(table, split_by, True)
-        except Exception as exc:
-          sql.TEMP_TABLE_SUPPORTED = False
-          raise NotImplementedError from exc
-        finally:
-          sql.TEMP_TABLE_SUPPORTED = None
+        query = self.to_sql(table, split_by, True)
     res = execute(str(query))
     extra_idx = list(self.get_extra_idx(return_superset=True))
     indexes = split_by + extra_idx if split_by else extra_idx
@@ -746,7 +738,7 @@ class Metric(object):
           1) have volatile functions and
           2) are referenced in the same query multiple times,
         into CREATE TEMP TABLE statements.
-        Note that this arg has no effect if sql.ALLOW_TEMP_TABLE is False.
+        Note that this arg has no effect if sql.NEED_TEMP_TABLE is False.
         When you use compute_on_sql or compute_on_beam, this arg is
         automatically decided based on your `execute` function.
 
@@ -771,15 +763,12 @@ class Metric(object):
                                                     sql.Filters(), with_data)
     query.with_data = with_data
     create_tmp_table = (
-        sql.ALLOW_TEMP_TABLE
+        sql.NEED_TEMP_TABLE
         if create_tmp_table_for_volatile_fn is None
         else create_tmp_table_for_volatile_fn
     )
     if not create_tmp_table:
       return query
-    # None means we don't know yet so we only check for False.
-    if sql.TEMP_TABLE_SUPPORTED is False:  # pylint: disable=g-bool-id-comparison
-      raise NotImplementedError  # to fall back to the mixed mode
     with_data.temp_tables = sql.get_temp_tables(with_data)
     return query
 
@@ -2137,9 +2126,12 @@ class Nth(SimpleMetric):
         sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
     if not local_filter:
-      return super(Nth, self).get_sql_and_with_clause(
-          table, split_by, global_filter, indexes, None, with_data
-      )
+      try:
+        return super(Nth, self).get_sql_and_with_clause(
+            table, split_by, global_filter, indexes, None, with_data
+        )
+      except NotImplementedError:  # for dialects that don't support one-liner
+        pass
     all_filters = sql.Filters(local_filter).add(global_filter)
     if self.dropna:
       all_filters.add(f'{self.var} IS NOT NULL')
@@ -2168,18 +2160,13 @@ class Nth(SimpleMetric):
       raise ValueError(
           'This case should be handled by get_sql_and_with_clause() already.'
       )
-    order = '' if self.ascending else ' DESC'
-    dropna = ' IGNORE NULLS' if self.dropna else ''
-    sql_tmpl = 'ARRAY_AGG({}%s ORDER BY %s%s LIMIT %s)[SAFE_OFFSET(%s)]' % (
-        dropna,
-        self.sort_by,
-        order,
-        self.n + 1,
-        self.n,
+
+    tmpl = sql.NTH_VALUE_FN(
+        self.n, self.sort_by, self.ascending, self.dropna, self.n + 1
     )
     return sql.Column(
         self.var,
-        sql_tmpl,
+        tmpl,
         self.name,
     )
 
@@ -2276,17 +2263,18 @@ class Quantile(SimpleMetric):
       alias = 'quantile(%s, %s)' % (self.var, self.quantile)
       return sql.Column(
           self.var,
-          'APPROX_QUANTILES({}, 100)[OFFSET(%s)]' % int(100 * self.quantile),
-          alias, local_filter)
+          sql.QUANTILE_FN(self.quantile),
+          alias,
+          local_filter,
+      )
 
-    query = 'APPROX_QUANTILES({}, 100)[OFFSET(%s)]'
     quantiles = []
     for q in self.quantile:
       alias = 'quantile(%s, %s)' % (self.var, q)
       if alias.startswith('0.'):
         alias = 'point_' + alias[2:]
       quantiles.append(
-          sql.Column(self.var, query % int(100 * q), alias, local_filter))
+          sql.Column(self.var, sql.QUANTILE_FN(q), alias, local_filter))
     return sql.Columns(quantiles)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,

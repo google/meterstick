@@ -535,11 +535,14 @@ class Comparison(Operation):
       )
       columns.add(col)
     using = indexes.difference(cond_cols)
-    join = '' if using else 'CROSS'
-    return sql.Sql(
-        sql.Columns(indexes.aliases).add(columns),
-        sql.Join(raw_table_alias, base_table_alias, join=join, using=using),
-        cond), with_data
+    return (
+        sql.Sql(
+            sql.Columns(indexes.aliases).add(columns),
+            sql.Join(raw_table_alias, base_table_alias, using=using),
+            cond,
+        ),
+        with_data,
+    )
 
   def get_change_raw_sql(
       self, table, split_by, global_filter, indexes, local_filter, with_data
@@ -615,7 +618,7 @@ class PercentChange(Comparison):
 
   def get_sql_template_for_comparison(self, raw_table_alias, base_table_alias):
     return (
-        sql.SAFE_DIVIDE.format(
+        sql.SAFE_DIVIDE_FN(
             numer=f'{raw_table_alias}.%(r)s',
             denom=f'{base_table_alias}.%(b)s',
         )
@@ -1620,15 +1623,15 @@ class MH(Comparison):
                               for c, b in zip(cond_cols.aliases, base))
     exclude_base_condition = ' OR '.join(exclude_base_condition)
     cond = None if self.include_base else sql.Filters([exclude_base_condition])
-    numerator = sql.SAFE_DIVIDE.format(
+    numerator = sql.SAFE_DIVIDE_FN(
         numer=f'{raw_table_alias}.%(numer)s * {base_table_alias}.%(denom)s',
         denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
     )
-    denominator = sql.SAFE_DIVIDE.format(
+    denominator = sql.SAFE_DIVIDE_FN(
         numer=f'{base_table_alias}.%(numer)s * {raw_table_alias}.%(denom)s',
         denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
     )
-    col_tmpl = f"""100 * {sql.SAFE_DIVIDE.format(
+    col_tmpl = f"""100 * {sql.SAFE_DIVIDE_FN(
         numer=f'COALESCE(SUM({numerator}), 0)',
         denom=f'COALESCE(SUM({denominator}), 0)')} - 100"""
     columns = sql.Columns()
@@ -2820,7 +2823,7 @@ class Jackknife(MetricWithCI):
     If batch_size is larger than 1, in each iteration, we compute the child on
     SELECT
       *
-    FROM UNNEST([1, 2, ..., batch_size]) AS meterstick_resample_idx
+    FROM UNNEST([1, 2, ..., batch_size]) meterstick_resample_idx
     JOIN
     table
     ON meterstick_resample_idx != unit), split by meterstick_resample_idx in
@@ -2919,7 +2922,7 @@ class Jackknife(MetricWithCI):
         loo = sql.Sql(
             sql.Column('*', auto_alias=False),
             sql.Datasource(
-                'UNNEST(%s)' % units, 'meterstick_resample_idx'
+                sql.UNNEST_ARRAY_LITERAL_FN(units, 'meterstick_resample_idx')
             ).join(table, on='meterstick_resample_idx != %s' % self.unit),
             self.where_,
         )
@@ -3335,7 +3338,7 @@ class PoissonBootstrap(Bootstrap):
         *,
         RAND() AS poisson_bootstrap_uniform_var
       FROM T
-      JOIN
+      CROSS JOIN
       UNNEST(GENERATE_ARRAY(1, n_replicates)) AS meterstick_resample_idx).
     There are two variations. First, when we know what columns are in the table
     because the table has been preaggregated, then we explicitly SELECT those
@@ -3349,7 +3352,7 @@ class PoissonBootstrap(Bootstrap):
 
     The second query looks like
       PoissonBootstrapDataWithPoissonWeight AS (SELECT
-        * EXCEPT(poisson_bootstrap_uniform_var),
+        *,
         CASE
           WHEN poisson_bootstrap_uniform_var <= 0.7357588823428847 THEN 1
           WHEN poisson_bootstrap_uniform_var <= 0.9196986029286058 THEN 2
@@ -3381,9 +3384,9 @@ class PoissonBootstrap(Bootstrap):
     The rest subqueries depend on if the Metric has been preaggregated. If not,
     we use
       PoissonBootstrapResampledData AS (SELECT
-        * EXCEPT(poisson_bootstrap_weight, poisson_bootstrap_weight_unnested)
+        *
       FROM PoissonBootstrapDataWithPoissonWeight
-      JOIN
+      CROSS JOIN
       UNNEST(GENERATE_ARRAY(1, poisson_bootstrap_weight))
         AS poisson_bootstrap_weight_unnested),
       ResampledResults AS (SELECT
@@ -3433,7 +3436,9 @@ class PoissonBootstrap(Bootstrap):
         table = with_data.add(table)
       uniform_columns = sql.Columns(sql.Column('*', auto_alias=False))
     global_filter = sql.Filters(global_filter).add(self.where_)
-    uniform_var = sql.Column('RAND()', alias='poisson_bootstrap_uniform_var')
+    uniform_var = sql.Column(
+        sql.RAND_FN(), alias='poisson_bootstrap_uniform_var'
+    )
     split_by_cols = (
         split_by.aliases
         if self.has_been_preaggregated
@@ -3442,21 +3447,24 @@ class PoissonBootstrap(Bootstrap):
     if self.unit:
       cols = ', '.join(
           map(
-              'CAST({} AS STRING)'.format,
+              sql.STRING_CAST_FN,
               (split_by_cols or []) + [self.unit, 'meterstick_resample_idx'],
           )
       )
       uniform_var = sql.Column(
-          f'FARM_FINGERPRINT(CONCAT({cols})) / 0xFFFFFFFFFFFFFFFF + 0.5',
+          sql.UNIFORM_MAPPING_FN(f'CONCAT({cols})'),
           alias='poisson_bootstrap_uniform_var',
       )
     uniform_columns.add(uniform_var)
     replicates = sql.Datasource(
-        'UNNEST(GENERATE_ARRAY(1, %s))' % self.n_replicates,
-        'meterstick_resample_idx',
+        sql.DUPLICATE_DATA_N_TIMES_FN(
+            self.n_replicates, 'meterstick_resample_idx'
+        )
     )
     table_with_uniform_var = sql.Sql(
-        uniform_columns, sql.Join(table, replicates), global_filter
+        uniform_columns,
+        sql.Join(table, replicates),
+        global_filter,
     )
     table_with_uniform_var_alias = with_data.add(
         sql.Datasource(
@@ -3469,11 +3477,7 @@ class PoissonBootstrap(Bootstrap):
           'poisson_bootstrap_uniform_var'
       )
     else:
-      poisson_weight_columns = sql.Columns(
-          sql.Column(
-              '* EXCEPT(poisson_bootstrap_uniform_var)', auto_alias=False
-          )
-      )
+      poisson_weight_columns = sql.Columns(sql.Column('*', auto_alias=False))
     # The cutoff values are obtained from
     # scipy.stats.poisson.cdf(range(0, 19), 1) / scipy.stats.poisson.cdf(19, 1).
     # The cutoff value for 0 is not used here but used in the filter of
@@ -3529,18 +3533,11 @@ class PoissonBootstrap(Bootstrap):
             poisson_sampled_columns, table_with_poisson_weight_alias
         )
     else:
-      poisson_sampled_columns = sql.Columns(
-          sql.Column(
-              (
-                  '* EXCEPT(poisson_bootstrap_weight,'
-                  ' poisson_bootstrap_weight_unnested)'
-              ),
-              auto_alias=False,
-          )
-      )
+      poisson_sampled_columns = sql.Columns(sql.Column('*', auto_alias=False))
       replicates = sql.Datasource(
-          'UNNEST(GENERATE_ARRAY(1, poisson_bootstrap_weight))',
-          'poisson_bootstrap_weight_unnested',
+          sql.DUPLICATE_DATA_N_TIMES_FN(
+              'poisson_bootstrap_weight', 'poisson_bootstrap_weight_unnested'
+          )
       )
       poisson_sampled_table = sql.Sql(
           poisson_sampled_columns,
@@ -3671,7 +3668,7 @@ def get_se_sql(
                       '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, Jackknife):
         adjustment = sql.Column(
-            sql.SAFE_DIVIDE.format(
+            sql.SAFE_DIVIDE_FN(
                 numer='COUNT({c}) - 1', denom='SQRT(COUNT({c}))'
             ).format(c=alias)
         )
@@ -3778,7 +3775,7 @@ def get_jackknife_data_general(
   else:
     buckets = sql.Sql(unique_units, table, where=global_filter)
     buckets_alias = with_data.add(sql.Datasource(buckets, 'Buckets'))
-    jk_from = sql.Join(table, buckets_alias, join='CROSS')
+    jk_from = sql.Join(table, buckets_alias)
     jk_data_table = sql.Sql(
         sql.Column('*', auto_alias=False),
         jk_from,
@@ -3829,7 +3826,7 @@ def get_jackknife_data_fast(
   (SELECT DISTINCT
     split_by,
     unit
-  FROM UnitSliceCount)
+  FROM UnitSliceCount) AS jk_all_slices
   USING (split_by)
   LEFT JOIN
   UnitSliceCount AS unit
@@ -3876,7 +3873,7 @@ def get_jackknife_data_fast(
       sql.Columns(
           [sql.Column(c, 'SUM({})', c) for c in columns_to_preagg.aliases]),
       unit_slice_ct_alias,
-      groupby=indexes_and_unit.difference(metric.unit).aliases)
+      groupby=indexes_and_unit.difference(metric.unit))
   total_ct_alias = with_data.add(sql.Datasource(total_ct_table, 'TotalCount'))
   total_ct = sql.Datasource(total_ct_alias, 'total_table')
 
@@ -3884,11 +3881,11 @@ def get_jackknife_data_fast(
   all_slices = sql.Datasource(
       sql.Sql(
           sql.Columns(split_by_and_unit.aliases, distinct=True),
-          unit_slice_ct_alias))
+          unit_slice_ct_alias), 'jk_all_slices')
   if split_by:
     loo_from = total_ct.join(all_slices, using=split_by, join='RIGHT')
   else:
-    loo_from = total_ct.join(all_slices, join='CROSS')
+    loo_from = total_ct.join(all_slices)
   loo_from = loo_from.join(
       sql.Datasource(unit_slice_ct_alias, 'unit_slice_table'),
       using=indexes_and_unit.aliases,
@@ -3995,15 +3992,17 @@ def bootstrap_by_row(
   The SQL is constructed as
     WITH
     BootstrapRandomRows AS (SELECT
-      *,  # or columns_in_table and meterstick_resample_idx if columns_in_table
+      meterstick_resample_idx,
+      bs_original_data.*,  # or columns_in_table if columns_in_table
       global_filter AS meterstick_bs_filter,
-      ROW_NUMBER() OVER (PARTITION BY meterstick_resample_idx, global_filter)
+      ROW_NUMBER() OVER (PARTITION BY meterstick_resample_idx, global_filter
+        ORDER BY meterstick_resample_idx, global_filter)
         AS meterstick_bs_row_number,
-      CEILING(RAND() * COUNT(*)
+      CEIL(RAND() * COUNT(*)
         OVER (PARTITION BY meterstick_resample_idx, global_filter))
         AS meterstick_bs_random_row_number,
       $RenamedSplitByIfAny AS renamed_split_by,
-    FROM table
+    FROM table bs_original_data
     JOIN
     UNNEST(GENERATE_ARRAY(1, metric.n_replicates)) AS meterstick_resample_idx),
     BootstrapRandomChoices AS (SELECT
@@ -4016,10 +4015,12 @@ def bootstrap_by_row(
     FROM BootstrapRandomRows) AS a
     JOIN
     BootstrapRandomRows AS b
-    USING (split_by, meterstick_resample_idx, meterstick_bs_row_number,
-      meterstick_bs_filter)
+    ON a.split_by = b.split_by
+      AND a.meterstick_resample_idx = b.meterstick_resample_idx
+      AND a.meterstick_bs_row_number = b.meterstick_bs_row_number
+      AND a.meterstick_bs_filter = b.meterstick_bs_filter)
     WHERE
-    meterstick_bs_filter),
+    b.meterstick_bs_filter),
   The filter parts are optional.
 
   Args:
@@ -4035,28 +4036,34 @@ def bootstrap_by_row(
     The alias of the table in the WITH clause that has all resampled data.
     The global with_data which holds all datasources we need in the WITH clause.
   """
+  columns = sql.Columns(['meterstick_resample_idx'])
   if columns_in_table:
-    columns = sql.Columns(columns_in_table).add('meterstick_resample_idx')
+    columns = columns.add(columns_in_table)
   else:
-    columns = sql.Columns(sql.Column('*', auto_alias=False))
+    table = sql.Datasource(table, 'bs_original_data')
+    columns.add(sql.Columns(sql.Column('bs_original_data.*', auto_alias=False)))
   partition = split_by.expressions + ['meterstick_resample_idx']
   if global_filter:
     columns.add(sql.Column(str(global_filter), alias='meterstick_bs_filter'))
     partition.append(str(global_filter))
   row_number = sql.Column(
-      'ROW_NUMBER()', alias='meterstick_bs_row_number', partition=partition
+      'ROW_NUMBER()',
+      alias='meterstick_bs_row_number',
+      partition=partition,
+      order=partition if sql.ROW_NUMBER_REQUIRE_ORDER_BY else None,
   )
   length = sql.Column('COUNT(*)', partition=partition)
-  random_row_number = sql.Column('RAND()') * length
+  random_row_number = sql.Column(sql.RAND_FN()) * length
   random_row_number = sql.Column(
-      'CEILING(%s)' % random_row_number.expression,
+      sql.CEIL_FN(random_row_number.expression),
       alias='meterstick_bs_random_row_number',
   )
   columns.add((row_number, random_row_number))
   columns.add((i for i in split_by if i != i.alias))
   replicates = sql.Datasource(
-      'UNNEST(GENERATE_ARRAY(1, %s))' % metric.n_replicates,
-      'meterstick_resample_idx',
+      sql.DUPLICATE_DATA_N_TIMES_FN(
+          metric.n_replicates, 'meterstick_resample_idx'
+      )
   )
   random_choice_table = sql.Sql(columns, sql.Join(table, replicates))
   random_choice_table_alias = with_data.add(
@@ -4081,12 +4088,14 @@ def bootstrap_by_row(
       random_choice_table_alias,
   )
   random_rows = sql.Datasource(random_rows, 'a')
+  # SELECT b.* doesn't work with USING in Oracle SQL so we need to use ON.
+  on = '\n  AND '.join((f'a.{c} = b.{c}' for c in using.aliases))
   resampled = random_rows.join(
-      sql.Datasource(random_choice_table_alias, 'b'), using=using)
+      sql.Datasource(random_choice_table_alias, 'b'), on=on)
   table = sql.Sql(
       sql.Column('b.*', auto_alias=False),
       resampled,
-      where='meterstick_bs_filter' if global_filter else None,
+      where='b.meterstick_bs_filter' if global_filter else None,
   )
   table = with_data.add(sql.Datasource(table, 'BootstrapRandomChoices'))
   return table, with_data

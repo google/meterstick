@@ -1,6 +1,6 @@
 [project]
 name = "meterstick"
-version = "1.5.5"
+version = "1.5.6"
 authors = [
   { name="Xunmo Yang", email="xunmo@google.com" },
   { name="Dennis Sun", email="dlsun@google.com" },

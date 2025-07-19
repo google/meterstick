@@ -26,12 +26,22 @@ import pandas as pd
 class DiversityBase(operations.Distribution):
   """Base class that captures shared logic of diversity Operations."""
 
-  def __init__(self, over, child, name_tmpl, additional_fingerprint_attrs=None):
+  def __init__(
+      self,
+      over,
+      child,
+      name_tmpl,
+      where,
+      additional_fingerprint_attrs=None,
+      **kwargs,
+  ):
     super(DiversityBase, self).__init__(
         over,
         child,
         name_tmpl,
+        where=where,
         additional_fingerprint_attrs=additional_fingerprint_attrs,
+        **kwargs
     )
     self.extra_index = []
 
@@ -59,8 +69,8 @@ class DiversityBase(operations.Distribution):
 class HHI(DiversityBase):
   """Herfindahl–Hirschman index of metric distribution."""
 
-  def __init__(self, over, child=None):
-    super(HHI, self).__init__(over, child, 'HHI of {}')
+  def __init__(self, over, child=None, where=None, **kwargs):
+    super(HHI, self).__init__(over, child, 'HHI of {}', where, **kwargs)
 
   def compute_on_children(self, child, split_by):
     dist = super(HHI, self).compute_on_children(child, split_by)
@@ -100,8 +110,8 @@ class HHI(DiversityBase):
 class Entropy(DiversityBase):
   """Entropy of metric distribution."""
 
-  def __init__(self, over, child=None):
-    super(Entropy, self).__init__(over, child, 'Entropy of {}')
+  def __init__(self, over, child=None, where=None, **kwargs):
+    super(Entropy, self).__init__(over, child, 'Entropy of {}', where, **kwargs)
 
   def compute_on_children(self, child, split_by):
     dist = super(Entropy, self).compute_on_children(child, split_by)
@@ -141,14 +151,24 @@ class Entropy(DiversityBase):
 class TopK(DiversityBase):
   """The total share of the largest k contributors."""
 
-  def __init__(self, over, k, child=None, additional_fingerprint_attrs=None):
+  def __init__(
+      self,
+      over,
+      k,
+      child=None,
+      where=None,
+      additional_fingerprint_attrs=None,
+      **kwargs,
+  ):
     if not isinstance(k, int):
       raise ValueError('k must be an integer!')
     super(TopK, self).__init__(
         over,
         child,
         "Top-%s's share of {}" % k,
+        where,
         ['k'] + (additional_fingerprint_attrs or []),
+        **kwargs,
     )
     self.k = k
 
@@ -173,9 +193,14 @@ class TopK(DiversityBase):
     1. Get the query for the Distribution of the child Metric.
     2. Keep all indexing/groupby columns unchanged.
     3. For all value columns, collect the top-k values into an array by
-       ARRAY_AGG(val_col ORDER BY val_col DESC LIMIT k) AS val_arr.
-    4. For all value columns, do 'SELECT SUM(x) FROM UNNEST(val_arr) AS x' to
-       get the sum of the top-k values.
+       ARRAY_AGG(val_col IGNORE NULLS ORDER BY val_col DESC LIMIT k) AS val_arr.
+       Note that the ordering between number and NULLs varies by dialect so we
+       use IGNORE NULLS.
+    4. For all value columns, do
+       'SELECT SUM(x) FROM UNNEST(val_arr) AS x WITH OFFSET AS i WHERE i < k'
+       to get the sum of the top-k values. Note that the
+       'WITH OFFSET AS i WHERE i < k' is redundant here but many external
+       dialects don't support 'LIMIT k' in #3 so we need to do it in #4.
 
     Args:
       table: The table we want to query from.
@@ -206,14 +231,14 @@ class TopK(DiversityBase):
         continue
 
       top_k_array_col = sql.Column(
-          (c.alias, c.alias),
-          'ARRAY_AGG({} ORDER BY {} DESC LIMIT %s)' % self.k,
+          c.alias,
+          sql.ARRAY_AGG_FN(c.alias, ascending=False, dropna=True, limit=self.k),
       )
       top_k_array_col.set_alias(c.alias_raw)
       top_k_array_columns.add(top_k_array_col)
       top_k_sum_col = sql.Column(
-          top_k_array_col.alias,
-          '(SELECT SUM(x) FROM UNNEST({}) AS x)',
+          '(SELECT SUM(x) FROM'
+          f' {sql.UNNEST_ARRAY_FN(top_k_array_col.alias, "x", "i", self.k)})',
       )
       top_k_sum_col.set_alias(self.name_tmpl.format(c.alias_raw))
       top_k_sum_columns.add(top_k_sum_col)
@@ -229,7 +254,13 @@ class Nxx(DiversityBase):
   """The minimum number of contributors to achieve certain share."""
 
   def __init__(
-      self, over, share, child=None, additional_fingerprint_attrs=None
+      self,
+      over,
+      share,
+      child=None,
+      where=None,
+      additional_fingerprint_attrs=None,
+      **kwargs,
   ):
     if not 0 < share <= 1:
       raise ValueError('Share must be in (0, 1]!')
@@ -238,7 +269,9 @@ class Nxx(DiversityBase):
         child,
         'N(%s) of {}'
         % (int(100 * share) if (100 * share).is_integer() else 100 * share),
+        where,
         ['share'] + (additional_fingerprint_attrs or []),
+        **kwargs,
     )
     self.share = share
 
@@ -308,8 +341,7 @@ class Nxx(DiversityBase):
       cumsum_cols.add(cumsum_col)
 
       nxx_col = sql.Column(
-          cumsum_col.alias,
-          'COUNTIF({} < %s) + 1' % self.share,
+          cumsum_col.alias, sql.COUNTIF_FN('{} < %s' % self.share) + ' + 1'
       )
       nxx_col.set_alias(self.name_tmpl.format(c.alias_raw))
       nxx_cols.add(nxx_col)

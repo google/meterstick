@@ -19,17 +19,530 @@ from __future__ import print_function
 
 import collections
 from collections import abc
+import copy
 import functools
 import re
-from typing import Iterable, Optional, Text, Union
+from typing import Any, Iterable, List, Optional, Text, Union
 
 
-SAFE_DIVIDE = 'IF(({denom}) = 0, NULL, ({numer}) / ({denom}))'
-# If to use CREATE TEMP TABLE. Setting it to False disables CREATE TEMP TABLE
-# even when it's needed.
-ALLOW_TEMP_TABLE = True
-# If the engine supports CREATE TEMP TABLE
-TEMP_TABLE_SUPPORTED = None
+DEFAULT_DIALECT = 'GoogleSQL'
+DIALECT = None
+# If need to use CREATE TEMP TABLE. It's only needed when the engine doesn't
+# evaluate RAND() only once in the WITH clause. Namely,
+# run_only_once_in_with_clause() returns False.
+NEED_TEMP_TABLE = None
+CREATE_TEMP_TABLE_FN = None
+# ORDER BY is required for ROW_NUMBER() in some dialects.
+ROW_NUMBER_REQUIRE_ORDER_BY = None
+GROUP_BY_FN = None
+RAND_FN = None
+CEIL_FN = None
+SAFE_DIVIDE_FN = None
+QUANTILE_FN = None
+ARRAY_AGG_FN = None
+ARRAY_INDEX_FN = None
+NTH_VALUE_FN = None
+COUNTIF_FN = None
+FLOAT_CAST_FN = None
+STRING_CAST_FN = None
+UNIFORM_MAPPING_FN = None
+UNNEST_ARRAY_FN = None
+UNNEST_ARRAY_LITERAL_FN = None
+GENERATE_ARRAY_FN = None
+DUPLICATE_DATA_N_TIMES_FN = None
+
+
+def drop_table_if_exists(alias: str):
+  return f'DROP TABLE IF EXISTS {alias};'
+
+
+def drop_temp_table_if_exists(alias: str):
+  return f'DROP TEMPORARY TABLE IF EXISTS {alias};'
+
+
+def drop_table_if_exists_then_create_temp_table(alias: str, query: str):
+  """Drops a table if it exists then creates a temporary table."""
+  return (
+      drop_table_if_exists(alias)
+      + f'\nCREATE TEMPORARY TABLE {alias} AS {query}'
+  )
+
+
+def drop_temp_table_if_exists_then_create_temp_table(alias: str, query: str):
+  """Drops a table if it exists then creates a temporary table."""
+  return (
+      drop_temp_table_if_exists(alias)
+      + f'\nCREATE TEMPORARY TABLE {alias} AS {query}'
+  )
+
+
+def create_temp_table_fn_not_implemented(alias: str, query: str):
+  del alias, query  # Unused
+  raise NotImplementedError('CREATE TEMP TABLE is not implemented.')
+
+
+def sql_server_rand_fn_not_implemented():
+  raise NotImplementedError(
+      "SQL Server's RAND() without a seed parameter will return the same value"
+      " for every row within the same SELECT statement, which doesn't work"
+      ' for us.'
+  )
+
+
+def safe_divide_fn_default(numer: str, denom: str):
+  return (
+      f'CASE WHEN {{denom}} = 0 THEN NULL ELSE {FLOAT_CAST_FN("{numer}")} /'
+      f' {FLOAT_CAST_FN("{denom}")} END'.format(numer=numer, denom=denom)
+  )
+
+
+def approx_quantiles_fn(percentile):
+  p = int(100 * percentile)
+  return f'APPROX_QUANTILES({{}}, 100)[SAFE_OFFSET({p})]'
+
+
+def percentile_cont_fn(percentile):
+  return f'PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {{}})'
+
+
+def approx_percentile_fn(percentile):
+  return f'APPROX_PERCENTILE({{}}, {percentile})'
+
+
+def quantile_fn_not_implemented(percentile):
+  del percentile  # Unused
+  raise NotImplementedError('Quantile is not implemented.')
+
+
+def array_agg_fn_googlesql(
+    sort_by: Optional[str],
+    ascending: Optional[bool],
+    dropna: Optional[bool],
+    limit: Optional[int],
+):
+  """Uses GoogleSQL's ARRAY_AGG to aggregate arrays."""
+  dropna = ' IGNORE NULLS' if dropna else ''
+  order_by = f' ORDER BY {sort_by}' if sort_by else ''
+  if order_by is not None:
+    order_by += '' if ascending else ' DESC'
+  limit = f' LIMIT {limit}' if limit else ''
+  return f'ARRAY_AGG({{}}{dropna}{order_by}{limit})'
+
+
+def array_agg_fn_no_use_filter_no_limit(
+    sort_by: Optional[str],
+    ascending: Optional[bool],
+    dropna: Optional[bool],
+    limit: Optional[int],
+):
+  """Uses ARRAY_AGG to aggregate arrays. Use FILTER to filter out NULLs."""
+  del limit  # LIMIT is not supported in PostgreSQL so just skip.
+  dropna = ' FILTER (WHERE {} IS NOT NULL)' if dropna else ''
+  order_by = f' ORDER BY {sort_by}' if sort_by else ''
+  if order_by is not None:
+    order_by += '' if ascending else ' DESC'
+  return f'ARRAY_AGG({{}}{order_by}){dropna}'
+
+
+def json_array_agg_fn(
+    sort_by: Optional[str],
+    ascending: Optional[bool],
+    dropna: Optional[bool],
+    limit: Optional[int],
+):
+  """Uses JSON_ARRAYAGG to aggregate arrays."""
+  del limit  # LIMIT is not supported in PostgreSQL so just skip.
+  if not dropna:
+    raise NotImplementedError('Respecting NULLS is not supported.')
+  order_by = f' ORDER BY {sort_by}' if sort_by else ''
+  if order_by is not None:
+    order_by += '' if ascending else ' DESC'
+  return f'JSON_ARRAYAGG({{}}{order_by})'
+
+
+def array_agg_fn_not_implemented(
+    sort_by: Optional[str],
+    ascending: Optional[bool],
+    dropna: Optional[bool],
+    limit: Optional[int],
+):
+  del sort_by, ascending, dropna, limit  # Unused
+  raise NotImplementedError('ARRAY_AGG is not implemented.')
+
+
+def array_index_fn_googlesql(array: str, zero_based_idx: int):
+  return f'{array}[SAFE_OFFSET({zero_based_idx})]'
+
+
+def array_subscript_fn(array: str, zero_based_idx: int):
+  return f'({array})[{zero_based_idx + 1}]'
+
+
+def element_at_index_fn(array: str, zero_based_idx: int):
+  return f'element_at({array}, {zero_based_idx + 1})'
+
+
+def json_extract_fn(array: str, zero_based_idx: int):
+  return f"JSON_EXTRACT({array}, '$[{zero_based_idx}]')"
+
+
+def json_value_fn(array: str, zero_based_idx: int):
+  return f"JSON_VALUE({array}, '$[{zero_based_idx}]')"
+
+
+def array_index_fn_not_implemented(array: str, zero_based_idx: int):
+  del array, zero_based_idx  # Unused
+  raise NotImplementedError('ARRAY_INDEX is not implemented.')
+
+
+def nth_fn_default(
+    zero_based_idx: int,
+    sort_by: Optional[str],
+    ascending: Optional[bool],
+    dropna: Optional[bool],
+    limit: Optional[int],
+):
+  try:
+    array = ARRAY_AGG_FN(sort_by, ascending, dropna, limit)
+    return ARRAY_INDEX_FN(array, zero_based_idx)
+  except NotImplementedError as e:
+    raise NotImplementedError('Nth value is not implemented.') from e
+
+
+def uniform_mapping_fn_not_implemented(c):
+  raise NotImplementedError('Uniform mapping is not implemented.')
+
+
+def unnest_array_with_offset_fn(
+    array: str,
+    alias: Optional[str] = None,
+    offset: Optional[int] = None,
+    limit: Optional[int] = None,
+):
+  """Unnests an array in GoogleSQL."""
+  if alias is None:
+    return f'UNNEST({array})'
+  if not offset:
+    return f'UNNEST({array}) AS {alias}'
+  where = f' WHERE {offset} < {limit}' if limit else ''
+  return f'UNNEST({array}) {alias} WITH OFFSET AS {offset}{where}'
+
+
+def unnest_array_with_ordinality_fn(
+    array: str,
+    alias: Optional[str] = None,
+    offset: Optional[int] = None,
+    limit: Optional[int] = None,
+):
+  """Unnests an array in PostgreSQL."""
+  if alias is None:
+    return f'UNNEST({array})'
+  if not offset:
+    return f'UNNEST({array}) unnested({alias})'
+  where = f' WHERE {offset} < {limit + 1}' if limit else ''
+  return (
+      f'UNNEST({array}) WITH ORDINALITY AS unnested({alias}, {offset}){where}'
+  )
+
+
+def unnest_json_array_fn(
+    array: str,
+    alias: Optional[str] = None,
+    offset: Optional[int] = None,
+    limit: Optional[int] = None,
+):
+  """Unnests a JSON_ARRAY in Oracle SQL."""
+  where = f' WHERE {offset} < {limit + 1}' if limit else ''
+  return f'''JSON_TABLE({array}, '$[*]'
+        COLUMNS (
+            {alias} FLOAT PATH '$',
+            {offset} FOR ORDINALITY
+        )
+    ) AS foobar{where}'''
+
+
+def unnest_array_fn_not_implemented(
+    array: str,
+    alias: Optional[str] = None,
+    offset: Optional[int] = None,
+    limit: Optional[int] = None,
+):
+  del array, alias, offset, limit  # Unused
+  raise NotImplementedError('UNNEST is not implemented.')
+
+
+def unnest_array_literal_fn_googlesql(array: List[Any], alias: str = ''):
+  return f'UNNEST({array}) {alias}'.strip()
+
+
+def unnest_array_literal_fn_postgresql(array: List[Any], alias: str = ''):
+  return f'UNNEST(ARRAY{array}) {alias}'.strip()
+
+
+def unnest_array_literal_fn_not_implemented(array, alias=''):
+  del array, alias  # Unused
+  raise NotImplementedError('UNNEST with literal array is not implemented.')
+
+
+def generate_array_fn(n):
+  """Generates an array of n elements using GENERATE_ARRAY."""
+  return f'GENERATE_ARRAY(1, {n})'
+
+
+def generate_series_fn(n):
+  """Generates an array of n elements using GENERATE_SERIES."""
+  return f'GENERATE_SERIES(1, {n})'
+
+
+def generate_sequence_fn_mariadb(n):
+  """Generates an array of n elements using sequence in MariaDB."""
+  try:
+    n = int(n)
+    if not 1 < n < 9223372036854775807:
+      raise ValueError(
+          'Only support generating sequence for an integer between 1 and'
+          f' 2^63 - 1. Got: {n}'
+      )
+    return f'seq_0_to_{int(n) - 1}'
+  except ValueError as e:
+    raise NotImplementedError(
+        f'Only support generating sequence for an integer. Got: {n}'
+    ) from e
+
+
+def generate_array_fn_oracle(n, alias: str = '_'):
+  """Generates an array of n elements using sequence in Oracle."""
+  try:
+    return f'SELECT LEVEL AS {alias} FROM DUAL CONNECT BY LEVEL <= {int(n)}'
+  except ValueError as e:
+    raise NotImplementedError(
+        f'Only support generating sequence for an integer. Got: {n}'
+    ) from e
+
+
+def generate_sequence_fn_trino(n):
+  """Generates an array of n elements using sequence in Trino."""
+  return f'SEQUENCE(1, {n})'
+
+
+def generate_array_fn_not_implemented(n):
+  del n  # Unused
+  raise NotImplementedError(
+      'GENERATE_ARRAY/GENERATE_SERIES is not implemented.'
+  )
+
+
+def unnest_generated_array(n, alias: Optional[str] = None):
+  """Unnest a generated array, used to duplicate data."""
+  return UNNEST_ARRAY_FN(GENERATE_ARRAY_FN(n), alias)
+
+
+def implicitly_unnest_generated_array(n, alias: Optional[str] = None):
+  """Unnest a generated series, used to duplicate data."""
+  if not alias:
+    return GENERATE_ARRAY_FN(n)
+  return f'{GENERATE_ARRAY_FN(n)} {alias}'
+
+
+def implicitly_unnest_generated_sequence(n, alias: Optional[str] = None):
+  """Unnest a generated series, used to duplicate data."""
+  if not alias:
+    return GENERATE_ARRAY_FN(n)
+  return f'(SELECT seq AS {alias} FROM {GENERATE_ARRAY_FN(n)}) unnested'
+
+
+def duplicate_data_n_times_oracle(n, alias: Optional[str] = None):
+  if not alias:
+    return generate_array_fn_oracle(n)
+  return generate_array_fn_oracle(n, alias)
+
+
+def duplicate_data_n_times_not_implemented(n, alias: Optional[str] = None):
+  del n, alias  # Unused
+  raise NotImplementedError(
+      'Duplicate data n times is not implemented.'
+  )
+
+
+CREATE_TEMP_TABLE_OPTIONS = {
+    'Default': drop_table_if_exists_then_create_temp_table,
+    'GoogleSQL': 'CREATE OR REPLACE TEMP TABLE {alias} AS {query};'.format,
+    'MariaDB': drop_temp_table_if_exists_then_create_temp_table,
+    'Oracle': create_temp_table_fn_not_implemented,
+    'SQL Server': 'SELECT * INTO #{alias} FROM ({query});'.format,
+}
+ROW_NUMBER_REQUIRE_ORDER_BY_OPTIONS = {
+    'Default': False,
+    'Oracle': True,
+    'SQL Server': True,
+}
+# In 'SELECT x + 1 AS foo, COUNT(*) FROM T GROUP BY ...', we can
+# GROUP BY foo, GROUP BY 1, or GROUP BY x + 1. Most dialects support all three.
+# But Oracle doesn't support GROUP BY 1 and SQL Server only supports
+# GROUP BY x + 1. We prefer to use GROUP BY foo to GROUP BY 1 to GROUP BY x + 1
+# from the readability perspective.
+GROUP_BY_OPTIONS = {
+    'Default': lambda columns: ', '.join(columns.aliases),
+    'SQL Server': lambda columns: ', '.join(columns.expressions),
+    'Trino': lambda columns: ', '.join(map(str, range(1, len(columns) + 1))),
+}
+SAFE_DIVIDE_OPTIONS = {
+    'Default': safe_divide_fn_default,
+    'GoogleSQL': 'SAFE_DIVIDE({numer}, {denom})'.format,
+}
+# When make changes, manually evaluate the run_only_once_in_with_clause and
+# update the NEED_TEMP_TABLE_OPTIONS.
+RAND_OPTIONS = {
+    'Default': 'RANDOM()'.format,
+    'GoogleSQL': 'RAND()'.format,
+    'MariaDB': 'RAND()'.format,
+    'Oracle': 'DBMS_RANDOM.VALUE'.format,
+    'SQL Server': sql_server_rand_fn_not_implemented,
+    'SQLite': '0.5 - RANDOM() / CAST(-9223372036854775808 AS REAL) / 2'.format,
+}
+# Manually evalueated run_only_once_in_with_clause for each dialect.
+NEED_TEMP_TABLE_OPTIONS = {
+    'Default': True,
+    'PostgreSQL': False,
+    'MariaDB': False,
+    'Oracle': True,
+    'SQL Server': True,
+    'Trino': True,
+    'SQLite': False,
+}
+CEIL_OPTIONS = {
+    'Default': 'CEIL({})'.format,
+    'SQL Server': 'CEILING({})'.format,
+}
+QUANTILE_OPTIONS = {
+    'Default': quantile_fn_not_implemented,
+    'GoogleSQL': approx_quantiles_fn,
+    'PostgreSQL': percentile_cont_fn,
+    'Oracle': percentile_cont_fn,
+    'Trino': approx_percentile_fn,
+}
+ARRAY_AGG_OPTIONS = {
+    'Default': array_agg_fn_not_implemented,
+    'GoogleSQL': array_agg_fn_googlesql,
+    'PostgreSQL': array_agg_fn_no_use_filter_no_limit,
+    'MariaDB': json_array_agg_fn,
+    'Oracle': json_array_agg_fn,
+    # JSON_ARRAYAGG has been added in SQL Server 2025. Will update later.
+    'SQL Server': array_agg_fn_not_implemented,
+    'Trino': array_agg_fn_no_use_filter_no_limit,
+}
+ARRAY_INDEX_OPTIONS = {
+    'Default': array_index_fn_not_implemented,
+    'GoogleSQL': array_index_fn_googlesql,
+    'PostgreSQL': array_subscript_fn,
+    'MariaDB': json_extract_fn,
+    'Oracle': json_value_fn,
+    'Trino': element_at_index_fn,
+}
+NTH_OPTIONS = {
+    'Default': nth_fn_default,
+}
+COUNTIF_OPTIONS = {
+    'Default': 'COUNT(CASE WHEN {} THEN 1 END)'.format,
+    'GoogleSQL': 'COUNTIF({})'.format,
+}
+FLOAT_CAST_OPTIONS = {
+    'Default': 'CAST({} AS FLOAT)'.format,
+    'Trino': 'CAST({} AS DOUBLE)'.format,
+}
+STRING_CAST_OPTIONS = {
+    'Default': 'CAST({} AS TEXT)'.format,
+    'GoogleSQL': 'CAST({} AS STRING)'.format,
+    'MariaDB': 'CAST({} AS NCHAR)'.format,
+    'Oracle': 'TO_CHAR({})'.format,
+    'SQL Server': 'CAST({} AS VARCHAR(MAX))'.format,
+    'Trino': 'CAST({} AS VARCHAR)'.format,
+}
+UNIFORM_MAPPING_OPTIONS = {
+    'Default': uniform_mapping_fn_not_implemented,
+    'GoogleSQL': lambda c: f'FARM_FINGERPRINT({c}) / 0xFFFFFFFFFFFFFFFF + 0.5',
+    # These queries are verified in
+    # https://colab.research.google.com/drive/1C1klaXsus0fWnOAT_vWzNHOT3Q21LZi7#scrollTo=O4--SViiuAv9&line=4&uniqifier=1.
+    'PostgreSQL': lambda c: f'ABS(HASHTEXT({c})::BIGINT) / 2147483647.',
+    'MariaDB': lambda c: (
+        f'CAST(CONV(SUBSTRING(MD5({c}), 1, 16), 16, 10) AS DECIMAL(38, 0)) /'
+        ' POW(2, 64)'
+    ),
+    'Trino': lambda c: (
+        f'CAST(from_big_endian_64(xxhash64(CAST({c} AS varbinary))) AS DOUBLE)'
+        ' / POWER(2, 64) + 0.5'
+    ),
+}
+UNNEST_ARRAY_OPTIONS = {
+    'Default': unnest_array_fn_not_implemented,
+    'GoogleSQL': unnest_array_with_offset_fn,
+    'PostgreSQL': unnest_array_with_ordinality_fn,
+    'MariaDB': unnest_json_array_fn,
+    'Oracle': unnest_json_array_fn,
+    'Trino': unnest_array_with_ordinality_fn,
+}
+UNNEST_ARRAY_LITERAL_OPTIONS = {
+    'Default': unnest_array_literal_fn_not_implemented,
+    'GoogleSQL': unnest_array_literal_fn_googlesql,
+    'PostgreSQL': unnest_array_literal_fn_postgresql,
+    'Trino': unnest_array_literal_fn_postgresql,
+}
+GENERATE_ARRAY_OPTIONS = {
+    'Default': generate_array_fn_not_implemented,
+    'GoogleSQL': generate_array_fn,
+    'PostgreSQL': generate_series_fn,
+    'MariaDB': generate_sequence_fn_mariadb,
+    'Oracle': generate_array_fn_oracle,
+    'SQL Server': generate_series_fn,
+    'Trino': generate_sequence_fn_trino,
+}
+DUPLICATE_DATA_N_TIMES_OPTIONS = {
+    'Default': duplicate_data_n_times_not_implemented,
+    'GoogleSQL': unnest_generated_array,
+    'PostgreSQL': implicitly_unnest_generated_array,
+    'MariaDB': implicitly_unnest_generated_sequence,
+    'Oracle': duplicate_data_n_times_oracle,
+    'SQL Server': implicitly_unnest_generated_array,
+    'Trino': unnest_generated_array,
+}
+
+
+def set_dialect(dialect: str):
+  """Sets the dialect of the SQL query."""
+  # You can manually override the options below. You can manually test it in
+  # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
+  global DIALECT, NEED_TEMP_TABLE, CREATE_TEMP_TABLE_FN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
+  DIALECT = dialect
+  NEED_TEMP_TABLE = _get_dialect_option(NEED_TEMP_TABLE_OPTIONS)
+  CREATE_TEMP_TABLE_FN = _get_dialect_option(CREATE_TEMP_TABLE_OPTIONS)
+  ROW_NUMBER_REQUIRE_ORDER_BY = _get_dialect_option(
+      ROW_NUMBER_REQUIRE_ORDER_BY_OPTIONS
+  )
+  GROUP_BY_FN = _get_dialect_option(GROUP_BY_OPTIONS)
+  RAND_FN = _get_dialect_option(RAND_OPTIONS)
+  CEIL_FN = _get_dialect_option(CEIL_OPTIONS)
+  SAFE_DIVIDE_FN = _get_dialect_option(SAFE_DIVIDE_OPTIONS)
+  QUANTILE_FN = _get_dialect_option(QUANTILE_OPTIONS)
+  ARRAY_AGG_FN = _get_dialect_option(ARRAY_AGG_OPTIONS)
+  ARRAY_INDEX_FN = _get_dialect_option(ARRAY_INDEX_OPTIONS)
+  NTH_VALUE_FN = _get_dialect_option(NTH_OPTIONS)
+  COUNTIF_FN = _get_dialect_option(COUNTIF_OPTIONS)
+  STRING_CAST_FN = _get_dialect_option(STRING_CAST_OPTIONS)
+  FLOAT_CAST_FN = _get_dialect_option(FLOAT_CAST_OPTIONS)
+  UNIFORM_MAPPING_FN = _get_dialect_option(UNIFORM_MAPPING_OPTIONS)
+  UNNEST_ARRAY_FN = _get_dialect_option(UNNEST_ARRAY_OPTIONS)
+  UNNEST_ARRAY_LITERAL_FN = _get_dialect_option(UNNEST_ARRAY_LITERAL_OPTIONS)
+  GENERATE_ARRAY_FN = _get_dialect_option(GENERATE_ARRAY_OPTIONS)
+  DUPLICATE_DATA_N_TIMES_FN = _get_dialect_option(
+      DUPLICATE_DATA_N_TIMES_OPTIONS
+  )
+
+
+def _get_dialect_option(options: dict[str, Any]):
+  return options.get(DIALECT, options['Default'])
+
+
+set_dialect(DEFAULT_DIALECT)
 
 
 def is_compatible(sql0, sql1):
@@ -75,7 +588,7 @@ def add_suffix(alias):
 def rand_run_only_once_in_with_clause(execute):
   """Check if the RAND() is only evaluated once in the WITH clause."""
   d = execute(
-      '''WITH T AS (SELECT RAND() AS r)
+      f'''WITH T AS (SELECT {RAND_FN()} AS r)
       SELECT t1.r - t2.r AS d
       FROM T t1 CROSS JOIN T t2'''
   )
@@ -127,7 +640,7 @@ def get_temp_tables(with_data: 'Datasources'):
   tmp_tables = set()
   for rand_table in with_data:
     query = with_data[rand_table]
-    if 'RAND' not in str(query):
+    if RAND_FN() not in str(query):
       continue
     dep_on_rand = set([rand_table])
     for alias in with_data:
@@ -331,6 +844,9 @@ class Column(SqlComponent):
     super(Column, self).__init__()
     self.column = [column] if isinstance(column, str) else column or []
     self.fn = fn
+    # For a single column, we apply the function to the column repeatedly.
+    if len(self.column) == 1 and fn.count('{}') > 1:
+      self.column *= fn.count('{}')
     self.filters = Filters(filters)
     self.alias_raw = alias.strip('`') if alias else None
     if not alias and auto_alias:
@@ -367,7 +883,7 @@ class Column(SqlComponent):
     if not (self.partition is None and self.order is None and
             self.window_frame is None):
       partition_cols_str = [
-          'CAST(%s AS STRING)' % c for c in Columns(self.partition).expressions
+          STRING_CAST_FN(c) for c in Columns(self.partition).expressions
       ]
       partition = 'PARTITION BY %s' % ', '.join(
           partition_cols_str) if self.partition else ''
@@ -379,8 +895,14 @@ class Column(SqlComponent):
     # Some Beam engines don't support SUM(IF(cond, var, NULL)) well so we use 0
     # as the base to make it work.
     base = '0' if self.fn.upper() == 'SUM({})' else 'NULL'
-    column = (f'IF(%s, %s, {base})' % (self.filters, c) if self.filters else c
-              for c in self.column)
+    # CASE WHEN has better compatibility with other engines than
+    # IF(filter, c, NULL). For example, PostgreSQL only supports CASE WHEN.
+    column = (
+        f'CASE WHEN {self.filters} THEN {c} ELSE {base} END'
+        if self.filters
+        else c
+        for c in self.column
+    )
     res = self.fn.format(*column)
     return res + over if over else res
 
@@ -429,7 +951,7 @@ class Column(SqlComponent):
 
   def __div__(self, other):
     return Column(
-        SAFE_DIVIDE.format(
+        SAFE_DIVIDE_FN(
             numer=self.expression, denom=getattr(other, 'expression', other)
         ),
         alias='%s / %s' % (self.alias_raw, get_alias(other)),
@@ -441,7 +963,7 @@ class Column(SqlComponent):
   def __rdiv__(self, other):
     alias = '%s / %s' % (get_alias(other), self.alias_raw)
     return Column(
-        SAFE_DIVIDE.format(
+        SAFE_DIVIDE_FN(
             numer=getattr(other, 'expression', other), denom=self.expression
         ),
         alias=alias,
@@ -569,7 +1091,7 @@ class Columns(SqlComponents):
     return 'DISTINCT ' + res if self.distinct else res
 
   def as_groupby(self):
-    return ', '.join(self.aliases)
+    return GROUP_BY_FN(self)
 
   def __str__(self):
     return self.get_columns(True)
@@ -610,7 +1132,8 @@ class Datasource(SqlComponent):
 
   def __str__(self):
     table = self.table if self.is_table else '(%s)' % self.table
-    return '%s AS %s' % (table, self.alias) if self.alias else str(table)
+    # No "AS" between a table and its alias is supported by more dialects.
+    return '%s %s' % (table, self.alias) if self.alias else str(table)
 
 
 class Join(Datasource):
@@ -628,6 +1151,8 @@ class Join(Datasource):
     if join.upper() not in ('', 'INNER', 'FULL', 'FULL OUTER', 'LEFT',
                             'LEFT OUTER', 'RIGHT', 'RIGHT OUTER', 'CROSS'):
       raise ValueError('Unrecognized JOIN type!')
+    if 'FULL' in join.upper() and DIALECT == 'MariaDB':
+      raise NotImplementedError('FULL JOIN is not supported in MariaDB.')
     self.ds1 = Datasource(datasource1)
     self.ds2 = Datasource(datasource2)
     self.join_type = join.upper()
@@ -638,7 +1163,10 @@ class Join(Datasource):
   def __str__(self):
     if self.ds1 == self.ds2:
       return str(self.ds1)
-    join = '%s JOIN' % self.join_type if self.join_type else 'JOIN'
+    join_type = self.join_type
+    if not join_type and not self.on and not self.using:
+      join_type = 'CROSS'  # Being explicit is compatible with more dialects.
+    join = '%s JOIN' % join_type if join_type else 'JOIN'
     sql = '\n'.join(map(str, (self.ds1, join, self.ds2)))
     if self.on:
       return '%s\nON %s' % (sql, self.on)
@@ -794,11 +1322,12 @@ class Datasources(SqlComponents):
     temp_tables = []
     with_tables = []
     for d in self.datasources:
-      expression = d.get_expression('WITH')
       if d.alias in self.temp_tables:
-        temp_tables.append(f'CREATE OR REPLACE TEMP TABLE {expression};')
+        cp = copy.copy(d)
+        cp.alias = None
+        temp_tables.append(CREATE_TEMP_TABLE_FN(alias=d.alias, query=str(cp)))
       else:
-        with_tables.append(expression)
+        with_tables.append(d.get_expression('WITH'))
     res = '\n'.join(temp_tables)
     if with_tables:
       res += '\nWITH\n' + ',\n'.join(with_tables)

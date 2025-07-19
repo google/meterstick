@@ -7,7 +7,6 @@ routine data analysis tasks. Please see [meterstick_demo.ipynb](https://colab.re
 
 This is not an officially supported Google product.
 
-
 ## tl;dr
 
 Modify the demo colab [notebook](https://colab.research.google.com/github/google/meterstick/blob/master/meterstick_demo.ipynb) and adapt it to your needs.
@@ -40,7 +39,6 @@ bounce_rate = Ratio("Bounces", "Visits")
 This calculates the percent change in conversion rate and bounce rate,
 relative to the control arm, for each country and device, together with
 95% confidence intervals based on jackknife standard errors.
-
 
 ## Building Blocks of an Analysis Object
 
@@ -249,7 +247,6 @@ metrics for non-spam clicks you can add a `where` clause to the Metric or
 MetricList. This clause is a boolean expression which can be passed to pandas'
 [query() method](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.query.html).
 
-
 ```python
 sum_non_spam_clicks = Sum("Clicks", where="~IsSpam")
 MetricList([Sum("Clicks"), Sum("Conversions")], where="~IsSpam")
@@ -308,9 +305,7 @@ It can help you to sanity check complex Metrics.
 
 You can get the SQL query for all built-in Metrics and Operations by calling
 `to_sql(sql_data_source, split_by)` on the Metric. `sql_data_source` could be a
-table or a subquery. The dialect it uses is the
-[standard SQL](https://cloud.google.com/bigquery/docs/reference/standard-sql)
-in Google Cloud's BigQuery. For example,
+table or a subquery. For example,
 
 ```python
 MetricList((Sum('X', where='Y > 0'), Sum('X'))).to_sql('table', 'grp')
@@ -337,6 +332,19 @@ directly, which will give you a output similar to `compute_on()`. `execute` is a
 function that can execute SQL query. The `mode` can be `None` or
 `'mixed'`. The former is recommended and computes things in SQL whenever
 possible while the latter only computes the leaf Metrics in SQL.
+
+The default dialect it uses is GoogleSQL. You can use `set_dialect()` to choose
+other dialects. Currently we support
+
+*   PostgreSQL
+*   MySQL and MariaDB
+*   SQLite
+*   Oracle
+*   Microsoft SQL Server
+*   Trino SQL
+
+For other dialects, you can manually overwrite the default string templates at
+the top of `sql.py` file.
 
 ## Apache Beam
 
