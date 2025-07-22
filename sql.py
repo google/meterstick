@@ -171,7 +171,7 @@ def array_agg_fn_not_implemented(
   raise NotImplementedError('ARRAY_AGG is not implemented.')
 
 
-def array_index_fn_googlesql(array: str, zero_based_idx: int):
+def array_index_safe_offset_fn(array: str, zero_based_idx: int):
   return f'{array}[SAFE_OFFSET({zero_based_idx})]'
 
 
@@ -371,6 +371,7 @@ CREATE_TEMP_TABLE_OPTIONS = {
     'MariaDB': drop_temp_table_if_exists_then_create_temp_table,
     'Oracle': create_temp_table_fn_not_implemented,
     'SQL Server': 'SELECT * INTO #{alias} FROM ({query});'.format,
+    'Calcite': 'CREATE OR REPLACE TEMPORARY TABLE {alias} AS {query};'.format,
 }
 SUPPORT_FULL_JOIN_OPTIONS = {
     'Default': True,
@@ -391,6 +392,7 @@ GROUP_BY_OPTIONS = {
     'Default': lambda columns: ', '.join(columns.aliases),
     'SQL Server': lambda columns: ', '.join(columns.expressions),
     'Trino': lambda columns: ', '.join(map(str, range(1, len(columns) + 1))),
+    'Calcite': lambda columns: ', '.join(columns.expressions),
 }
 SAFE_DIVIDE_OPTIONS = {
     'Default': safe_divide_fn_default,
@@ -405,6 +407,7 @@ RAND_OPTIONS = {
     'Oracle': 'DBMS_RANDOM.VALUE'.format,
     'SQL Server': sql_server_rand_fn_not_implemented,
     'SQLite': '0.5 - RANDOM() / CAST(-9223372036854775808 AS REAL) / 2'.format,
+    'Calcite': 'RAND()'.format,
 }
 # Manually evalueated run_only_once_in_with_clause for each dialect.
 NEED_TEMP_TABLE_OPTIONS = {
@@ -415,6 +418,7 @@ NEED_TEMP_TABLE_OPTIONS = {
     'SQL Server': True,
     'Trino': True,
     'SQLite': False,
+    'Calcite': True,
 }
 CEIL_OPTIONS = {
     'Default': 'CEIL({})'.format,
@@ -426,6 +430,7 @@ QUANTILE_OPTIONS = {
     'PostgreSQL': percentile_cont_fn,
     'Oracle': percentile_cont_fn,
     'Trino': approx_percentile_fn,
+    'Calcite': percentile_cont_fn,
 }
 ARRAY_AGG_OPTIONS = {
     'Default': array_agg_fn_not_implemented,
@@ -436,14 +441,16 @@ ARRAY_AGG_OPTIONS = {
     # JSON_ARRAYAGG has been added in SQL Server 2025. Will update later.
     'SQL Server': array_agg_fn_not_implemented,
     'Trino': array_agg_fn_no_use_filter_no_limit,
+    'Calcite': array_agg_fn_no_use_filter_no_limit,
 }
 ARRAY_INDEX_OPTIONS = {
     'Default': array_index_fn_not_implemented,
-    'GoogleSQL': array_index_fn_googlesql,
+    'GoogleSQL': array_index_safe_offset_fn,
     'PostgreSQL': array_subscript_fn,
     'MariaDB': json_extract_fn,
     'Oracle': json_value_fn,
     'Trino': element_at_index_fn,
+    'Calcite': array_index_safe_offset_fn,
 }
 NTH_OPTIONS = {
     'Default': nth_fn_default,
@@ -463,6 +470,7 @@ STRING_CAST_OPTIONS = {
     'Oracle': 'TO_CHAR({})'.format,
     'SQL Server': 'CAST({} AS VARCHAR(MAX))'.format,
     'Trino': 'CAST({} AS VARCHAR)'.format,
+    'Calcite': 'CAST({} AS VARCHAR)'.format,
 }
 UNIFORM_MAPPING_OPTIONS = {
     'Default': uniform_mapping_fn_not_implemented,
@@ -486,12 +494,14 @@ UNNEST_ARRAY_OPTIONS = {
     'MariaDB': unnest_json_array_fn,
     'Oracle': unnest_json_array_fn,
     'Trino': unnest_array_with_ordinality_fn,
+    'Calcite': unnest_array_with_ordinality_fn,
 }
 UNNEST_ARRAY_LITERAL_OPTIONS = {
     'Default': unnest_array_literal_fn_not_implemented,
     'GoogleSQL': unnest_array_literal_fn_googlesql,
     'PostgreSQL': unnest_array_literal_fn_postgresql,
     'Trino': unnest_array_literal_fn_postgresql,
+    'Calcite': unnest_array_literal_fn_postgresql,
 }
 GENERATE_ARRAY_OPTIONS = {
     'Default': generate_array_fn_not_implemented,
@@ -513,11 +523,13 @@ DUPLICATE_DATA_N_TIMES_OPTIONS = {
 }
 
 
-def set_dialect(dialect: str):
+def set_dialect(dialect: Optional[str]):
   """Sets the dialect of the SQL query."""
   # You can manually override the options below. You can manually test it in
   # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
   global DIALECT, NEED_TEMP_TABLE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
+  if not dialect:
+    return
   DIALECT = dialect
   NEED_TEMP_TABLE = _get_dialect_option(NEED_TEMP_TABLE_OPTIONS)
   CREATE_TEMP_TABLE_FN = _get_dialect_option(CREATE_TEMP_TABLE_OPTIONS)

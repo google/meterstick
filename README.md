@@ -351,7 +351,7 @@ the top of `sql.py` file.
 There is also a
 
 ```python
-compute_on_beam(pcol, split_by=None, execute=None, melted=False, mode=None)
+compute_on_beam(pcol, split_by=None, execute=None, melted=False, mode=None, dialect=None)
 ```
 
 method which takes an [`PCollection`](https://beam.apache.org/documentation/programming-guide/#pcollections)
@@ -365,7 +365,8 @@ As a result,
     the [InteractiveRunner](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/runners/interactive/README.md)
     does [NOT](https://issues.apache.org/jira/browse/BEAM-10708).
 -   The config of the pipeline that carries the `PCollection` is set up by you.
-    For example, your setup decides if the pipeline will be ran in process or in Cloud.
+    For example, your setup decides if the pipeline will be ran in process or in
+    Cloud.
 
 ## Custom Metric
 

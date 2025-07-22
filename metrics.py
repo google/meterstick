@@ -74,6 +74,7 @@ def compute_on_beam(
     cache_key=None,
     cache=None,
     sql_transform_kwargs=None,
+    dialect=None,
     **kwargs,
 ):
   """A wrapper for metric.compute_on_beam()."""
@@ -86,6 +87,7 @@ def compute_on_beam(
       cache_key,
       cache=cache,
       sql_transform_kwargs=sql_transform_kwargs,
+      dialect=dialect,
       **kwargs,
   )
 
@@ -841,6 +843,7 @@ class Metric(object):
       cache_key=None,
       cache=None,
       sql_transform_kwargs=None,
+      dialect=None,
       **kwargs,
   ):
     """Computes on an Apache Beam PCollection input.
@@ -862,6 +865,9 @@ class Metric(object):
       sql_transform_kwargs: A dict that holds the kwargs to be passed to
         SqlTransform defined in
         https://beam.apache.org/releases/pydoc/2.30.0/apache_beam.transforms.sql.html.
+      dialect: The dialect of the SQL query. If not specified, it will be
+        the current DIALECT variable in sql.py. The DIALECT variable will be
+        changed during the computation of this metric and restored after that.
       **kwargs: Other kwargs passed to compute_on_sql.
 
     Returns:
@@ -887,7 +893,9 @@ class Metric(object):
 
     # pylint: disable=g-import-not-at-top
 
+    current_dialect = sql.DIALECT
     try:
+      sql.set_dialect(dialect)
       return self.compute_on_sql(
           'PCOLLECTION', split_by, e, melted, mode, cache_key, cache, **kwargs
       )
@@ -899,6 +907,8 @@ class Metric(object):
             "compute_on_beam(..., mode='mixed')."
         ) from e
       raise
+    finally:
+      sql.set_dialect(current_dialect)
 
   def compute_equivalent(self, df, split_by=None):
     equiv, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)
