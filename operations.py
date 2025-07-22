@@ -3657,7 +3657,7 @@ def get_se_sql(
       groupby.add(c.alias)
     else:
       alias = c.alias
-      se = sql.Column(c.alias, 'STDDEV_SAMP({})',
+      se = sql.Column(c.alias, sql.STDDEV_SAMP_FN,
                       '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, Jackknife):
         adjustment = sql.Column(
@@ -3814,18 +3814,18 @@ def get_jackknife_data_fast(
     # else
     total.`sum(X)` - unit.`sum(X)` AS `sum(X)`
   FROM
-  TotalCount AS total
+  TotalCount total_table
   RIGHT JOIN  # Or CROSS JOIN (SELECT DISTINCT unit FROM UnitSliceCount)
   (SELECT DISTINCT
     split_by,
     unit
-  FROM UnitSliceCount) AS jk_all_slices
+  FROM UnitSliceCount) jk_all_slices
   USING (split_by)
   LEFT JOIN
-  UnitSliceCount AS unit
+  UnitSliceCount unit_slice_table
   USING (split_by, extra_index, unit)
   WHERE
-  total.ct - COALESCE(unit.ct, 0) > 0)
+  total_table.ct - COALESCE(unit_slice_table.ct, 0) > 0)
 
   Args:
     metric: An instance of Jackknife.
