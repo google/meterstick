@@ -32,6 +32,7 @@ DIALECT = None
 # run_only_once_in_with_clause() returns False.
 NEED_TEMP_TABLE = None
 CREATE_TEMP_TABLE_FN = None
+SUPPORT_FULL_JOIN = None
 # ORDER BY is required for ROW_NUMBER() in some dialects.
 ROW_NUMBER_REQUIRE_ORDER_BY = None
 GROUP_BY_FN = None
@@ -371,6 +372,11 @@ CREATE_TEMP_TABLE_OPTIONS = {
     'Oracle': create_temp_table_fn_not_implemented,
     'SQL Server': 'SELECT * INTO #{alias} FROM ({query});'.format,
 }
+SUPPORT_FULL_JOIN_OPTIONS = {
+    'Default': True,
+    'MariaDB': False,
+    'SQLite': False,
+}
 ROW_NUMBER_REQUIRE_ORDER_BY_OPTIONS = {
     'Default': False,
     'Oracle': True,
@@ -511,10 +517,11 @@ def set_dialect(dialect: str):
   """Sets the dialect of the SQL query."""
   # You can manually override the options below. You can manually test it in
   # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
-  global DIALECT, NEED_TEMP_TABLE, CREATE_TEMP_TABLE_FN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
+  global DIALECT, NEED_TEMP_TABLE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
   DIALECT = dialect
   NEED_TEMP_TABLE = _get_dialect_option(NEED_TEMP_TABLE_OPTIONS)
   CREATE_TEMP_TABLE_FN = _get_dialect_option(CREATE_TEMP_TABLE_OPTIONS)
+  SUPPORT_FULL_JOIN = _get_dialect_option(SUPPORT_FULL_JOIN_OPTIONS)
   ROW_NUMBER_REQUIRE_ORDER_BY = _get_dialect_option(
       ROW_NUMBER_REQUIRE_ORDER_BY_OPTIONS
   )
@@ -1151,8 +1158,8 @@ class Join(Datasource):
     if join.upper() not in ('', 'INNER', 'FULL', 'FULL OUTER', 'LEFT',
                             'LEFT OUTER', 'RIGHT', 'RIGHT OUTER', 'CROSS'):
       raise ValueError('Unrecognized JOIN type!')
-    if 'FULL' in join.upper() and DIALECT == 'MariaDB':
-      raise NotImplementedError('FULL JOIN is not supported in MariaDB.')
+    if 'FULL' in join.upper() and not SUPPORT_FULL_JOIN:
+      raise NotImplementedError(f'FULL JOIN is not supported in {DIALECT}.')
     self.ds1 = Datasource(datasource1)
     self.ds2 = Datasource(datasource2)
     self.join_type = join.upper()
