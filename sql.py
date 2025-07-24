@@ -30,7 +30,7 @@ DIALECT = None
 # If need to use CREATE TEMP TABLE. It's only needed when the engine doesn't
 # evaluate RAND() only once in the WITH clause. Namely,
 # run_only_once_in_with_clause() returns False.
-NEED_TEMP_TABLE = None
+VOLATILE_RAND_IN_WITH_CLAUSE = None
 CREATE_TEMP_TABLE_FN = None
 SUPPORT_FULL_JOIN = None
 # ORDER BY is required for ROW_NUMBER() in some dialects.
@@ -399,7 +399,7 @@ SAFE_DIVIDE_OPTIONS = {
     'GoogleSQL': 'SAFE_DIVIDE({numer}, {denom})'.format,
 }
 # When make changes, manually evaluate the run_only_once_in_with_clause and
-# update the NEED_TEMP_TABLE_OPTIONS.
+# update the VOLATILE_RAND_IN_WITH_CLAUSE_OPTIONS.
 RAND_OPTIONS = {
     'Default': 'RANDOM()'.format,
     'GoogleSQL': 'RAND()'.format,
@@ -410,7 +410,7 @@ RAND_OPTIONS = {
     'Calcite': 'RAND()'.format,
 }
 # Manually evalueated run_only_once_in_with_clause for each dialect.
-NEED_TEMP_TABLE_OPTIONS = {
+VOLATILE_RAND_IN_WITH_CLAUSE_OPTIONS = {
     'Default': True,
     'PostgreSQL': False,
     'MariaDB': False,
@@ -527,11 +527,13 @@ def set_dialect(dialect: Optional[str]):
   """Sets the dialect of the SQL query."""
   # You can manually override the options below. You can manually test it in
   # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
-  global DIALECT, NEED_TEMP_TABLE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
+  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
   if not dialect:
     return
   DIALECT = dialect
-  NEED_TEMP_TABLE = _get_dialect_option(NEED_TEMP_TABLE_OPTIONS)
+  VOLATILE_RAND_IN_WITH_CLAUSE = _get_dialect_option(
+      VOLATILE_RAND_IN_WITH_CLAUSE_OPTIONS
+  )
   CREATE_TEMP_TABLE_FN = _get_dialect_option(CREATE_TEMP_TABLE_OPTIONS)
   SUPPORT_FULL_JOIN = _get_dialect_option(SUPPORT_FULL_JOIN_OPTIONS)
   ROW_NUMBER_REQUIRE_ORDER_BY = _get_dialect_option(

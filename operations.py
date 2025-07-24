@@ -2379,7 +2379,7 @@ class MetricWithCI(Operation):
     """The return should be similar to compute_children()."""
     raise NotImplementedError
 
-  def to_sql(self, table, split_by=None, create_tmp_table_for_volatile_fn=None):
+  def to_sql(self, table, split_by=None):
     """Generates SQL query for the metric.
 
     The SQL generation is actually delegated to get_sql_and_with_clause(). This
@@ -2390,9 +2390,6 @@ class MetricWithCI(Operation):
     Args:
       table: The table we want to query from.
       split_by: The columns that we use to split the data.
-      create_tmp_table_for_volatile_fn: If to put subqueries that contain
-      volatile functions, namely, RAND(), into a CREATE TEMP TABLE, or leave
-      them in the WITH clause.
 
     Returns:
       The query that does Jackknife/Bootstrap.
@@ -2404,19 +2401,15 @@ class MetricWithCI(Operation):
     self._is_root_node = True
     if self.has_been_preaggregated or not self.can_precompute():
       if not self.where:
-        return super(MetricWithCI, self).to_sql(
-            table, split_by, create_tmp_table_for_volatile_fn
-        )
+        return super(MetricWithCI, self).to_sql(table, split_by)
       table = sql.Sql(None, table, self.where)
       self_no_filter = copy.deepcopy(self)
       self_no_filter.where = None
-      return self_no_filter.to_sql(
-          table, split_by, create_tmp_table_for_volatile_fn
-      )
+      return self_no_filter.to_sql(table, split_by)
 
     expanded, _ = utils.get_fully_expanded_equivalent_metric_tree(self)
     if self != expanded:
-      return expanded.to_sql(table, split_by, create_tmp_table_for_volatile_fn)
+      return expanded.to_sql(table, split_by)
 
     expanded.where = None  # The filter has been taken care of in preaggregation
     expanded = utils.push_filters_to_leaf(expanded)
@@ -2448,7 +2441,7 @@ class MetricWithCI(Operation):
         equiv.unit = None
     else:
       equiv.has_local_filter = any([l.where for l in leaf])
-    return equiv.to_sql(preagg, split_by, create_tmp_table_for_volatile_fn)
+    return equiv.to_sql(preagg, split_by)
 
   def get_sql_and_with_clause(
       self, table, split_by, global_filter, indexes, local_filter, with_data

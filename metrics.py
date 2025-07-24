@@ -95,10 +95,8 @@ def compute_on_beam(
 # pylint: enable=g-long-lambda
 
 
-def to_sql(table, split_by=None, create_tmp_table_for_volatile_fn=None):
-  return lambda metric: metric.to_sql(
-      table, split_by, create_tmp_table_for_volatile_fn
-  )
+def to_sql(table, split_by=None):
+  return lambda metric: metric.to_sql(table, split_by)
 
 
 # Classes we built so caching across instances can be enabled with confidence.
@@ -692,17 +690,7 @@ class Metric(object):
 
   def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
     """Executes the query from to_sql() and process the result."""
-    query = self.to_sql(table, split_by, False)
-    # We try to avoid using CREATE TEMP TABLE when possible. It's only used when
-    # - the query contains RAND();
-    # - the execute doesn't evaluate RAND() only once in the WITH clause.
-    # - NEED_TEMP_TABLE is True.
-    if sql.NEED_TEMP_TABLE and sql.RAND_FN() in str(query):
-      query_with_tmp_table = self.to_sql(table, split_by, True)
-      if str(query) != str(
-          query_with_tmp_table
-      ) and not sql.rand_run_only_once_in_with_clause(execute):
-        query = self.to_sql(table, split_by, True)
+    query = self.to_sql(table, split_by)
     res = execute(str(query))
     extra_idx = list(self.get_extra_idx(return_superset=True))
     indexes = split_by + extra_idx if split_by else extra_idx
@@ -719,30 +707,12 @@ class Metric(object):
       self,
       table,
       split_by: Optional[Union[Text, List[Text]]] = None,
-      create_tmp_table_for_volatile_fn=None,
   ):
     """Generates SQL query for the metric.
 
     Args:
       table: The table or subquery we want to query from.
       split_by: The columns that we use to split the data.
-      create_tmp_table_for_volatile_fn: When generating the query, we assume
-        that volatile functions like RAND() in the WITH clause behave as if they
-        are evaluated only once. Unfortunately, not all engines behave like
-        that. In those cases, we need to CREATE TEMP TABLE to materialize the
-        subqueries that have volatile functions, so that the same result is used
-        in all places. An example is
-          WITH T AS (SELECT RAND() AS r)
-          SELECT t1.r - t2.r AS d
-          FROM T t1 CROSS JOIN T t2.
-        If it doesn't always evaluates to 0, then this arg should be True, and
-        we will put all subqueries that
-          1) have volatile functions and
-          2) are referenced in the same query multiple times,
-        into CREATE TEMP TABLE statements.
-        Note that this arg has no effect if sql.NEED_TEMP_TABLE is False.
-        When you use compute_on_sql or compute_on_beam, this arg is
-        automatically decided based on your `execute` function.
 
     Returns:
       The SQL query for the metric as a SQL instance, which is similar to a str.
@@ -764,14 +734,17 @@ class Metric(object):
                                                     global_filter, indexes,
                                                     sql.Filters(), with_data)
     query.with_data = with_data
-    create_tmp_table = (
-        sql.NEED_TEMP_TABLE
-        if create_tmp_table_for_volatile_fn is None
-        else create_tmp_table_for_volatile_fn
-    )
-    if not create_tmp_table:
+    # We try to avoid using CREATE TEMP TABLE when possible. It's only used when
+    # - the query contains RAND();
+    # - VOLATILE_RAND_IN_WITH_CLAUSE is True.
+    try:
+      if sql.VOLATILE_RAND_IN_WITH_CLAUSE and sql.RAND_FN() in str(query):
+        with_data.temp_tables = sql.get_temp_tables(with_data)
+        return query
+    except NotImplementedError:
+      # if RAND_FN is not implemented and we are here, that means the query
+      # never needs a random function so no need to create a temp table.
       return query
-    with_data.temp_tables = sql.get_temp_tables(with_data)
     return query
 
   def get_sql_and_with_clause(self, table: sql.Datasource,
