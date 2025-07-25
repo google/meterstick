@@ -33,6 +33,7 @@ DIALECT = None
 VOLATILE_RAND_IN_WITH_CLAUSE = None
 CREATE_TEMP_TABLE_FN = None
 SUPPORT_FULL_JOIN = None
+SUPPORT_JOIN_WITH_USING = None
 # ORDER BY is required for ROW_NUMBER() in some dialects.
 ROW_NUMBER_REQUIRE_ORDER_BY = None
 GROUP_BY_FN = None
@@ -51,6 +52,13 @@ UNNEST_ARRAY_FN = None
 UNNEST_ARRAY_LITERAL_FN = None
 GENERATE_ARRAY_FN = None
 DUPLICATE_DATA_N_TIMES_FN = None
+STDDEV_POP_FN = None
+STDDEV_SAMP_FN = None
+VARIANCE_POP_FN = None
+VARIANCE_SAMP_FN = None
+CORR_FN = None
+COVAR_POP_FN = None
+COVAR_SAMP_FN = None
 
 
 def drop_table_if_exists(alias: str):
@@ -365,6 +373,34 @@ def duplicate_data_n_times_not_implemented(n, alias: Optional[str] = None):
   )
 
 
+def stddev_pop_not_implemented():
+  raise NotImplementedError('STDDEV_POP is not implemented.')
+
+
+def stddev_samp_not_implemented():
+  raise NotImplementedError('STDDEV_SAMP is not implemented.')
+
+
+def variance_pop_not_implemented():
+  raise NotImplementedError('VARIANCE_POP is not implemented.')
+
+
+def variance_samp_not_implemented():
+  raise NotImplementedError('VARIANCE_SAMP is not implemented.')
+
+
+def corr_not_implemented():
+  raise NotImplementedError('CORR is not implemented.')
+
+
+def covar_pop_not_implemented():
+  raise NotImplementedError('COVAR_POP is not implemented.')
+
+
+def covar_samp_not_implemented():
+  raise NotImplementedError('COVAR_SAMP is not implemented.')
+
+
 CREATE_TEMP_TABLE_OPTIONS = {
     'Default': drop_table_if_exists_then_create_temp_table,
     'GoogleSQL': 'CREATE OR REPLACE TEMP TABLE {alias} AS {query};'.format,
@@ -377,6 +413,10 @@ SUPPORT_FULL_JOIN_OPTIONS = {
     'Default': True,
     'MariaDB': False,
     'SQLite': False,
+}
+SUPPORT_JOIN_WITH_USING_OPTIONS = {
+    'Default': True,
+    'SQL Server': False,
 }
 ROW_NUMBER_REQUIRE_ORDER_BY_OPTIONS = {
     'Default': False,
@@ -521,13 +561,38 @@ DUPLICATE_DATA_N_TIMES_OPTIONS = {
     'SQL Server': implicitly_unnest_generated_array,
     'Trino': unnest_generated_array,
 }
+STDDEV_POP_OPTIONS = {
+    'Default': 'STDDEV_POP({})',
+    'SQL Server': 'STDEVP({})'
+}
+STDDEV_SAMP_OPTIONS = {
+    'Default': 'STDDEV_SAMP({})',
+    'SQL Server': 'STDEV({})'
+}
+VARIANCE_POP_OPTIONS = {
+    'Default': 'VARIANCE_POP({})',
+    'SQL Server': 'VARP({})'
+}
+VARIANCE_SAMP_OPTIONS = {
+    'Default': 'VARIANCE_SAMP({})',
+    'SQL Server': 'VAR({})'
+}
+CORR_OPTIONS = {
+    'Default': 'CORR({}, {})',
+}
+COVAR_POP_OPTIONS = {
+    'Default': 'COVAR_POP({}, {})',
+}
+COVAR_SAMP_OPTIONS = {
+    'Default': 'COVAR_SAMP({}, {})',
+}
 
 
 def set_dialect(dialect: Optional[str]):
   """Sets the dialect of the SQL query."""
   # You can manually override the options below. You can manually test it in
   # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
-  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
+  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, SUPPORT_JOIN_WITH_USING, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN, STDDEV_POP_FN, STDDEV_SAMP_FN, VARIANCE_POP_FN, VARIANCE_SAMP_FN, CORR_FN, COVAR_POP_FN, COVAR_SAMP_FN
   if not dialect:
     return
   DIALECT = dialect
@@ -536,6 +601,7 @@ def set_dialect(dialect: Optional[str]):
   )
   CREATE_TEMP_TABLE_FN = _get_dialect_option(CREATE_TEMP_TABLE_OPTIONS)
   SUPPORT_FULL_JOIN = _get_dialect_option(SUPPORT_FULL_JOIN_OPTIONS)
+  SUPPORT_JOIN_WITH_USING = _get_dialect_option(SUPPORT_JOIN_WITH_USING_OPTIONS)
   ROW_NUMBER_REQUIRE_ORDER_BY = _get_dialect_option(
       ROW_NUMBER_REQUIRE_ORDER_BY_OPTIONS
   )
@@ -557,6 +623,13 @@ def set_dialect(dialect: Optional[str]):
   DUPLICATE_DATA_N_TIMES_FN = _get_dialect_option(
       DUPLICATE_DATA_N_TIMES_OPTIONS
   )
+  STDDEV_POP_FN = _get_dialect_option(STDDEV_POP_OPTIONS)
+  STDDEV_SAMP_FN = _get_dialect_option(STDDEV_SAMP_OPTIONS)
+  VARIANCE_POP_FN = _get_dialect_option(VARIANCE_POP_OPTIONS)
+  VARIANCE_SAMP_FN = _get_dialect_option(VARIANCE_SAMP_OPTIONS)
+  CORR_FN = _get_dialect_option(CORR_OPTIONS)
+  COVAR_POP_FN = _get_dialect_option(COVAR_POP_OPTIONS)
+  COVAR_SAMP_FN = _get_dialect_option(COVAR_SAMP_OPTIONS)
 
 
 def _get_dialect_option(options: dict[str, Any]):
@@ -915,7 +988,7 @@ class Column(SqlComponent):
       over = ' OVER (%s)' % window_clause
     # Some Beam engines don't support SUM(IF(cond, var, NULL)) well so we use 0
     # as the base to make it work.
-    base = '0' if self.fn.upper() == 'SUM({})' else 'NULL'
+    base = '0' if self.fn == 'SUM({})' else 'NULL'
     # CASE WHEN has better compatibility with other engines than
     # IF(filter, c, NULL). For example, PostgreSQL only supports CASE WHEN.
     column = (
@@ -1192,7 +1265,14 @@ class Join(Datasource):
     if self.on:
       return '%s\nON %s' % (sql, self.on)
     if self.using:
-      return '%s\nUSING (%s)' % (sql, ', '.join(self.using.aliases))
+      left = self.ds1.alias or self.ds1.table
+      right = self.ds2.alias or self.ds2.table
+      if SUPPORT_JOIN_WITH_USING:
+        return '%s\nUSING (%s)' % (sql, ', '.join(self.using.aliases))
+      on = '\n  AND '.join(
+          (f'{left}.{c} = {right}.{c}' for c in self.using.aliases)
+      )
+      return '%s\nON %s' % (sql, on)
     return sql
 
 
@@ -1399,7 +1479,40 @@ class Sql(SqlComponent):
 
   @property
   def all_columns(self):
-    return Columns(self.groupby).add(self.columns)
+    """Returns all columns in the SELECT clause."""
+    cols = Columns(self.groupby).add(self.columns)
+    if (
+        not isinstance(self.from_data, Join)
+        or not self.from_data.using
+        or SUPPORT_JOIN_WITH_USING
+    ):
+      return cols
+    # When USING is not supported, we need to add table prefix to the columns
+    # in USING.
+    from_data = self.from_data
+    left = from_data.ds1.alias or from_data.ds1.table
+    right = from_data.ds2.alias or from_data.ds2.table
+    if ' ' in left:
+      from_data.ds1.alias = 'ms_left'
+      left = 'ms_left'
+    if ' ' in right:
+      from_data.ds2.alias = 'ms_right'
+      right = 'ms_right'
+    res = []
+    using = from_data.using.aliases
+    for c in cols:
+      if c.alias not in using:
+        res.append(c)
+      else:
+        if from_data.join_type == 'LEFT' or not from_data.join_type:
+          res.append(Column(f'{left}.{c}', alias=c.alias_raw))
+        elif from_data.join_type == 'RIGHT':
+          res.append(Column(f'{right}.{c}', alias=c.alias_raw))
+        else:
+          res.append(
+              Column(f'COALESCE({left}.{c}, {right}.{c})', alias=c.alias_raw)
+          )
+    return Columns(res)
 
   def add(self, attr, values):
     getattr(self, attr).add(values)
