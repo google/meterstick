@@ -365,6 +365,16 @@ def duplicate_data_n_times_not_implemented(n, alias: Optional[str] = None):
   )
 
 
+BUILTIN_DIALECTS = (
+    'GoogleSQL',
+    'MariaDB',
+    'Oracle',
+    'SQL Server',
+    'Calcite',
+    'PostgreSQL',
+    'Trino',
+    'SQLite',
+)
 CREATE_TEMP_TABLE_OPTIONS = {
     'Default': drop_table_if_exists_then_create_temp_table,
     'GoogleSQL': 'CREATE OR REPLACE TEMP TABLE {alias} AS {query};'.format,
@@ -530,6 +540,12 @@ def set_dialect(dialect: Optional[str]):
   global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
   if not dialect:
     return
+  if dialect not in BUILTIN_DIALECTS:
+    print(
+        f'WARNING: Dialect {dialect} is not natively supported. Falling back to'
+        ' the default options, which works with most variations. Built-in'
+        f' dialects are {BUILTIN_DIALECTS}'
+    )
   DIALECT = dialect
   VOLATILE_RAND_IN_WITH_CLAUSE = _get_dialect_option(
       VOLATILE_RAND_IN_WITH_CLAUSE_OPTIONS
