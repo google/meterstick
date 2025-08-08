@@ -2467,9 +2467,9 @@ class Variance(SimpleMetric):
     if self.weight:
       return
     if self.ddof == 1:
-      return sql.Column(self.var, 'VAR_SAMP({})', self.name, local_filter)
+      return sql.Column(self.var, sql.VARIANCE_SAMP_FN, self.name, local_filter)
     else:
-      return sql.Column(self.var, 'VAR_POP({})', self.name, local_filter)
+      return sql.Column(self.var, sql.VARIANCE_POP_FN, self.name, local_filter)
 
 
 class StandardDeviation(SimpleMetric):
@@ -2511,9 +2511,9 @@ class StandardDeviation(SimpleMetric):
     if self.weight:
       return
     if self.ddof == 1:
-      return sql.Column(self.var, 'STDDEV_SAMP({})', self.name, local_filter)
+      return sql.Column(self.var, sql.STDDEV_SAMP_FN, self.name, local_filter)
     else:
-      return sql.Column(self.var, 'STDDEV_POP({})', self.name, local_filter)
+      return sql.Column(self.var, sql.STDDEV_POP_FN, self.name, local_filter)
 
 
 class CV(SimpleMetric):
@@ -2547,11 +2547,11 @@ class CV(SimpleMetric):
 
   def get_sql_columns(self, local_filter):
     if self.ddof == 1:
-      res = sql.Column(self.var, 'STDDEV_SAMP({})',
+      res = sql.Column(self.var, sql.STDDEV_SAMP_FN,
                        self.name, local_filter) / sql.Column(
                            self.var, 'AVG({})', self.name, local_filter)
     else:
-      res = sql.Column(self.var, 'STDDEV_POP({})',
+      res = sql.Column(self.var, sql.STDDEV_POP_FN,
                        self.name, local_filter) / sql.Column(
                            self.var, 'AVG({})', self.name, local_filter)
     return res.set_alias(self.name)
@@ -2624,7 +2624,7 @@ class Correlation(SimpleMetric):
       return
     if self.method != 'pearson':
       raise ValueError('Only Pearson correlation is supported!')
-    return sql.Column((self.var, self.var2), 'CORR({}, {})', self.name,
+    return sql.Column((self.var, self.var2), sql.CORR_FN, self.name,
                       local_filter)
 
   def get_fingerprint(self, attr_to_exclude=()):
@@ -2737,11 +2737,11 @@ class Cov(SimpleMetric):
       ddof = 0 if self.bias else 1
     if ddof == 1:
       return sql.Column(
-          (self.var, self.var2), 'COVAR_SAMP({}, {})', self.name, local_filter
+          (self.var, self.var2), sql.COVAR_SAMP_FN, self.name, local_filter
       )
     elif ddof == 0:
       return sql.Column(
-          (self.var, self.var2), 'COVAR_POP({}, {})', self.name, local_filter
+          (self.var, self.var2), sql.COVAR_POP_FN, self.name, local_filter
       )
     return
 
