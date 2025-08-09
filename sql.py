@@ -51,6 +51,13 @@ UNNEST_ARRAY_FN = None
 UNNEST_ARRAY_LITERAL_FN = None
 GENERATE_ARRAY_FN = None
 DUPLICATE_DATA_N_TIMES_FN = None
+STDDEV_POP_FN = None
+STDDEV_SAMP_FN = None
+VARIANCE_POP_FN = None
+VARIANCE_SAMP_FN = None
+CORR_FN = None
+COVAR_POP_FN = None
+COVAR_SAMP_FN = None
 
 
 def drop_table_if_exists(alias: str):
@@ -365,6 +372,34 @@ def duplicate_data_n_times_not_implemented(n, alias: Optional[str] = None):
   )
 
 
+def stddev_pop_not_implemented():
+  raise NotImplementedError('STDDEV_POP is not implemented.')
+
+
+def stddev_samp_not_implemented():
+  raise NotImplementedError('STDDEV_SAMP is not implemented.')
+
+
+def variance_pop_not_implemented():
+  raise NotImplementedError('VARIANCE_POP is not implemented.')
+
+
+def variance_samp_not_implemented():
+  raise NotImplementedError('VARIANCE_SAMP is not implemented.')
+
+
+def corr_not_implemented():
+  raise NotImplementedError('CORR is not implemented.')
+
+
+def covar_pop_not_implemented():
+  raise NotImplementedError('COVAR_POP is not implemented.')
+
+
+def covar_samp_not_implemented():
+  raise NotImplementedError('COVAR_SAMP is not implemented.')
+
+
 BUILTIN_DIALECTS = (
     'GoogleSQL',
     'MariaDB',
@@ -531,13 +566,38 @@ DUPLICATE_DATA_N_TIMES_OPTIONS = {
     'SQL Server': implicitly_unnest_generated_array,
     'Trino': unnest_generated_array,
 }
+STDDEV_POP_OPTIONS = {
+    'Default': 'STDDEV_POP({})',
+    'SQL Server': 'STDEVP({})'
+}
+STDDEV_SAMP_OPTIONS = {
+    'Default': 'STDDEV_SAMP({})',
+    'SQL Server': 'STDEV({})'
+}
+VARIANCE_POP_OPTIONS = {
+    'Default': 'VAR_POP({})',
+    'SQL Server': 'VARP({})'
+}
+VARIANCE_SAMP_OPTIONS = {
+    'Default': 'VAR_SAMP({})',
+    'SQL Server': 'VAR({})'
+}
+CORR_OPTIONS = {
+    'Default': 'CORR({}, {})',
+}
+COVAR_POP_OPTIONS = {
+    'Default': 'COVAR_POP({}, {})',
+}
+COVAR_SAMP_OPTIONS = {
+    'Default': 'COVAR_SAMP({}, {})',
+}
 
 
 def set_dialect(dialect: Optional[str]):
   """Sets the dialect of the SQL query."""
   # You can manually override the options below. You can manually test it in
   # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
-  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN
+  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN, STDDEV_POP_FN, STDDEV_SAMP_FN, VARIANCE_POP_FN, VARIANCE_SAMP_FN, CORR_FN, COVAR_POP_FN, COVAR_SAMP_FN
   if not dialect:
     return
   if dialect not in BUILTIN_DIALECTS:
@@ -573,6 +633,13 @@ def set_dialect(dialect: Optional[str]):
   DUPLICATE_DATA_N_TIMES_FN = _get_dialect_option(
       DUPLICATE_DATA_N_TIMES_OPTIONS
   )
+  STDDEV_POP_FN = _get_dialect_option(STDDEV_POP_OPTIONS)
+  STDDEV_SAMP_FN = _get_dialect_option(STDDEV_SAMP_OPTIONS)
+  VARIANCE_POP_FN = _get_dialect_option(VARIANCE_POP_OPTIONS)
+  VARIANCE_SAMP_FN = _get_dialect_option(VARIANCE_SAMP_OPTIONS)
+  CORR_FN = _get_dialect_option(CORR_OPTIONS)
+  COVAR_POP_FN = _get_dialect_option(COVAR_POP_OPTIONS)
+  COVAR_SAMP_FN = _get_dialect_option(COVAR_SAMP_OPTIONS)
 
 
 def _get_dialect_option(options: dict[str, Any]):
@@ -931,7 +998,7 @@ class Column(SqlComponent):
       over = ' OVER (%s)' % window_clause
     # Some Beam engines don't support SUM(IF(cond, var, NULL)) well so we use 0
     # as the base to make it work.
-    base = '0' if self.fn.upper() == 'SUM({})' else 'NULL'
+    base = '0' if self.fn == 'SUM({})' else 'NULL'
     # CASE WHEN has better compatibility with other engines than
     # IF(filter, c, NULL). For example, PostgreSQL only supports CASE WHEN.
     column = (
