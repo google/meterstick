@@ -3657,7 +3657,7 @@ def get_se_sql(
       groupby.add(c.alias)
     else:
       alias = c.alias
-      se = sql.Column(c.alias, 'STDDEV_SAMP({})',
+      se = sql.Column(c.alias, sql.STDDEV_SAMP_FN,
                       '%s Bootstrap SE' % c.alias_raw)
       if isinstance(metric, Jackknife):
         adjustment = sql.Column(
