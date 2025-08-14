@@ -33,6 +33,7 @@ DIALECT = None
 VOLATILE_RAND_IN_WITH_CLAUSE = None
 CREATE_TEMP_TABLE_FN = None
 SUPPORT_FULL_JOIN = None
+SUPPORT_JOIN_WITH_USING = None
 # ORDER BY is required for ROW_NUMBER() in some dialects.
 ROW_NUMBER_REQUIRE_ORDER_BY = None
 GROUP_BY_FN = None
@@ -423,6 +424,10 @@ SUPPORT_FULL_JOIN_OPTIONS = {
     'MariaDB': False,
     'SQLite': False,
 }
+SUPPORT_JOIN_WITH_USING_OPTIONS = {
+    'Default': True,
+    'SQL Server': False,
+}
 ROW_NUMBER_REQUIRE_ORDER_BY_OPTIONS = {
     'Default': False,
     'Oracle': True,
@@ -597,7 +602,7 @@ def set_dialect(dialect: Optional[str]):
   """Sets the dialect of the SQL query."""
   # You can manually override the options below. You can manually test it in
   # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
-  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN, STDDEV_POP_FN, STDDEV_SAMP_FN, VARIANCE_POP_FN, VARIANCE_SAMP_FN, CORR_FN, COVAR_POP_FN, COVAR_SAMP_FN
+  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, SUPPORT_JOIN_WITH_USING, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN, STDDEV_POP_FN, STDDEV_SAMP_FN, VARIANCE_POP_FN, VARIANCE_SAMP_FN, CORR_FN, COVAR_POP_FN, COVAR_SAMP_FN
   if not dialect:
     return
   if dialect not in BUILTIN_DIALECTS:
@@ -612,6 +617,7 @@ def set_dialect(dialect: Optional[str]):
   )
   CREATE_TEMP_TABLE_FN = _get_dialect_option(CREATE_TEMP_TABLE_OPTIONS)
   SUPPORT_FULL_JOIN = _get_dialect_option(SUPPORT_FULL_JOIN_OPTIONS)
+  SUPPORT_JOIN_WITH_USING = _get_dialect_option(SUPPORT_JOIN_WITH_USING_OPTIONS)
   ROW_NUMBER_REQUIRE_ORDER_BY = _get_dialect_option(
       ROW_NUMBER_REQUIRE_ORDER_BY_OPTIONS
   )
@@ -1234,6 +1240,11 @@ class Datasource(SqlComponent):
   def join(self, other, on=None, using=None, join='', alias=None):
     return Join(self, other, on, using, join, alias)
 
+  def get_source_prefix(self, col: Column) -> str:
+    if isinstance(self.table, Join):
+      return self.table.get_source_prefix(col)
+    return (self.alias or self.table) + '.{c}'
+
   def __str__(self):
     table = self.table if self.is_table else '(%s)' % self.table
     # No "AS" between a table and its alias is supported by more dialects.
@@ -1264,6 +1275,46 @@ class Join(Datasource):
     self.using = Columns(using)
     super(Join, self).__init__(self, alias)
 
+  def get_source_prefix(self, col: Column) -> str:
+    """Get the table prefix for a column in a JOIN.
+
+    This function is only used when SUPPORT_JOIN_WITH_USING is False. When USING
+    is not supported in JOIN, we converts the USING to ON, and hence the columns
+    selected become ambiguous and a prefix is needed to disambiguate them.
+    When the column is not in USING, we check if it's explicitly selected in
+    the right table, if not, we assume it's in the left table. This is not
+    perfect, but it works for most cases. If the column is in USING, we use the
+    table that has all the values for the column, specifically, if the join type
+    is FULL, we use COALESCE to get the value from both tables.
+
+    Args:
+      col: The column to get the prefix for.
+
+    Returns:
+      A string template with the table prefix and a single '{c}' placeholder for
+      the column.
+    """
+    if SUPPORT_JOIN_WITH_USING:
+      return '{c}'
+    if '.' in col.expression or ' ' in col.expression:  # not a simple column
+      return '{c}'
+    left = self.ds1.get_source_prefix(col)
+    right = self.ds2.get_source_prefix(col)
+    if col.expression not in self.using.aliases:
+      # If the column is not in USING, we check if it's explicitly selected in
+      # the right table. This is not perfect, but it works for most cases.
+      pattern = r'\b' + re.escape(col.expression) + r'\b'
+      return right if re.search(pattern, str(self.ds2)) else left
+    if self.join_type.startswith('FULL'):
+      return f'COALESCE({left}, {right})'
+    if self.join_type.startswith('LEFT'):
+      return left
+    if self.join_type.startswith('RIGHT'):
+      return right
+    if isinstance(self.ds1.table, Join):  # pick the simpler table
+      return right
+    return left
+
   def __str__(self):
     if self.ds1 == self.ds2:
       return str(self.ds1)
@@ -1274,9 +1325,29 @@ class Join(Datasource):
     sql = '\n'.join(map(str, (self.ds1, join, self.ds2)))
     if self.on:
       return '%s\nON %s' % (sql, self.on)
-    if self.using:
+    if not self.using:
+      return sql
+    if SUPPORT_JOIN_WITH_USING:
       return '%s\nUSING (%s)' % (sql, ', '.join(self.using.aliases))
-    return sql
+    if (
+        not self.ds1.alias
+        and not isinstance(self.ds1.table, Join)
+        and not self.ds1.is_table
+    ):
+      self.ds1 = Datasource(self.ds1.table, 'ms_left')
+    if (
+        not self.ds2.alias
+        and not isinstance(self.ds2.table, Join)
+        and not self.ds2.is_table
+    ):
+      self.ds2 = Datasource(self.ds2.table, 'ms_right')
+    on = []
+    for u in self.using:
+      left = self.ds1.get_source_prefix(u)
+      right = self.ds2.get_source_prefix(u)
+      on.append(f'{left.format(c=u.alias)} = {right.format(c=u.alias)}')
+    on = '\n  AND '.join(on)
+    return '%s\nON %s' % (sql, on)
 
 
 class Datasources(SqlComponents):
@@ -1482,7 +1553,24 @@ class Sql(SqlComponent):
 
   @property
   def all_columns(self):
-    return Columns(self.groupby).add(self.columns)
+    """Returns all columns in the SELECT clause."""
+    cols = Columns(self.groupby).add(self.columns)
+    if (
+        SUPPORT_JOIN_WITH_USING
+        or not isinstance(self.from_data, Join)
+        or not self.from_data.using
+    ):
+      return cols
+    # When USING is not supported, we need to add table prefix to the columns
+    # in USING.
+    res = []
+    for c in cols:
+      c = copy.copy(c)
+      c.column = [
+          f'{self.from_data.get_source_prefix(c).format(c=t)}' for t in c.column
+      ]
+      res.append(c)
+    return Columns(res)
 
   def add(self, attr, values):
     getattr(self, attr).add(values)
