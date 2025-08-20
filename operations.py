@@ -1409,8 +1409,8 @@ class MH(Comparison):
   """
 
   def __init__(self,
-               condition_column: Text,
-               baseline_key: Text,
+               condition_column: Union[Text, List[Text]],
+               baseline_key: Any,
                stratified_by: Union[Text, List[Text]],
                metric: Optional[metrics.Metric] = None,
                include_base: bool = False,
