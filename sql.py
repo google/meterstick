@@ -218,7 +218,7 @@ def nth_fn_default(
     raise NotImplementedError('Nth value is not implemented.') from e
 
 
-def uniform_mapping_fn_not_implemented(c):
+def uniform_mapping_fn_not_implemented(_):
   raise NotImplementedError('Uniform mapping is not implemented.')
 
 

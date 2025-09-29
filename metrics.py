@@ -1404,7 +1404,7 @@ class MetricList(Metric):
     children_sql_copy = copy.deepcopy(children_sql)
     incompatible_sqls = sql.Datasources()
     child_table_aliases = []
-    for i, child_sql in enumerate(children_sql):
+    for child_sql in children_sql:
       child_table_aliases.append(
           incompatible_sqls.merge(
               sql.Datasource(child_sql, 'MetricListChildTable')
@@ -1803,6 +1803,7 @@ class SimpleMetric(Metric):
                                          indexes, local_filter, with_data)
 
   def get_sql_columns(self, local_filter):
+    del local_filter  # unused
     raise ValueError('get_sql_columns is not implemented for %s.' % type(self))
 
 

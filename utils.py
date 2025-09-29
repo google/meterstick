@@ -538,7 +538,7 @@ def get_equivalent_metric_tree(m, df=None, prefix=''):
     return res
   if not m.get_equivalent(*m.get_auxiliary_cols()):
     return m
-  equiv, df = get_equivalent_metric(m, df, prefix)
+  equiv, _ = get_equivalent_metric(m, df, prefix)
   return equiv
 
 
