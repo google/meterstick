@@ -1131,11 +1131,8 @@ class Columns(SqlComponents):
     # Returns the original Column instances added.
     return [c.column[0] for c in self]
 
-  def get_alias(self, expression):
-    res = [c for c in self if c.expression == expression]
-    if res:
-      return res[0].alias_raw
-    return None
+  def get_matched_column(self, expression):
+    return next((c for c in self if c.expression == expression), None)
 
   def get_column(self, alias):
     res = [c for c in self if c.alias == alias]
@@ -1170,9 +1167,11 @@ class Columns(SqlComponents):
     if isinstance(children, str):
       return self.add(Column(children))
     alias, expr = children.alias, children.expression
-    found = self.get_alias(expr)
-    if found:
-      children.set_alias(found)
+    matched_column = self.get_matched_column(expr)
+    if matched_column:
+      # alias_raw and suffix form the alias, which is unique in a query.
+      children.set_alias(matched_column.alias_raw)
+      children.suffix = matched_column.suffix
       return self
     if alias not in self.aliases:
       self.children.append(children)
