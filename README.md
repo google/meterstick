@@ -406,3 +406,7 @@ plt.fill_between(x, ci_lower, ci_upper, color='g', alpha=0.5)
 plt.show()
 ```
 ![LOWESS with jackknife](http://services.google.com/fh/files/misc/lowess.png)
+
+## Further Reading
+
+- [Paper](https://arxiv.org/abs/2511.02156)
