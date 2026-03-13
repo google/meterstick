@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import sys
 from typing import Any, Iterable, List, Optional, Sequence, Text, Tuple, Union
 import warnings
 
@@ -2795,6 +2796,12 @@ class Jackknife(MetricWithCI):
   @staticmethod
   def get_stderrs(bucket_estimates):
     stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
+    print('DEBUGGING SENTINEL!!!', file=sys.stderr)
+    print(f'{stderrs=}', file=sys.stderr)
+    print(f'{dof=}', file=sys.stderr)
+    print(f'{np.sqrt(dof + 1)=}', file=sys.stderr)
+    print(f'{stderrs * dof=}', file=sys.stderr)
+    print(f'{stderrs * dof / np.sqrt(dof + 1)=}', file=sys.stderr)
     return stderrs * dof / np.sqrt(dof + 1), dof
 
   def compute_children_sql(
