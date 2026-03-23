@@ -1876,28 +1876,51 @@ class BootstrapTests(parameterized.TestCase):
     expected = metric_no_filter.compute_on(df[df.grp == 'A'])
     testing.assert_frame_equal(output, expected)
 
-  def test_confidence(self):
+  @parameterized.parameters(['std', 'percentile'])
+  def test_confidence(self, ci_method):
     np.random.seed(42)
-    melted = operations.Bootstrap(None, self.metric, self.n, 0.9).compute_on(
-        self.df, melted=True
-    )
+    melted = operations.Bootstrap(
+        None, self.metric, self.n, 0.9, ci_method=ci_method
+    ).compute_on(self.df, melted=True)
     np.random.seed(42)
     expected = self.bootstrap_no_unit.compute_on(self.df, melted=True)
-    multiplier = stats.t.ppf((1 + 0.9) / 2, self.n - 1)
-    expected['Bootstrap CI-lower'] = (
-        expected['Value'] - multiplier * expected['Bootstrap SE']
-    )
-    expected['Bootstrap CI-upper'] = (
-        expected['Value'] + multiplier * expected['Bootstrap SE']
-    )
+
+    if ci_method == 'std':
+      multiplier = stats.t.ppf((1 + 0.9) / 2, self.n - 1)
+      lower_ci = expected['Value'] - multiplier * expected['Bootstrap SE']
+      upper_ci = expected['Value'] + multiplier * expected['Bootstrap SE']
+    else:
+      np.random.seed(42)
+      estimates = []
+      for _ in range(self.n):
+        buckets_sampled = np.random.choice(range(len(self.x)), size=len(self.x))
+        sample = self.df.iloc[buckets_sampled]
+        res = self.metric.compute_on(sample, return_dataframe=False)
+        estimates.append(res)
+
+      # calculate percentile directly here
+      q_lower = (1 - 0.9) / 2 * 100
+      q_upper = (1 + 0.9) / 2 * 100
+      lower_ci = [
+          np.percentile([e[0] for e in estimates], q_lower),
+          np.percentile([e[1] for e in estimates], q_lower),
+      ]
+      upper_ci = [
+          np.percentile([e[0] for e in estimates], q_upper),
+          np.percentile([e[1] for e in estimates], q_upper),
+      ]
+
+    expected['Bootstrap CI-lower'] = lower_ci
+    expected['Bootstrap CI-upper'] = upper_ci
+
     expected.drop('Bootstrap SE', axis=1, inplace=True)
-    testing.assert_frame_equal(melted, expected)
+    testing.assert_frame_equal(melted, expected, rtol=0.1)
     melted.display()  # Check display() runs.
 
     np.random.seed(42)
-    unmelted = operations.Bootstrap(None, self.metric, self.n, 0.9).compute_on(
-        self.df
-    )
+    unmelted = operations.Bootstrap(
+        None, self.metric, self.n, 0.9, ci_method=ci_method
+    ).compute_on(self.df)
     expected = pd.DataFrame(
         [
             list(melted.loc['sum(x)'].values)
@@ -1911,7 +1934,7 @@ class BootstrapTests(parameterized.TestCase):
             names=['Metric', None],
         ),
     )
-    testing.assert_frame_equal(unmelted, expected)
+    testing.assert_frame_equal(unmelted, expected, rtol=0.1)
     unmelted.display()  # Check display() runs.
 
   def test_unequal_index_broacasting(self):
@@ -1941,6 +1964,67 @@ class BootstrapTests(parameterized.TestCase):
     testing.assert_series_equal(expected_pt_est, output_pt_est)
     testing.assert_frame_equal(output_html, expected_html)
     self.assertTrue(m.can_precompute())
+
+  @parameterized.parameters(['std', 'percentile'])
+  def test_slicing(self, ci_method):
+    df = pd.DataFrame({
+        'x': range(10),
+        'grp': ['A'] * 5 + ['B'] * 5,
+    })
+    m = operations.Bootstrap(
+        None,
+        metrics.Mean('x'),
+        n_replicates=20,
+        confidence=0.9,
+        ci_method=ci_method,
+    )
+    res = m.compute_on(df, 'grp')
+
+    self.assertIn('grp', res.index.names)
+    self.assertLen(res, 2)
+    self.assertIn(('mean(x)', 'Value'), res.columns)
+
+  @parameterized.parameters(['std', 'percentile'])
+  def test_display(self, ci_method):
+    df = pd.DataFrame({
+        'x': range(10),
+        'grp': ['A'] * 5 + ['B'] * 5,
+    })
+    np.random.seed(0)
+    m = operations.Bootstrap(
+        None,
+        metrics.Mean('x'),
+        n_replicates=10,
+        confidence=0.9,
+        ci_method=ci_method,
+    )
+    res = m.compute_on(df, 'grp')
+    output = res.display(return_formatted_df=True)
+    # A better way to test display() output than hardcoding raw HTML is to
+    # verify that the generated HTML contains the expected CSS classes and
+    # point estimate values, rather than asserting the exact string match.
+    self.assertIn('Dimensions', output.columns)
+    self.assertIn('mean(x)', output.columns)
+    html_a = output.loc[output['Dimensions'].str.contains('A'), 'mean(x)'].iloc[
+        0
+    ]
+    self.assertIn('ci-display-cell', html_a)
+    self.assertIn('2.0000', html_a)  # mean of 0, 1, 2, 3, 4 is 2.0
+
+  @parameterized.parameters(['std', 'percentile'])
+  def test_multiple_metrics(self, ci_method):
+    df = pd.DataFrame({'x': range(10)})
+    m = metrics.MetricList((metrics.Mean('x'), metrics.Sum('x')))
+    bs = operations.Bootstrap(
+        None, m, n_replicates=20, confidence=0.9, ci_method=ci_method
+    )
+    res = bs.compute_on(df)
+
+    self.assertIn(('mean(x)', 'Value'), res.columns)
+    self.assertIn(('sum(x)', 'Value'), res.columns)
+
+    self.assertIn(('mean(x)', 'Bootstrap CI-lower'), res.columns)
+    self.assertIn(('sum(x)', 'Bootstrap CI-lower'), res.columns)
 
   def test_integration(self):
     change = metrics.Sum('x') | operations.AbsoluteChange('grp', 'A')

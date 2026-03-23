@@ -18,7 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
-from typing import Any, Iterable, List, Optional, Sequence, Text, Tuple, Union
+from typing import Any, Iterable, List, Literal, Optional, Sequence, Text, Tuple, Union
 import warnings
 
 from meterstick import confidence_interval_display
@@ -3000,6 +3000,7 @@ class Bootstrap(MetricWithCI):
       specified, we return confidence interval range instead of standard error.
       Additionally, a display() function will be bound to the result so you can
       visualize the confidence interval nicely in Colab and Jupyter notebook.
+      Required if ci_method is 'percentile'.
     children: A tuple of a Metric whose result we bootstrap on.
     enable_optimization: If all leaf Metrics are Sum and/or Count, or can be
       expressed equivalently by Sum and/or Count, then we can preaggregate the
@@ -3007,6 +3008,9 @@ class Bootstrap(MetricWithCI):
     has_been_preaggregated: If the Metric and data has already been
       preaggregated, this will be set to True. And all other attributes
       inherited from Operation.
+    ci_method: The method to compute confidence intervals. Can be 'std'
+      (default, uses standard error and normal approximation) or 'percentile'
+      (uses empirical percentiles from the bootstrap distribution).
   """
 
   def __init__(
@@ -3017,18 +3021,89 @@ class Bootstrap(MetricWithCI):
       confidence: Optional[float] = None,
       enable_optimization=True,
       name_tmpl: Text = '{} Bootstrap',
+      ci_method: Literal['std', 'percentile'] = 'std',
       **kwargs,
   ):
+    if ci_method not in ('std', 'percentile'):
+      raise ValueError('ci_method must be either "std" or "percentile"')
+    if ci_method == 'percentile' and not confidence:
+      raise ValueError('confidence is required for percentile Bootstrap')
+
     super(Bootstrap, self).__init__(
         unit,
         child,
         confidence,
         name_tmpl,
-        additional_fingerprint_attrs=['n_replicates'],
+        additional_fingerprint_attrs=['n_replicates', 'ci_method'],
         enable_optimization=enable_optimization,
         **kwargs,
     )
     self.n_replicates = n_replicates
+    self.ci_method = ci_method
+
+  def to_sql(self, *args, **kwargs):
+    if self.ci_method == 'percentile':
+      raise NotImplementedError(
+          'to_sql and compute_on_sql are not implemented for percentile'
+          ' bootstrap.'
+      )
+    return super(Bootstrap, self).to_sql(*args, **kwargs)
+
+  def compute_on_sql(self, *args, **kwargs):
+    if self.ci_method == 'percentile':
+      raise NotImplementedError(
+          'to_sql and compute_on_sql are not implemented for percentile'
+          ' bootstrap.'
+      )
+    return super(Bootstrap, self).compute_on_sql(*args, **kwargs)
+
+  def _select_percentiles(self) -> dict[str, float]:
+    """Returns the percentiles (as quantiles) to compute for Bootstrap.
+
+    By default, this method only uses the requested confidence level to select
+    the appropriate two-sided percentiles. If additional percentiles are
+    desired (median or multiple confidence levels), simply override this method
+    in a subclass and return whatever names and percentiles are needed.
+    """
+    if self.ci_method != 'percentile':
+      raise ValueError(
+          'Percentiles are only needed when `ci_method="percentile"`'
+      )
+
+    alpha = 1 - self.confidence
+    lower_p = alpha / 2
+    upper_p = 1 - alpha / 2
+
+    return {
+        'CI-lower': lower_p,
+        'CI-upper': upper_p,
+    }
+
+  def compute_on_children(
+      self,
+      children: list[pd.DataFrame],
+      split_by: Text | Optional[List[Text]] | None = None,
+  ) -> pd.DataFrame:
+    """Computes stderrs or percentiles on the bootstrap replicates."""
+    if self.ci_method == 'std':
+      return super(Bootstrap, self).compute_on_children(children, split_by)
+    elif self.ci_method == 'percentile':
+      # Concatenate the children (replicates) along columns.
+      bucket_estimates = pd.concat(children, axis=1, sort=False)
+      stats_df = pd.DataFrame({
+          f'{self.prefix} {name}': bucket_estimates.quantile(q, axis=1)
+          for name, q in self._select_percentiles().items()
+      })
+
+      return utils.unmelt(stats_df)
+    else:
+      raise ValueError('ci_method must be either "std" or "percentile"')
+
+  def compute_ci(self, res: pd.DataFrame) -> pd.DataFrame:
+    """Computes CI from standard error or percentile bounds."""
+    if self.ci_method == 'percentile':
+      return res
+    return super(Bootstrap, self).compute_ci(res)
 
   def compute_slices(self, df, split_by=None):
     """Computes Bootstrap with unit with precomputation when possible.
@@ -3218,6 +3293,7 @@ class PoissonBootstrap(Bootstrap):
         confidence,
         enable_optimization,
         name_tmpl,
+        ci_method='std',
         **kwargs,
     )
 

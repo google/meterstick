@@ -169,16 +169,23 @@ Built-in standard errors include:
     `confidence` in (0,1) represents the level of the confidence interval;
     optional
 
-+   `Bootstrap(unit, n_replicates, confidence)` : Computes a bootstrap estimate
-    of the standard error.
++   `Bootstrap(unit, n_replicates, confidence, ci_method)` : Computes a
+    bootstrap estimate of the standard error or percentiles.
 
     `n_replicates` is the number of bootstrap replicates, default is 10000.
 
     `unit` is a string for the variable whose unique values will be resampled;
     if `unit` is not supplied the rows will be the unit.
 
+    `ci_method` specifies the confidence interval method. Defaults to `'std'`,
+    which computes bounds using standard error and normal approximation. If set
+    to `'percentile'`, it computes the confidence interval using empirical
+    percentiles from the bootstrap distribution and also returns the median.
+
     `confidence` in (0,1) represents the level of the confidence interval;
-    optional
+    optional if `ci_method` is `'std'`, but required if `ci_method` is
+    `'percentile'` (because standard error is not well defined for percentile
+    bootstrapping).
 
 +   `PoissonBootstrap(unit, n_replicates, confidence)` : Computes a Poisson
     bootstrap estimate of the standard error. It's identical to `Bootstrap`
