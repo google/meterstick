@@ -2326,10 +2326,7 @@ class MetricWithCI(Operation):
       )
       res = point_est.join(utils.melt(std))
       if self.confidence:
-        res[self.prefix + ' CI-lower'] = (
-            res.iloc[:, 0] - res[self.prefix + ' CI-lower']
-        )
-        res[self.prefix + ' CI-upper'] += res.iloc[:, 0]
+        res = self.compute_ci(res)
       res = utils.unmelt(res)
       base = self.compute_change_base(table, split_by, execute, mode)
       return self.add_base_to_res(res, base)
@@ -3041,23 +3038,81 @@ class Bootstrap(MetricWithCI):
     self.n_replicates = n_replicates
     self.ci_method = ci_method
 
-  def to_sql(self, *args, **kwargs):
-    if self.ci_method == 'percentile':
-      raise NotImplementedError(
-          'to_sql and compute_on_sql are not implemented for percentile'
-          ' bootstrap.'
-      )
-    return super(Bootstrap, self).to_sql(*args, **kwargs)
+  def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
+    """Computes self in a SQL query and processes the result.
 
-  def compute_on_sql(self, *args, **kwargs):
-    if self.ci_method == 'percentile':
-      raise NotImplementedError(
-          'to_sql and compute_on_sql are not implemented for percentile'
-          ' bootstrap.'
-      )
-    return super(Bootstrap, self).compute_on_sql(*args, **kwargs)
+    It behaves identically to MetricWithCI.compute_on_sql_sql_mode when
+    `ci_method` is 'std'. When `ci_method` is 'percentile', the SQL query
+    already computes the percentile CI bounds, so we just parse those columns
+    directly without applying the normal approximation.
 
-  def _select_percentiles(self) -> dict[str, float]:
+    Args:
+      table: The table we want to query from.
+      split_by: The columns that we use to split the data.
+      execute: A function that can execute a SQL query and returns a DataFrame.
+
+    Returns:
+      The result DataFrame of Bootstrap.
+    """
+    if self.ci_method == 'std':
+      return super(Bootstrap, self).compute_on_sql_sql_mode(
+          table, split_by, execute
+      )
+    if self.ci_method != 'percentile':
+      raise ValueError('ci_method must be either "std" or "percentile"')
+
+    res = super(MetricWithCI,
+                self).compute_on_sql_sql_mode(table, split_by, execute)
+    sub_dfs = []
+    base = None
+    if self.confidence is None:
+      raise ValueError('confidence is required for percentile Bootstrap')
+
+    if len(self.children) == 1 and isinstance(
+        self.children[0], (PercentChange, AbsoluteChange)):
+      # The first 3n columns are Value, CI-lower, CI-upper for n Metrics. The
+      # last n columns are the base values of Change.
+      if len(res.columns) % 4:
+        raise ValueError('Wrong shape for a MetricWithCI with confidence!')
+      n_metrics = len(res.columns) // 4
+      base = res.iloc[:, -n_metrics:]
+      res = res.iloc[:, :3 * n_metrics]
+      change = self.children[0]
+      base.columns = [change.name_tmpl.format(c) for c in base.columns]
+      base = utils.melt(base)
+      base.columns = ['_base_value']
+
+    if len(res.columns) % 3:
+      raise ValueError('Wrong shape for a MetricWithCI with confidence!')
+
+    # The columns are like metric1, metric1 CI-lower, metric1 CI-upper, ...
+    metric_names = res.columns[::3]
+    sub_dfs = []
+
+    percentiles = list(self.select_percentiles().keys())
+    if len(percentiles) != 2:
+      raise NotImplementedError(
+          'SQL mode for percentile bootstrap currently supports exactly 2'
+          ' percentiles (e.g. CI-lower and CI-upper)'
+      )
+
+    col1 = self.prefix + ' ' + percentiles[0]
+    col2 = self.prefix + ' ' + percentiles[1]
+
+    for i in range(0, len(res.columns), 3):
+      sub_df = pd.DataFrame(
+          {
+              'Value': res.iloc[:, i],
+              col1: res.iloc[:, i + 1],
+              col2: res.iloc[:, i + 2]
+          },
+          columns=['Value', col1, col2])
+      sub_dfs.append(sub_df)
+
+    res = pd.concat((sub_dfs), axis=1, keys=metric_names, names=['Metric'])
+    return self.add_base_to_res(res, base)
+
+  def select_percentiles(self) -> dict[str, float]:
     """Returns the percentiles (as quantiles) to compute for Bootstrap.
 
     By default, this method only uses the requested confidence level to select
@@ -3092,7 +3147,7 @@ class Bootstrap(MetricWithCI):
       bucket_estimates = pd.concat(children, axis=1, sort=False)
       stats_df = pd.DataFrame({
           f'{self.prefix} {name}': bucket_estimates.quantile(q, axis=1)
-          for name, q in self._select_percentiles().items()
+          for name, q in self.select_percentiles().items()
       })
 
       return utils.unmelt(stats_df)
@@ -3755,18 +3810,29 @@ def get_se_sql(
       groupby.add(c.alias)
     else:
       alias = c.alias
-      se = sql.Column(c.alias, sql.STDDEV_SAMP_FN,
-                      '%s Bootstrap SE' % c.alias_raw)
-      if isinstance(metric, Jackknife):
-        adjustment = sql.Column(
-            sql.SAFE_DIVIDE_FN(
-                numer='COUNT({c}) - 1', denom='SQRT(COUNT({c}))'
-            ).format(c=alias)
-        )
-        se = (se * adjustment).set_alias('%s Jackknife SE' % c.alias_raw)
-      columns.add(se)
-      if metric.confidence:
-        columns.add(sql.Column(alias, 'COUNT({}) - 1', '%s dof' % c.alias_raw))
+      ci_method = getattr(metric, 'ci_method', 'std')
+      if ci_method == 'percentile':
+        for k, v in metric.select_percentiles().items():
+          pct_col = sql.Column(alias, sql.QUANTILE_FN(v),
+                               f'{c.alias_raw} {k}')
+          columns.add(pct_col)
+      elif ci_method == 'std':
+        se = sql.Column(c.alias, sql.STDDEV_SAMP_FN,
+                        '%s Bootstrap SE' % c.alias_raw)
+        if isinstance(metric, Jackknife):
+          adjustment = sql.Column(
+              sql.SAFE_DIVIDE_FN(
+                  numer='COUNT({c}) - 1', denom='SQRT(COUNT({c}))'
+              ).format(c=alias)
+          )
+          se = (se * adjustment).set_alias('%s Jackknife SE' % c.alias_raw)
+        columns.add(se)
+        if metric.confidence:
+          columns.add(
+              sql.Column(alias, 'COUNT({}) - 1', '%s dof' % c.alias_raw)
+          )
+      else:
+        raise ValueError(f'Unknown ci_method: {ci_method}')
   return sql.Sql(columns, samples_alias, groupby=groupby), with_data
 
 
