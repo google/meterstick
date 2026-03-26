@@ -2053,8 +2053,11 @@ class BootstrapTests(parameterized.TestCase):
 
 class PoissonBootstrapTests(parameterized.TestCase):
 
-  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
-  def test_runs(self, split_by):
+  @parameterized.product(
+      split_by=[[], ['grp2'], ('grp2', 'grp3')],
+      ci_method=['std', 'percentile'],
+  )
+  def test_runs(self, split_by, ci_method):
     df = pd.DataFrame({
         'x': range(6),
         'grp': range(6),
@@ -2067,9 +2070,11 @@ class PoissonBootstrapTests(parameterized.TestCase):
         metrics.Max('x'),
         metrics.Min('x'),
     ])
-    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
-    m2 = operations.PoissonBootstrap('grp', m, 5, 0.9, False)
-    m3 = operations.PoissonBootstrap(None, m, 5, 0.9)
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9, ci_method=ci_method)
+    m2 = operations.PoissonBootstrap(
+        'grp', m, 5, 0.9, False, ci_method=ci_method
+    )
+    m3 = operations.PoissonBootstrap(None, m, 5, 0.9, ci_method=ci_method)
     np.random.seed(0)
     res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
     np.random.seed(0)
@@ -2079,8 +2084,11 @@ class PoissonBootstrapTests(parameterized.TestCase):
     testing.assert_frame_equal(res1, res2)
     testing.assert_frame_equal(res2, res3)
 
-  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
-  def test_each_unit_has_one_row(self, split_by):
+  @parameterized.product(
+      split_by=[[], ['grp2'], ('grp2', 'grp3')],
+      ci_method=['std', 'percentile'],
+  )
+  def test_each_unit_has_one_row(self, split_by, ci_method):
     df = pd.DataFrame({
         'x': range(6),
         'grp': range(6),
@@ -2095,16 +2103,19 @@ class PoissonBootstrapTests(parameterized.TestCase):
         metrics.Min('x'),
     ])
     m = operations.AbsoluteChange('grp4', 1, m)
-    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
-    m2 = operations.PoissonBootstrap(None, m, 5, 0.9)
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9, ci_method=ci_method)
+    m2 = operations.PoissonBootstrap(None, m, 5, 0.9, ci_method=ci_method)
     np.random.seed(0)
     res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
     np.random.seed(0)
     res2 = m2.compute_on(df, split_by).display(return_formatted_df=True)
     testing.assert_frame_equal(res1, res2)
 
-  @parameterized.parameters([([],), (['grp2'],), (('grp2', 'grp3'),)])
-  def test_each_unit_has_multiple_rows(self, split_by):
+  @parameterized.product(
+      split_by=[[], ['grp2'], ('grp2', 'grp3')],
+      ci_method=['std', 'percentile'],
+  )
+  def test_each_unit_has_multiple_rows(self, split_by, ci_method):
     df = pd.DataFrame({
         'x': range(6),
         'grp': [0] * 3 + [1] * 3,
@@ -2119,13 +2130,90 @@ class PoissonBootstrapTests(parameterized.TestCase):
         metrics.Min('x'),
     ])
     m = operations.AbsoluteChange('grp4', 0, m)
-    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9)
-    m2 = operations.PoissonBootstrap('grp', m, 5, 0.9, False)
+    m1 = operations.PoissonBootstrap('grp', m, 5, 0.9, ci_method=ci_method)
+    m2 = operations.PoissonBootstrap(
+        'grp', m, 5, 0.9, False, ci_method=ci_method
+    )
     np.random.seed(0)
     res1 = m1.compute_on(df, split_by).display(return_formatted_df=True)
     np.random.seed(0)
     res2 = m2.compute_on(df, split_by).display(return_formatted_df=True)
     testing.assert_frame_equal(res1, res2)
+
+  @parameterized.parameters(['std', 'percentile'])
+  def test_confidence(self, ci_method):
+    np.random.seed(42)
+    n = 100
+    x = np.arange(0, 3, 0.5)
+    df = pd.DataFrame({'x': x, 'grp': ['A'] * 3 + ['B'] * 3})
+    metric = metrics.MetricList((metrics.Sum('x'), metrics.Count('x')))
+    bootstrap_no_unit = operations.PoissonBootstrap(None, metric, n)
+
+    melted = operations.PoissonBootstrap(
+        None, metric, n, 0.9, ci_method=ci_method
+    ).compute_on(df, melted=True)
+    np.random.seed(42)
+    expected = bootstrap_no_unit.compute_on(df, melted=True)
+
+    if ci_method == 'std':
+      multiplier = stats.t.ppf((1 + 0.9) / 2, n - 1)
+      lower_ci = (
+          expected['Value'] - multiplier * expected['Poisson Bootstrap SE']
+      )
+      upper_ci = (
+          expected['Value'] + multiplier * expected['Poisson Bootstrap SE']
+      )
+    else:
+      np.random.seed(42)
+      estimates = []
+      for _ in range(n):
+        weights = np.random.poisson(size=len(x))
+        sample = df.iloc[np.arange(len(x)).repeat(weights)]
+        res = metric.compute_on(sample, return_dataframe=False)
+        estimates.append(res)
+
+      # calculate percentile directly here
+      q_lower = (1 - 0.9) / 2 * 100
+      q_upper = (1 + 0.9) / 2 * 100
+      lower_ci = [
+          np.percentile([e[0] for e in estimates], q_lower),
+          np.percentile([e[1] for e in estimates], q_lower),
+      ]
+      upper_ci = [
+          np.percentile([e[0] for e in estimates], q_upper),
+          np.percentile([e[1] for e in estimates], q_upper),
+      ]
+
+    expected['Poisson Bootstrap CI-lower'] = lower_ci
+    expected['Poisson Bootstrap CI-upper'] = upper_ci
+
+    expected.drop('Poisson Bootstrap SE', axis=1, inplace=True)
+    testing.assert_frame_equal(melted, expected, rtol=0.1)
+    melted.display()  # Check display() runs.
+
+    np.random.seed(42)
+    unmelted = operations.PoissonBootstrap(
+        None, metric, n, 0.9, ci_method=ci_method
+    ).compute_on(df)
+    expected = pd.DataFrame(
+        [
+            list(melted.loc['sum(x)'].values)
+            + list(melted.loc['count(x)'].values)
+        ],
+        columns=pd.MultiIndex.from_product(
+            [
+                ['sum(x)', 'count(x)'],
+                [
+                    'Value',
+                    'Poisson Bootstrap CI-lower',
+                    'Poisson Bootstrap CI-upper',
+                ],
+            ],
+            names=['Metric', None],
+        ),
+    )
+    testing.assert_frame_equal(unmelted, expected, rtol=0.1)
+    unmelted.display()  # Check display() runs.
 
   def test_get_samples_with_unit(self):
     x = range(6)

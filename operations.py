@@ -3274,6 +3274,27 @@ class PoissonBootstrap(Bootstrap):
   instead of multinomial distribution in resampling. See
   https://www.unofficialgoogledatascience.com/2015/08/an-introduction-to-poisson-bootstrap26.html
   for an introduction.
+
+  Attributes:
+    unit: The column representing the blocks to be resampled in block Poisson
+      bootstrap. If specified we sample the unique blocks in the `unit` column,
+      otherwise we sample rows.
+    n_replicates: The number of bootstrap replicates.
+    confidence: The level of the confidence interval, must be in (0, 1). If
+      specified, we return confidence interval range instead of standard error.
+      Additionally, a display() function will be bound to the result so you can
+      visualize the confidence interval nicely in Colab and Jupyter notebook.
+      Required if ci_method is 'percentile'.
+    children: A tuple of a Metric whose result we bootstrap on.
+    enable_optimization: If all leaf Metrics are Sum and/or Count, or can be
+      expressed equivalently by Sum and/or Count, then we can preaggregate the
+      data for faster computation. See compute_slices() for more details.
+    has_been_preaggregated: If the Metric and data has already been
+      preaggregated, this will be set to True. And all other attributes
+      inherited from Operation.
+    ci_method: The method to compute confidence intervals. Can be 'std'
+      (default, uses standard error and normal approximation) or 'percentile'
+      (uses empirical percentiles from the bootstrap distribution).
   """
 
   def __init__(
@@ -3284,6 +3305,7 @@ class PoissonBootstrap(Bootstrap):
       confidence: Optional[float] = None,
       enable_optimization=True,
       name_tmpl: Text = '{} Poisson Bootstrap',
+      ci_method: Literal['std', 'percentile'] = 'std',
       **kwargs,
   ):
     super(PoissonBootstrap, self).__init__(
@@ -3293,7 +3315,7 @@ class PoissonBootstrap(Bootstrap):
         confidence,
         enable_optimization,
         name_tmpl,
-        ci_method='std',
+        ci_method=ci_method,
         **kwargs,
     )
 
