@@ -278,6 +278,48 @@ class SimpleOperationTests(absltest.TestCase):
       m.get_extra_idx()
     self.assertEqual(str(cm.exception), 'Incompatible indexes!')
 
+  def test_log_transform_ln(self):
+    metric = operations.LogTransform(metrics.Sum('x'), base='ln')
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame(
+        {'Log(sum(x))': [np.log(8)]}
+    )
+    testing.assert_frame_equal(output, expected)
+
+  def test_log_transform_log10(self):
+    metric = operations.LogTransform(metrics.Sum('x'), base='log10')
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame(
+        {'Log10(sum(x))': [np.log10(8)]}
+    )
+    testing.assert_frame_equal(output, expected)
+
+  def test_exponential_percent_transform_ln(self):
+    metric = operations.ExponentialPercentTransform(metrics.Sum('x'), base='ln')
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame(
+        {'100 * Exp(sum(x)) - 1': [100 * (np.exp(8) - 1)]}
+    )
+    testing.assert_frame_equal(output, expected)
+
+  def test_exponential_percent_transform_log10(self):
+    metric = operations.ExponentialPercentTransform(
+        metrics.Sum('x'),
+        base='log10',
+        )
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame(
+        {'100 * 10^(sum(x)) - 1': [100 * (10**8 - 1)]}
+    )
+    testing.assert_frame_equal(output, expected)
+
+  def test_invalid_transform_base(self):
+    with self.assertRaisesRegex(ValueError, "base must be 'ln' or 'log10'"):
+      operations.LogTransform(metrics.Sum('x'), base='log2')
+
+    with self.assertRaisesRegex(ValueError, "base must be 'ln' or 'log10'"):
+      operations.ExponentialPercentTransform(metrics.Sum('x'), base='log2')
+
 
 class PrePostChangeTests(parameterized.TestCase):
   n = 40
@@ -723,6 +765,16 @@ SIMPLE_OPERATIONS = [
     ('Entropy', diversity.Entropy('grp')),
     ('TopK', diversity.TopK('grp', 1)),
     ('Nxx', diversity.Nxx('grp', 0.4)),
+    ('LogTransform ln', operations.LogTransform()),
+    ('LogTransform log10', operations.LogTransform(base='log10')),
+    (
+        'ExponentialPercentTransform ln',
+        operations.ExponentialPercentTransform(),
+    ),
+    (
+        'ExponentialPercentTransform log10',
+        operations.ExponentialPercentTransform(base='log10'),
+    ),
 ]
 PRECOMPUTABLE_OPERATIONS = SIMPLE_OPERATIONS + [
     ('MH', operations.MH('grp', 0, 'cookie')),
@@ -2609,6 +2661,10 @@ class CommonTest(parameterized.TestCase):
         operations.Bootstrap('x', n_replicates=10),
         operations.Bootstrap('x', confidence=0.9),
         operations.Bootstrap('x', confidence=0.95),
+        operations.LogTransform('x'),
+        operations.LogTransform('x', base='log10'),
+        operations.ExponentialPercentTransform('x'),
+        operations.ExponentialPercentTransform('x', base='log10'),
         diversity.HHI('x'),
         diversity.HHI('y'),
         diversity.Entropy('x'),

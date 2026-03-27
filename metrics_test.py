@@ -1016,7 +1016,8 @@ class TestCaching(parameterized.TestCase):
             'Comparison',
             'MetricWithCI',
             'Model',
-            'DiversityBase'
+            'DiversityBase',
+            'MetricFunction',
         )),
     )
     self.assertEmpty(set(metrics.BUILT_INS).difference(all_classes))

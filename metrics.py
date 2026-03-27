@@ -130,6 +130,8 @@ BUILT_INS = [
     'Jackknife',
     'Bootstrap',
     'PoissonBootstrap',
+    'LogTransform',
+    'ExponentialPercentTransform',
     # Diversity Operations
     'HHI',
     'Entropy',

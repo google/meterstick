@@ -1834,6 +1834,60 @@ def get_display_fn(name,
   return display
 
 
+class MetricFunction(Operation):
+  """Base class for applying element-wise functions to Metric results."""
+
+  def __init__(self, child, func, name_tmpl, **kwargs):
+    super().__init__(child, name_tmpl, **kwargs)
+    self.func = func
+
+  def compute_on_children(self, children, split_by):
+    return self.func(children)
+
+
+class LogTransform(MetricFunction):
+  """Base class for applying log functions (ln or log10) to Metric results."""
+
+  def __init__(self, child=None, base: str = 'ln', **kwargs):
+    if base not in ('ln', 'log10'):
+      raise ValueError("base must be 'ln' or 'log10'")
+    self.base = base
+    func = np.log if base == 'ln' else np.log10
+    super().__init__(
+        child,
+        func,
+        'Log({})' if base == 'ln' else 'Log10({})',
+        additional_fingerprint_attrs=['base'],
+        **kwargs
+    )
+
+
+class ExponentialPercentTransform(MetricFunction):
+  """Base class for applying exponential and percent transformations to Metric.
+
+  This is used to convert log transformed metrics back to percent scale,
+  i.e. from log(1 + x) to x.
+  """
+
+  def __init__(self, child=None, base: str = 'ln', **kwargs):
+    if base not in ('ln', 'log10'):
+      raise ValueError("base must be 'ln' or 'log10'")
+    self.base = base
+    if base == 'ln':
+      func = lambda x: 100 * (np.exp(x) - 1)
+      name_tmpl = '100 * Exp({}) - 1'
+    else:
+      func = lambda x: 100 * (10**x - 1)
+      name_tmpl = '100 * 10^({}) - 1'
+    super().__init__(
+        child,
+        func,
+        name_tmpl,
+        additional_fingerprint_attrs=['base'],
+        **kwargs
+    )
+
+
 class MetricWithCI(Operation):
   """Base class for Metrics that have confidence interval info in the return.
 
@@ -1919,6 +1973,7 @@ class MetricWithCI(Operation):
     res = point_est.join(utils.melt(std))
     if self.confidence:
       res = self.compute_ci(res)
+
     res = utils.unmelt(res)
     if not self.confidence:
       return res
