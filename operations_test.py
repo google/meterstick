@@ -1604,6 +1604,109 @@ class JackknifeTests(parameterized.TestCase):
         ' Metric. Please give Metrics different names.',
     )
 
+  @parameterized.product(base=['ln', 'log10'], melted=[True, False])
+  def test_dispplay_log_transformed_percent_change(self, base, melted):
+    df = pd.DataFrame({
+        'x': list(range(8, 13)) + list(range(98, 103)),
+        'grp': list('A' * 5 + 'B' * 5),
+        'unit': list(range(5)) * 2,
+    })
+    m = (
+        metrics.Mean('x')
+        | operations.LogTransform(base=base)
+        | operations.AbsoluteChange('grp', 'A')
+        | operations.Jackknife('unit', confidence=0.9)
+        | operations.ExponentialPercentTransform(base=base)
+    )
+
+    # Test args and kwargs are still working in the same way.
+    actual = m.compute_on(df, melted=melted)
+    actual = actual.display(False, return_formatted_df=True)
+    expected = (
+        metrics.Mean('x')
+        | operations.PercentChange('grp', 'A', include_base=True)
+        | operations.Jackknife('unit', confidence=0.9)
+    ).compute_on(df).display(False, return_formatted_df=True)
+    expected.iloc[1, 1] = expected.iloc[1, 1].replace(
+        '[763.98, 1036.02]', '[773.02, 1045.45]'
+    )
+    testing.assert_frame_equal(actual, expected)
+
+  @parameterized.product(base=['ln', 'log10'], melted=[True, False])
+  def test_dispplay_log_transformed_percent_change_split_by(self, base, melted):
+    df = pd.DataFrame({
+        'x': np.random.random(10).round(5),
+        'grp': list('A' * 5 + 'B' * 5),
+        'grp2': list('AB') * 5,
+        'unit': list(range(5)) * 2,
+    })
+    m = (
+        metrics.Mean('x')
+        | operations.LogTransform(base=base)
+        | operations.AbsoluteChange('grp', 'A')
+        | operations.Jackknife('unit', confidence=0.9)
+        | operations.ExponentialPercentTransform(base=base)
+    )
+
+    expected = m.compute_on(df, 'grp2', melted=melted).display(
+        False, return_formatted_df=True
+    )
+    actual1 = m.compute_on(df[df.grp2 == 'A'], melted=melted).display(
+        False, return_formatted_df=True
+    )
+    actual2 = m.compute_on(df[df.grp2 == 'B'], melted=melted).display(
+        False, return_formatted_df=True
+    )
+    actual1['grp2'] = '<div>A</div>'
+    actual2['grp2'] = '<div>B</div>'
+    actual = pd.concat([actual1, actual2])
+    actual = actual[expected.columns]
+    actual.index = range(4)
+
+    testing.assert_frame_equal(actual, expected)
+
+  def test_display_log_transformed_percent_change_with_ci(self):
+    df = pd.DataFrame({
+        'x': np.random.random(10).round(3),
+        'grp': list('A' * 5 + 'B' * 5),
+        'unit': list(range(5)) * 2,
+    })
+    m = metrics.Sum('x') | operations.LogTransformedPercentChangeWithCI(
+        'grp', 'A', 'unit', 0.9
+    )
+
+    actual = m.compute_on(df).display(return_formatted_df=True)
+    expected = (
+        metrics.Sum('x')
+        | operations.LogTransform()
+        | operations.AbsoluteChange('grp', 'A')
+        | operations.Jackknife('unit', confidence=0.9)
+        | operations.ExponentialPercentTransform()
+    ).compute_on(df).display(return_formatted_df=True)
+
+    testing.assert_frame_equal(actual, expected)
+
+  def test_display_log_transformed_percent_change_with_ci_split_by(self):
+    df = pd.DataFrame({
+        'x': np.random.random(10).round(3),
+        'grp': list('A' * 5 + 'B' * 5),
+        'grp2': list('AB') * 5,
+        'unit': list(range(5)) * 2,
+    })
+    m = metrics.Sum('x') | operations.LogTransformedPercentChangeWithCI(
+        'grp', 'A', 'unit', 0.9
+    )
+    actual = m.compute_on(df, 'grp2').display(return_formatted_df=True)
+    expected = (
+        metrics.Sum('x')
+        | operations.LogTransform()
+        | operations.AbsoluteChange('grp', 'A')
+        | operations.Jackknife('unit', confidence=0.9)
+        | operations.ExponentialPercentTransform()
+    ).compute_on(df, 'grp2').display(return_formatted_df=True)
+
+    testing.assert_frame_equal(actual, expected)
+
 
 class BootstrapTests(parameterized.TestCase):
   n = 100
@@ -2062,6 +2165,51 @@ class BootstrapTests(parameterized.TestCase):
     ]
     self.assertIn('ci-display-cell', html_a)
     self.assertIn('2.0000', html_a)  # mean of 0, 1, 2, 3, 4 is 2.0
+
+  @parameterized.product(
+      unit=[None, 'unit'], ci_method=['std', 'percentile']
+  )
+  def test_display_log_transformed_percent_change(self, unit, ci_method):
+    df = pd.DataFrame({
+        'x': range(8),
+        'grp': ['A'] * 4 + ['B'] * 4,
+        'unit': [1, 2] * 4,
+    })
+    bt = operations.Bootstrap(
+        unit, n_replicates=5, confidence=0.9, ci_method=ci_method
+    )
+    m = (
+        metrics.Mean('x')
+        | operations.LogTransform()
+        | operations.AbsoluteChange('grp', 'A')
+        | bt
+        | operations.ExponentialPercentTransform()
+    )
+    actual = m.compute_on(df)
+
+    expected = (
+        metrics.Mean('x') | operations.PercentChange('grp', 'A') | bt
+    ).compute_on(df)
+    actual_preagg_df = actual.display(return_pre_agg_df=True)
+    actual_formatted_df = actual.display(return_formatted_df=True)
+    expected_preagg_df = expected.display(return_pre_agg_df=True)
+    expected_formatted_df = expected.display(return_formatted_df=True)
+    expected_formatted_df.iloc[1, 1] = actual_formatted_df.iloc[1, 1]
+
+    # test that actual and expected only differ on confidence interval
+    testing.assert_series_equal(
+        actual_preagg_df.iloc[:, 0], expected_preagg_df.iloc[:, 0]
+    )
+    testing.assert_series_equal(
+        actual_preagg_df.iloc[0, 1:2], expected_preagg_df.iloc[0, 1:2]
+    )
+    self.assertAlmostEqual(
+        actual_preagg_df.iloc[1, 1][0], expected_preagg_df.iloc[1, 1][0]
+    )
+    self.assertAlmostEqual(
+        actual_preagg_df.iloc[1, 1][1], expected_preagg_df.iloc[1, 1][1]
+    )
+    testing.assert_frame_equal(actual_formatted_df, expected_formatted_df)
 
   @parameterized.parameters(['std', 'percentile'])
   def test_multiple_metrics(self, ci_method):

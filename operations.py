@@ -18,7 +18,9 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
-from typing import Any, Iterable, List, Literal, Optional, Sequence, Text, Tuple, Union
+import inspect
+import types
+from typing import Any, Iterable, List, Literal, Optional, Sequence, Text, Tuple, Type, Union
 import warnings
 
 from meterstick import confidence_interval_display
@@ -1698,7 +1700,6 @@ class MH(Comparison):
 
 def get_display_fn(name,
                    split_by=None,
-                   melted=False,
                    value='Value',
                    condition_column: Optional[List[Text]] = None,
                    ctrl_id=None,
@@ -1708,7 +1709,6 @@ def get_display_fn(name,
   Args:
     name: 'Jackknife' or 'Bootstrap'.
     split_by: The split_by passed to Jackknife().compute_on().
-    melted: Whether the input res is in long format.
     value: The name of the value column.
     condition_column: Present if the child is PercentChange or AbsoluteChange.
     ctrl_id: Present if the child is PercentChange or AbsoluteChange. It's the
@@ -1774,7 +1774,7 @@ def get_display_fn(name,
       return_pre_agg_df/return_formatted_df is True.
     """
     base = res.meterstick_change_base
-    if not melted:
+    if res.index.names[0] != 'Metric':
       res = utils.melt(res)
     if base is not None:
       # base always has the baseline so needs to be at left.
@@ -1834,58 +1834,28 @@ def get_display_fn(name,
   return display
 
 
-class MetricFunction(Operation):
-  """Base class for applying element-wise functions to Metric results."""
+def get_comparison_child(op):
+  """Checks if `op` wraps a `PercentChange` or `AbsoluteChange` metric.
 
-  def __init__(self, child, func, name_tmpl, **kwargs):
-    super().__init__(child, name_tmpl, **kwargs)
-    self.func = func
+  This function recursively checks if `op` is a `MetricWithCI` with a single
+  child of type `PercentChange` or `AbsoluteChange`, or if `op` is a
+  `MetricFunction` wrapping such a structure.
 
-  def compute_on_children(self, children, split_by):
-    return self.func(children)
+  Args:
+    op: A Metric instance.
 
-
-class LogTransform(MetricFunction):
-  """Base class for applying log functions (ln or log10) to Metric results."""
-
-  def __init__(self, child=None, base: str = 'ln', **kwargs):
-    if base not in ('ln', 'log10'):
-      raise ValueError("base must be 'ln' or 'log10'")
-    self.base = base
-    func = np.log if base == 'ln' else np.log10
-    super().__init__(
-        child,
-        func,
-        'Log({})' if base == 'ln' else 'Log10({})',
-        additional_fingerprint_attrs=['base'],
-        **kwargs
-    )
-
-
-class ExponentialPercentTransform(MetricFunction):
-  """Base class for applying exponential and percent transformations to Metric.
-
-  This is used to convert log transformed metrics back to percent scale,
-  i.e. from log(1 + x) to x.
+  Returns:
+    The comparison metric instance if found, else None.
   """
-
-  def __init__(self, child=None, base: str = 'ln', **kwargs):
-    if base not in ('ln', 'log10'):
-      raise ValueError("base must be 'ln' or 'log10'")
-    self.base = base
-    if base == 'ln':
-      func = lambda x: 100 * (np.exp(x) - 1)
-      name_tmpl = '100 * Exp({}) - 1'
-    else:
-      func = lambda x: 100 * (10**x - 1)
-      name_tmpl = '100 * 10^({}) - 1'
-    super().__init__(
-        child,
-        func,
-        name_tmpl,
-        additional_fingerprint_attrs=['base'],
-        **kwargs
-    )
+  if isinstance(op, MetricWithCI):
+    if len(op.children) == 1 and isinstance(
+        op.children[0], (PercentChange, AbsoluteChange)
+    ):
+      return op.children[0]
+    return None
+  if isinstance(op, MetricFunction):
+    return get_comparison_child(op.children[0])
+  return None
 
 
 class MetricWithCI(Operation):
@@ -2015,10 +1985,9 @@ class MetricWithCI(Operation):
     """Computes the base values for Change. It's used in res.display()."""
     if not self.confidence:
       return None
-    if len(self.children) != 1 or not isinstance(
-        self.children[0], (PercentChange, AbsoluteChange)):
+    change = get_comparison_child(self)
+    if not change:
       return None
-    change = self.children[0]
     util_metric = change.children[0]
     if isinstance(self.children[0], (PrePostChange, CUPED)):
       util_metric = metrics.MetricList(
@@ -2153,9 +2122,8 @@ class MetricWithCI(Operation):
       indexes = list(res.index.names)
       if melted:
         indexes = indexes[1:]
-      if len(self.children) == 1 and isinstance(
-          self.children[0], (PercentChange, AbsoluteChange)):
-        change = self.children[0]
+      change = get_comparison_child(self)
+      if change:
         indexes = [i for i in indexes if i not in change.extra_index]
       res = self.add_display_fn(res, indexes, melted)
     else:
@@ -2163,7 +2131,7 @@ class MetricWithCI(Operation):
           'You need to specify a confidence level in order to use `.display()`'
       )
       warn = lambda _: print(msg)
-      res.display = warn.__get__(res)  # pytype: disable=attribute-error
+      res.display = types.MethodType(warn, res)
     return res
 
   def add_display_fn(self, res, split_by, melted):
@@ -2172,19 +2140,17 @@ class MetricWithCI(Operation):
     ctrl_id = None
     condition_col = None
     metric_formats = None
-    if len(self.children) == 1 and isinstance(self.children[0],
-                                              (PercentChange, AbsoluteChange)):
-      change = self.children[0]
+    change = get_comparison_child(self)
+    if change:
       ctrl_id = change.baseline_key
       condition_col = change.extra_index
       if isinstance(self.children[0], PercentChange):
         metric_formats = {'Ratio': 'percent'}
 
-    fn = get_display_fn(self.prefix, split_by, melted, value, condition_col,
-                        ctrl_id, metric_formats)
-    # pylint: disable=no-value-for-parameter
-    res.display = fn.__get__(res)  # pytype: disable=attribute-error
-    # pylint: enable=no-value-for-parameter
+    fn = get_display_fn(
+        self.prefix, split_by, value, condition_col, ctrl_id, metric_formats
+    )
+    res.display = types.MethodType(fn, res)
     return res
 
   def compute_on_sql(
@@ -2288,8 +2254,8 @@ class MetricWithCI(Operation):
     sub_dfs = []
     base = None
     if self.confidence:
-      if len(self.children) == 1 and isinstance(
-          self.children[0], (PercentChange, AbsoluteChange)):
+      change = get_comparison_child(self)
+      if change:
         # The first 3n columns are Value, SE, dof for n Metrics. The
         # last n columns are the base values of Change.
         if len(res.columns) % 4:
@@ -2297,7 +2263,6 @@ class MetricWithCI(Operation):
         n_metrics = len(res.columns) // 4
         base = res.iloc[:, -n_metrics:]
         res = res.iloc[:, :3 * n_metrics]
-        change = self.children[0]
         base.columns = [change.name_tmpl.format(c) for c in base.columns]
         base = utils.melt(base)
         base.columns = ['_base_value']
@@ -2583,10 +2548,8 @@ class MetricWithCI(Operation):
 
     has_base_vals = False
     if self.confidence:
-      child = self.children[0]
-      if len(self.children) == 1 and isinstance(
-          child, (PercentChange, AbsoluteChange)
-      ):
+      child = get_comparison_child(self)
+      if child:
         has_base_vals = True
         base_metric = copy.deepcopy(child.children[0])
         if isinstance(child, (CUPED, PrePostChange)):
@@ -3118,13 +3081,12 @@ class Bootstrap(MetricWithCI):
 
     res = super(MetricWithCI,
                 self).compute_on_sql_sql_mode(table, split_by, execute)
-    sub_dfs = []
     base = None
     if self.confidence is None:
       raise ValueError('confidence is required for percentile Bootstrap')
 
-    if len(self.children) == 1 and isinstance(
-        self.children[0], (PercentChange, AbsoluteChange)):
+    change = get_comparison_child(self)
+    if change:
       # The first 3n columns are Value, CI-lower, CI-upper for n Metrics. The
       # last n columns are the base values of Change.
       if len(res.columns) % 4:
@@ -3132,7 +3094,6 @@ class Bootstrap(MetricWithCI):
       n_metrics = len(res.columns) // 4
       base = res.iloc[:, -n_metrics:]
       res = res.iloc[:, :3 * n_metrics]
-      change = self.children[0]
       base.columns = [change.name_tmpl.format(c) for c in base.columns]
       base = utils.melt(base)
       base.columns = ['_base_value']
@@ -4374,3 +4335,291 @@ def bootstrap_by_unit(metric, table, split_by, global_filter, with_data):
   table = with_data.add(bs_data)
 
   return table, with_data
+
+
+def copy_meterstick_metadata(original_df, new_df):
+  """Copies meterstick metadata attributes from original_df to new_df.
+
+  The metadata attributes include `display` and `meterstick_change_base`,
+  which are used for confidence interval visualization.
+
+  Args:
+    original_df: The DataFrame to copy metadata from.
+    new_df: The DataFrame to copy metadata to.
+
+  Returns:
+    The DataFrame new_df with metadata attributes copied over.
+  """
+  if hasattr(original_df, 'display'):
+    new_df.display = types.MethodType(original_df.display.__func__, new_df)
+  if hasattr(original_df, 'meterstick_change_base'):
+    with warnings.catch_warnings():
+      warnings.simplefilter(action='ignore', category=UserWarning)
+      new_df.meterstick_change_base = original_df.meterstick_change_base
+  return new_df
+
+
+class MetricFunction(Operation):
+  """Base class for applying element-wise functions to Metric results.
+
+  Attributes:
+    func: The function to apply to the result of child Metric.
+    children: A tuple containing the child Metric.
+    name_tmpl: The template to generate the name from child Metric's name.
+  """
+
+  def __init__(self, child, func, name_tmpl, **kwargs):
+    super().__init__(child, name_tmpl, **kwargs)
+    self.func = func
+
+  def compute_on_children(self, children, split_by):
+    new_df = self.func(children)
+    new_df = copy_meterstick_metadata(children, new_df)
+    return new_df
+
+  def manipulate(
+      self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
+  ):
+    new_res = super().manipulate(res, melted, return_dataframe, apply_name_tmpl)
+    new_res = copy_meterstick_metadata(res, new_res)
+    return new_res
+
+  def final_compute(self, res, melted, return_dataframe, split_by, df):
+    new_res = super().final_compute(res, melted, return_dataframe, split_by, df)
+    new_res = copy_meterstick_metadata(res, new_res)
+    return new_res
+
+
+class LogTransform(MetricFunction):
+  """Applies log function (ln or log10) to Metric results.
+
+  Attributes:
+    base: The logarithm base, 'ln' or 'log10'.
+    func: The log function (np.log or np.log10).
+    children: A tuple containing the child Metric.
+    name_tmpl: The template to generate the name from child Metric's name.
+  """
+
+  def __init__(self, child=None, base: str = 'ln', **kwargs):
+    if base not in ('ln', 'log10'):
+      raise ValueError("base must be 'ln' or 'log10'")
+    self.base = base
+    func = np.log if base == 'ln' else np.log10
+    super().__init__(
+        child,
+        func,
+        'Log({})' if base == 'ln' else 'Log10({})',
+        additional_fingerprint_attrs=['base'],
+        **kwargs
+    )
+
+
+class ExponentialPercentTransform(MetricFunction):
+  """Applies exponential and percent transformations to Metric results.
+
+  This is used to convert log-transformed metric differences back to percent
+  change scale, i.e. from y = log(c1/c0) to 100 * (exp(y) - 1).
+  It is typically used to calculate CIs for percent change on log-scale, e.g.,
+  (metrics.Mean('x')
+  | LogTransform()
+  | AbsoluteChange(...)
+  | Jackknife(unit, confidence=0.95)
+  | ExponentialPercentTransform()).
+
+  If it detects that it is wrapping a
+  MetricWithCI(AbsoluteChange(LogTransform(...)))
+  structure, it simplifies metric names in the output and ensures that
+  the baseline values used for CI display are transformed back to
+  the original scale.
+
+  This is a special class for a common use case. It has some anti-patterns
+  about detecting child types. It's not recommended to add similar
+  functionalities unless absolutely necessary.
+
+  Attributes:
+    base: The logarithm base, 'ln' or 'log10', used in inverse transformation.
+    func: The inverse function: 100*(exp(x)-1) for 'ln', 100*(10^x-1) for
+      'log10'.
+    children: A tuple containing the child Metric.
+    name_tmpl: The template to generate the name from child Metric's name.
+  """
+
+  def __init__(self, child=None, base: str = 'ln', **kwargs):
+    """Initializes an ExponentialPercentTransform.
+
+    Args:
+      child: The child Metric to apply exp transform to.
+      base: The logarithm base, 'ln' or 'log10'. Default is 'ln'.
+      **kwargs: other keyword arguments passed to MetricFunction.__init__.
+    """
+    if base not in ('ln', 'log10'):
+      raise ValueError("base must be 'ln' or 'log10'")
+    self.base = base
+    if base == 'ln':
+      func = lambda x: 100 * (np.exp(x) - 1)
+      name_tmpl = '100 * Exp({}) - 1'
+    else:
+      func = lambda x: 100 * (10**x - 1)
+      name_tmpl = '100 * 10^({}) - 1'
+    super().__init__(
+        child,
+        func,
+        name_tmpl,
+        additional_fingerprint_attrs=['base'],
+        **kwargs
+    )
+    self._has_log_transformed_abs_change = (
+        self._check_and_update_for_log_transformed_abs_change()
+    )
+
+  def _check_and_update_for_log_transformed_abs_change(self):
+    """Checks if child is MetricWithCI(AbsoluteChange(LogTransform(...))).
+
+    If the child structure matches, it means we are calculating percentage
+    change confidence intervals on a log scale. In this case, we update
+    name_tmpl on self and LogTransform to avoid nested naming like
+    "100 * Exp(Log(Ratio) Absolute Change) - 1", and instead just use
+    the base metric name. This method has side-effects on the Metric tree of
+    self, but the descendants are deepcopied so the original instance is not
+    affected.
+    This design is generally an anti-pattern. We try to avoid coupling among
+    different modules in Meterstick, for
+    example, checking descendants' types. But this is a special case where we
+    can improve usability of the library for a common use case.
+
+    Returns:
+      True if child structure is matched and updated, False otherwise.
+    """
+    if not self.children:
+      return False
+    ci_method = self.children[0]
+    if not isinstance(ci_method, MetricWithCI):
+      return False
+    if not ci_method.children:
+      return False
+    ab = ci_method.children[0]
+    if not isinstance(ab, AbsoluteChange):
+      return False
+    if not ab.children:
+      return False
+    log_transform = ab.children[0]
+    if (
+        not isinstance(log_transform, LogTransform)
+        or log_transform.base != self.base
+    ):
+      return False
+    # Deepcopy the relevant parts of the tree to avoid modifying the original.
+    ci_method = copy.deepcopy(ci_method)
+    ab = ci_method.children[0]
+    log_transform = ab.children[0]
+
+    log_transform.name_tmpl = '{}'
+    ab.children = tuple([log_transform])
+    self.name_tmpl = '{}'
+    self.children = tuple([ci_method])
+    return True
+
+  def __call__(self, *args, **kwargs):
+    res = super().__call__(*args, **kwargs)
+    res._has_log_transformed_abs_change = (
+        res._check_and_update_for_log_transformed_abs_change()
+    )
+    return res
+
+  def manipulate(
+      self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
+  ):
+    """Transforms base value back to original scale if needed."""
+    new_res = super().manipulate(res, melted, return_dataframe, apply_name_tmpl)
+    if self._has_log_transformed_abs_change and hasattr(
+        res, 'meterstick_change_base'
+    ):
+      with warnings.catch_warnings():
+        warnings.simplefilter(action='ignore', category=UserWarning)
+        if self.base == 'ln':
+          new_res.meterstick_change_base = np.exp(res.meterstick_change_base)
+        else:  # self.base == 'log10'
+          new_res.meterstick_change_base = 10**res.meterstick_change_base
+        # Copy the display function from the original result but update the
+        # default metric_formats for the CI display.
+        orig_display = new_res.display
+        def wrapped_display(*args, **kwargs):
+          sig = inspect.signature(orig_display)
+          bound_args = sig.bind(*args[1:], **kwargs)
+          bound_args.apply_defaults()
+          if bound_args.arguments.get('metric_formats') is None:
+            bound_args.arguments['metric_formats'] = {'Ratio': 'percent'}
+          return orig_display(*bound_args.args, **bound_args.kwargs)
+        new_res.display = types.MethodType(wrapped_display, new_res)
+    return new_res
+
+
+class LogTransformedPercentChangeWithCI(Operation):
+  """A convenient class to compute percent change with CI on log-scale.
+
+  Equivalent to
+  `LogTransform() | AbsoluteChange() | ci_method | ExponentialPercentTransform`.
+  """
+
+  def __init__(
+      self,
+      condition_column: Text,
+      baseline_key,
+      unit: Text,
+      confidence: float,
+      child: Optional[metrics.Metric] = None,
+      ci_method_type: Type[MetricWithCI] = Jackknife,
+      name_tmpl: str = '{}',
+      include_base: bool = False,
+      **kwargs,
+  ):
+    """Initializes a LogTransformedPercentChangeWithCI.
+
+    Args:
+      condition_column: The column that contains the conditions for comparison.
+      baseline_key: The value of the condition that represents the baseline.
+      unit: The column for Jackknife/Bootstrap buckets.
+      confidence: The confidence level for confidence intervals.
+      child: The child Metric to compute on.
+      ci_method_type: The class for CI computation, e.g. Jackknife or
+        Bootstrap.
+      name_tmpl: The template to generate the name from child Metric's name.
+      include_base: Whether to include the baseline in the comparison.
+      **kwargs: other keyword arguments passed to ci_method_type.
+    """
+    self.change = AbsoluteChange(
+        condition_column, baseline_key, include_base=include_base
+    )
+    self.ci_method = ci_method_type(unit, confidence=confidence, **kwargs)
+    super().__init__(
+        child,
+        name_tmpl=name_tmpl,
+        additional_fingerprint_attrs=['change', 'ci_method'],
+    )
+
+  def __call__(self, child: metrics.Metric):
+    op = super().__call__(child)
+    return op
+
+  def _get_equiv(self, child):
+    return (
+        LogTransform(child)
+        | self.change
+        | self.ci_method
+        | ExponentialPercentTransform()
+    )
+
+  def compute_on(
+      self,
+      df,
+      split_by=None,
+      melted=False,
+      return_dataframe=True,
+      cache_key=None,
+      cache=None,
+  ):
+    """Computes CI on log-scale and transform back to percent change."""
+    equiv = self._get_equiv(self.children[0])
+    return equiv.compute_on(
+        df, split_by, melted, return_dataframe, cache_key, cache
+    )
