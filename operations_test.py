@@ -282,7 +282,7 @@ class SimpleOperationTests(absltest.TestCase):
     metric = operations.LogTransform(metrics.Sum('x'), base='ln')
     output = metric.compute_on(self.df)
     expected = pd.DataFrame(
-        {'Log(sum(x))': [np.log(8)]}
+        {'Ln(sum(x))': [np.log(8)]}
     )
     testing.assert_frame_equal(output, expected)
 
@@ -291,6 +291,14 @@ class SimpleOperationTests(absltest.TestCase):
     output = metric.compute_on(self.df)
     expected = pd.DataFrame(
         {'Log10(sum(x))': [np.log10(8)]}
+    )
+    testing.assert_frame_equal(output, expected)
+
+  def test_exponential_transform(self):
+    metric = operations.ExponentialTransform(metrics.Sum('x'))
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame(
+        {'Exp(sum(x))': [np.exp(8)]}
     )
     testing.assert_frame_equal(output, expected)
 
@@ -1605,7 +1613,7 @@ class JackknifeTests(parameterized.TestCase):
     )
 
   @parameterized.product(base=['ln', 'log10'], melted=[True, False])
-  def test_dispplay_log_transformed_percent_change(self, base, melted):
+  def test_display_log_transformed_percent_change(self, base, melted):
     df = pd.DataFrame({
         'x': list(range(8, 13)) + list(range(98, 103)),
         'grp': list('A' * 5 + 'B' * 5),
@@ -1633,7 +1641,7 @@ class JackknifeTests(parameterized.TestCase):
     testing.assert_frame_equal(actual, expected)
 
   @parameterized.product(base=['ln', 'log10'], melted=[True, False])
-  def test_dispplay_log_transformed_percent_change_split_by(self, base, melted):
+  def test_display_log_transformed_percent_change_split_by(self, base, melted):
     df = pd.DataFrame({
         'x': np.random.random(10).round(5),
         'grp': list('A' * 5 + 'B' * 5),
@@ -1663,6 +1671,43 @@ class JackknifeTests(parameterized.TestCase):
     actual = actual[expected.columns]
     actual.index = range(4)
 
+    testing.assert_frame_equal(actual, expected)
+
+  def test_display_log_transformed_percent_change_metric_list(self):
+    df = pd.DataFrame({
+        'x': list(range(8, 13)) + list(range(98, 103)),
+        'grp': list('A' * 5 + 'B' * 5),
+        'unit': list(range(5)) * 2,
+    })
+    metric = metrics.MetricList((metrics.Mean('x'), metrics.Sum('x')))
+    m = (
+        metric
+        | operations.LogTransform()
+        | operations.AbsoluteChange('grp', 'A')
+        | operations.Jackknife('unit', confidence=0.9)
+        | operations.ExponentialPercentTransform()
+    )
+
+    actual = m.compute_on(df)
+    actual = actual.display(return_formatted_df=True)
+    log_pct = operations.LogTransformedPercentChangeWithCI(
+        'grp', 'A', 'unit', 0.9
+    )
+    expected1 = (
+        log_pct(metrics.Mean('x'))
+        .compute_on(df)
+        .display(return_formatted_df=True)
+    )
+    expected2 = (
+        log_pct(metrics.Sum('x'))
+        .compute_on(df)
+        .display(return_formatted_df=True)
+    )
+    expected = (
+        expected1.set_index('Dimensions')
+        .join(expected2.set_index('Dimensions'))
+        .reset_index()
+    )
     testing.assert_frame_equal(actual, expected)
 
   def test_display_log_transformed_percent_change_with_ci(self):
@@ -2809,10 +2854,10 @@ class CommonTest(parameterized.TestCase):
         operations.Bootstrap('x', n_replicates=10),
         operations.Bootstrap('x', confidence=0.9),
         operations.Bootstrap('x', confidence=0.95),
-        operations.LogTransform('x'),
-        operations.LogTransform('x', base='log10'),
-        operations.ExponentialPercentTransform('x'),
-        operations.ExponentialPercentTransform('x', base='log10'),
+        operations.LogTransform(),
+        operations.LogTransform(base='log10'),
+        operations.ExponentialPercentTransform(),
+        operations.ExponentialPercentTransform(base='log10'),
         diversity.HHI('x'),
         diversity.HHI('y'),
         diversity.Entropy('x'),

@@ -131,6 +131,7 @@ BUILT_INS = [
     'Bootstrap',
     'PoissonBootstrap',
     'LogTransform',
+    'ExponentialTransform',
     'ExponentialPercentTransform',
     'LogTransformedPercentChangeWithCI',
     # Diversity Operations

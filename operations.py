@@ -4364,18 +4364,44 @@ class MetricFunction(Operation):
 
   Attributes:
     func: The function to apply to the result of child Metric.
+    sql_func: The function to apply to the result of child Metric in SQL.
     children: A tuple containing the child Metric.
     name_tmpl: The template to generate the name from child Metric's name.
   """
 
-  def __init__(self, child, func, name_tmpl, **kwargs):
+  def __init__(self, child, func, sql_func, name_tmpl, **kwargs):
     super().__init__(child, name_tmpl, **kwargs)
     self.func = func
+    self.sql_func = sql_func
 
   def compute_on_children(self, children, split_by):
     new_df = self.func(children)
     new_df = copy_meterstick_metadata(children, new_df)
     return new_df
+
+  def get_sql_and_with_clause(
+      self, table, split_by, global_filter, indexes, local_filter, with_data
+  ):
+    if not self.sql_func:
+      raise NotImplementedError(
+          f'SQL generation not supported for {type(self)}.'
+      )
+    local_filter = (
+        sql.Filters(self.where_).add(local_filter).remove(global_filter)
+    )
+    child_sql, with_data = self.children[0].get_sql_and_with_clause(
+        table, split_by, global_filter, indexes, local_filter, with_data)
+    columns = sql.Columns()
+    for c in child_sql.all_columns:
+      if c.alias in indexes.aliases:
+        columns.add(c)
+      else:
+        col = sql.Column(c.expression, self.sql_func,
+                         alias=self.name_tmpl.format(c.alias_raw))
+        columns.add(col)
+    child_sql = copy.deepcopy(child_sql)
+    child_sql.columns = columns
+    return child_sql, with_data
 
   def manipulate(
       self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
@@ -4396,20 +4422,39 @@ class LogTransform(MetricFunction):
   Attributes:
     base: The logarithm base, 'ln' or 'log10'.
     func: The log function (np.log or np.log10).
+    sql_func: The log function in SQL (sql.LN_FN or sql.LOG10_FN).
     children: A tuple containing the child Metric.
     name_tmpl: The template to generate the name from child Metric's name.
   """
 
-  def __init__(self, child=None, base: str = 'ln', **kwargs):
+  def __init__(self, child=None, base: str = 'ln', name_tmpl=None, **kwargs):
     if base not in ('ln', 'log10'):
       raise ValueError("base must be 'ln' or 'log10'")
     self.base = base
     func = np.log if base == 'ln' else np.log10
+    sql_func = sql.LN_FN if base == 'ln' else sql.LOG10_FN
+    if name_tmpl is None:
+      name_tmpl = 'Ln({})' if base == 'ln' else 'Log10({})'
     super().__init__(
         child,
         func,
-        'Log({})' if base == 'ln' else 'Log10({})',
+        sql_func,
+        name_tmpl,
         additional_fingerprint_attrs=['base'],
+        **kwargs
+    )
+
+
+class ExponentialTransform(MetricFunction):
+  """Base class for applying exponential transformations to Metric."""
+
+  def __init__(self, child=None, name_tmpl='Exp({})', **kwargs):
+    sql_func = 'EXP({})'
+    super().__init__(
+        child,
+        np.exp,
+        sql_func,
+        name_tmpl,
         **kwargs
     )
 
@@ -4440,16 +4485,19 @@ class ExponentialPercentTransform(MetricFunction):
     base: The logarithm base, 'ln' or 'log10', used in inverse transformation.
     func: The inverse function: 100*(exp(x)-1) for 'ln', 100*(10^x-1) for
       'log10'.
+    sql_func: The inverse function in SQL: 100*(EXP(x)-1) for base='ln',
+      100*(10^x-1) for base='log10'.
     children: A tuple containing the child Metric.
     name_tmpl: The template to generate the name from child Metric's name.
   """
 
-  def __init__(self, child=None, base: str = 'ln', **kwargs):
+  def __init__(self, child=None, base: str = 'ln', name_tmpl=None, **kwargs):
     """Initializes an ExponentialPercentTransform.
 
     Args:
       child: The child Metric to apply exp transform to.
       base: The logarithm base, 'ln' or 'log10'. Default is 'ln'.
+      name_tmpl: The template to generate the name from child Metric's name.
       **kwargs: other keyword arguments passed to MetricFunction.__init__.
     """
     if base not in ('ln', 'log10'):
@@ -4457,13 +4505,16 @@ class ExponentialPercentTransform(MetricFunction):
     self.base = base
     if base == 'ln':
       func = lambda x: 100 * (np.exp(x) - 1)
+      sql_func = '100 * (EXP({}) - 1)'
       name_tmpl = '100 * Exp({}) - 1'
     else:
       func = lambda x: 100 * (10**x - 1)
+      sql_func = '100 * (POWER(10, {}) - 1)'
       name_tmpl = '100 * 10^({}) - 1'
     super().__init__(
         child,
         func,
+        sql_func,
         name_tmpl,
         additional_fingerprint_attrs=['base'],
         **kwargs
@@ -4513,10 +4564,11 @@ class ExponentialPercentTransform(MetricFunction):
     ab = ci_method.children[0]
     log_transform = ab.children[0]
 
-    log_transform.name_tmpl = '{}'
-    ab.children = tuple([log_transform])
     self.name_tmpl = '{}'
-    self.children = tuple([ci_method])
+    log_transform = LogTransform(
+        log_transform.children[0], log_transform.base, name_tmpl='{}'
+    )
+    self.children = tuple([ci_method(ab(log_transform))])
     return True
 
   def __call__(self, *args, **kwargs):
@@ -4609,17 +4661,25 @@ class LogTransformedPercentChangeWithCI(Operation):
         | ExponentialPercentTransform()
     )
 
-  def compute_on(
-      self,
-      df,
-      split_by=None,
-      melted=False,
-      return_dataframe=True,
-      cache_key=None,
-      cache=None,
-  ):
+  def compute_slices(self, df, split_by=None):
     """Computes CI on log-scale and transform back to percent change."""
     equiv = self._get_equiv(self.children[0])
-    return equiv.compute_on(
-        df, split_by, melted, return_dataframe, cache_key, cache
+    return self.compute_util_metric_on(equiv, df, split_by)
+
+  def compute_through_sql(self, table, split_by, execute, mode):
+    equiv = self._get_equiv(self.children[0])
+    return self.compute_util_metric_on_sql(
+        equiv, table, split_by, execute, mode
     )
+
+  def manipulate(
+      self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
+  ):
+    new_res = super().manipulate(res, melted, return_dataframe, apply_name_tmpl)
+    new_res = copy_meterstick_metadata(res, new_res)
+    return new_res
+
+  def final_compute(self, res, melted, return_dataframe, split_by, df):
+    new_res = super().final_compute(res, melted, return_dataframe, split_by, df)
+    new_res = copy_meterstick_metadata(res, new_res)
+    return new_res

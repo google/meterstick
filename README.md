@@ -197,6 +197,36 @@ Built-in standard errors include:
 
 Example Usage: `... | Jackknife('CookieBucket', confidence=.95)`
 
+#### Transformations
+
+Transformations are functions that can be applied to metrics to perform
+element-wise operations on their results.
+
+Currently supported transformations include:
+
++   `ExponentialTransform(metric)`: Applies an exponential transformation to
+    the metric result.
++   `LogTransform(metric, base='ln')`: Applies a logarithmic transformation to
+    the metric result. The `base` can be `ln` or `log10`.
++   `ExponentialPercentTransform(metric, base='ln')`: Computes
+    `100 * (base^metric - 1)`. If `base='log10'`, it computes
+    `100 * (10^metric - 1)`.
+    It's useful for converting log-transformed
+    metrics back to a percent scale. For example, when
+    `PercentChange(.., Sum(x))` is skewed, applying the transformation sequence:
+
+    ```
+    (Sum(x)
+     | LogTransform()
+     | AbsoluteChange(...)
+     | Jackknife(...)
+     | ExponentialPercentTransform())
+    ```
+
+    computes the same percent change, while the confidence interval is
+    calculated in the log-transformed space, which often results in less
+    skewness.
+
 #### Distributions
 
 A **distribution** operation produces the distribution of the metric over

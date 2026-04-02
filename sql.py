@@ -40,6 +40,8 @@ GROUP_BY_FN = None
 RAND_FN = None
 CEIL_FN = None
 SAFE_DIVIDE_FN = None
+LN_FN = None
+LOG10_FN = None
 QUANTILE_FN = None
 ARRAY_AGG_FN = None
 ARRAY_INDEX_FN = None
@@ -448,6 +450,14 @@ SAFE_DIVIDE_OPTIONS = {
     'Default': safe_divide_fn_default,
     'GoogleSQL': 'SAFE_DIVIDE({numer}, {denom})'.format,
 }
+LN_OPTIONS = {
+    'Default': 'LN({})',
+    'SQL Server': 'LOG({})',
+}
+LOG10_OPTIONS = {
+    'Default': 'LOG10({})',
+    'Oracle': 'LOG(10, {})',
+}
 # When make changes, manually evaluate the run_only_once_in_with_clause and
 # update the VOLATILE_RAND_IN_WITH_CLAUSE_OPTIONS.
 RAND_OPTIONS = {
@@ -602,7 +612,7 @@ def set_dialect(dialect: Optional[str]):
   """Sets the dialect of the SQL query."""
   # You can manually override the options below. You can manually test it in
   # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
-  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, SUPPORT_JOIN_WITH_USING, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN, STDDEV_POP_FN, STDDEV_SAMP_FN, VARIANCE_POP_FN, VARIANCE_SAMP_FN, CORR_FN, COVAR_POP_FN, COVAR_SAMP_FN
+  global DIALECT, VOLATILE_RAND_IN_WITH_CLAUSE, CREATE_TEMP_TABLE_FN, SUPPORT_FULL_JOIN, SUPPORT_JOIN_WITH_USING, ROW_NUMBER_REQUIRE_ORDER_BY, GROUP_BY_FN, RAND_FN, CEIL_FN, LN_FN, LOG10_FN, SAFE_DIVIDE_FN, QUANTILE_FN, ARRAY_AGG_FN, ARRAY_INDEX_FN, NTH_VALUE_FN, COUNTIF_FN, STRING_CAST_FN, FLOAT_CAST_FN, UNIFORM_MAPPING_FN, UNNEST_ARRAY_FN, UNNEST_ARRAY_LITERAL_FN, GENERATE_ARRAY_FN, DUPLICATE_DATA_N_TIMES_FN, STDDEV_POP_FN, STDDEV_SAMP_FN, VARIANCE_POP_FN, VARIANCE_SAMP_FN, CORR_FN, COVAR_POP_FN, COVAR_SAMP_FN
   if not dialect:
     return
   if dialect not in BUILTIN_DIALECTS:
@@ -624,6 +634,8 @@ def set_dialect(dialect: Optional[str]):
   GROUP_BY_FN = _get_dialect_option(GROUP_BY_OPTIONS)
   RAND_FN = _get_dialect_option(RAND_OPTIONS)
   CEIL_FN = _get_dialect_option(CEIL_OPTIONS)
+  LN_FN = _get_dialect_option(LN_OPTIONS)
+  LOG10_FN = _get_dialect_option(LOG10_OPTIONS)
   SAFE_DIVIDE_FN = _get_dialect_option(SAFE_DIVIDE_OPTIONS)
   QUANTILE_FN = _get_dialect_option(QUANTILE_OPTIONS)
   ARRAY_AGG_FN = _get_dialect_option(ARRAY_AGG_OPTIONS)
