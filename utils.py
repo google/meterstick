@@ -14,28 +14,57 @@
 """Utils functions for things like DataFrame manipulation."""
 
 from __future__ import absolute_import
+from __future__ import annotations
 from __future__ import division
 from __future__ import print_function
 
+from collections.abc import Iterable
 import copy
 import datetime
 import glob
 import os
-from typing import Iterable, List, Optional, Text, Union
+from typing import Any, TYPE_CHECKING, TypeVar
 
 from meterstick import sql
 import pandas as pd
 
+# Number can also be any type that can do arithmetic operations with numbers,
+# e.g., fractions.Fraction. We use int | float as a representative.
+Number = int | float
 
-def get_name(obj):
+# ReturnType represents the types that can be returned by Metric.compute_on.
+# - pd.DataFrame: standard return type for multi-metric or multi-slice results.
+# - pd.Series: returned when the result is 1D (e.g. single metric with
+#   split_by).
+# - Number: returned when the result is a single scalar.
+# - list[Any]: returned by some internal computations or MetricList when
+#   return_dataframe=False.
+ReturnType = pd.DataFrame | pd.Series | Number | list[Any]
+
+# TableType represents the allowed types for SQL table arguments.
+# - str: a table name.
+# - sql.Datasource: a datasource representation.
+# - sql.Sql: a subquery.
+TableType = str | sql.Datasource | sql.Sql
+StrOrList = str | list[str]
+NumberTypes = (int, float)
+
+T = TypeVar('T', bound=ReturnType)
+
+
+if TYPE_CHECKING:
+  import apache_beam
+
+
+def get_name(obj: Any) -> str:
   return getattr(obj, 'name', str(obj))
 
 
-def is_metric(m):
+def is_metric(m: Any) -> bool:
   return hasattr(m, 'compute_on')
 
 
-def melt(df):
+def melt(df: T) -> T:
   """Stacks the outermost comlumn level to the outermost index level.
 
   Similar to pd.stack(0) except
@@ -76,7 +105,7 @@ def melt(df):
   return remove_empty_level(df)
 
 
-def unmelt(df):
+def unmelt(df: T) -> T:
   """Unstacks the outermost index level to the outermost column level.
 
   Similar to pd.unstack(0) except
@@ -109,16 +138,15 @@ def unmelt(df):
     # It should be removed when future_stack becomes the default in pandas 3.0.
     df = pd.DataFrame(df.stack(0, future_stack=True)).T
   else:
-    df = pd.concat([df.loc[n] for n in names],
-                   axis=1,
-                   keys=names,
-                   names=['Metric'])
+    df = pd.concat(
+        [df.loc[n] for n in names], axis=1, keys=names, names=['Metric']
+    )
   if single_value_col:
     return df.droplevel(1, axis=1)
   return df
 
 
-def remove_empty_level(df):
+def remove_empty_level(df: T) -> T:
   """Drops redundant levels in the index of df."""
   if not isinstance(df, pd.DataFrame) or not isinstance(df.index,
                                                         pd.MultiIndex):
@@ -131,7 +159,11 @@ def remove_empty_level(df):
   return df.droplevel(drop)
 
 
-def apply_name_tmpl(name_tmpl, res, melted=False):
+def apply_name_tmpl(
+    name_tmpl: str | None,
+    res: T,
+    melted: bool = False,
+) -> T:
   """Applies name_tmpl to all columns or pd.Series.name."""
   if not name_tmpl:
     return res
@@ -155,7 +187,9 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
   return res
 
 
-def get_extra_split_by(metric, return_superset=False):
+def get_extra_split_by(
+    metric: Any, return_superset: bool = False
+) -> tuple[str, ...]:
   """Collects the extra split_by added by Operations for the metric tree.
 
   Args:
@@ -183,7 +217,9 @@ def get_extra_split_by(metric, return_superset=False):
   return tuple(extra_split_by)
 
 
-def get_leaf_metrics(metric, include_constants=False):
+def get_leaf_metrics(
+    metric: Any, include_constants: bool = False
+) -> list[Any]:
   leaf = []
   for m in metric.traverse(include_constants=include_constants):
     if not getattr(m, 'children', []):
@@ -191,7 +227,7 @@ def get_leaf_metrics(metric, include_constants=False):
   return leaf
 
 
-def get_global_filter(metric) -> sql.Filters:
+def get_global_filter(metric: Any) -> sql.Filters:
   """Collects the filters that can be applied globally to the Metric tree."""
   global_filter = sql.Filters()
   if metric.where:
@@ -208,7 +244,7 @@ def get_global_filter(metric) -> sql.Filters:
   return global_filter
 
 
-def push_filters_to_leaf(metric, is_root=True):
+def push_filters_to_leaf(metric: Any, is_root: bool = True) -> Any:
   """Returns a Metric that all filters have been pushed to leaf nodes.
 
   Note that the return can differ subtly to the original metric when computing
@@ -293,13 +329,15 @@ class CacheKey:
     fingerprint: The unique identifier of CacheKey. Used to hash.
   """
 
-  def __init__(self,
-               metric,
-               key,
-               where: Optional[Union[Text, Iterable[Text]]] = None,
-               split_by: Optional[Union[Text, List[Text]]] = None,
-               slice_val=None,
-               extra_info=()):
+  def __init__(
+      self,
+      metric: Any,
+      key: Any,
+      where: str | Iterable[str] | None = None,
+      split_by: StrOrList | None = None,
+      slice_val: dict[str, Any] | None = None,
+      extra_info: tuple[Any, ...] = (),
+  ):
     """Wraps cache_key, split_by, filters and slice information.
 
     Args:
@@ -351,23 +389,23 @@ class CacheKey:
         'where': tuple(sorted(tuple(self.where))),
     }
 
-  def add_extra_info(self, extra_info: str):
+  def add_extra_info(self, extra_info: str) -> None:
     self.extra_info = tuple(list(self.extra_info) + [extra_info])
     self.fingerprint['extra_info'] = self.extra_info
 
-  def replace_key(self, key):
+  def replace_key(self, key: Any) -> CacheKey:
     new_key = copy.deepcopy(self)
     new_key.key = key
     new_key.fingerprint['key'] = key
     return new_key
 
-  def replace_metric(self, new_metric):
+  def replace_metric(self, new_metric: Any) -> CacheKey:
     new_key = copy.deepcopy(self)
     new_key.metric = new_metric
     new_key.fingerprint['metric'] = new_metric.get_fingerprint()
     return new_key
 
-  def replace_split_by(self, split_by):
+  def replace_split_by(self, split_by: str | Iterable[str] | None) -> CacheKey:
     split_by = split_by or ()
     split_by = (split_by,) if isinstance(split_by, str) else tuple(split_by)
     new_key = copy.deepcopy(self)
@@ -375,7 +413,7 @@ class CacheKey:
     new_key.fingerprint['split_by'] = split_by
     return new_key
 
-  def replace_where(self, where):
+  def replace_where(self, where: str | Iterable[str] | None) -> CacheKey:
     where = (where,) if isinstance(where, str) else tuple(sorted(where)) or ()
     new_key = copy.deepcopy(self)
     new_key.where = where
@@ -411,8 +449,10 @@ class CacheKey:
 
 
 def adjust_slices_for_loo(
-    bucket_res: pd.Series, split_by: Optional[List[Text]] = None, df=None
-):
+    bucket_res: pd.Series | pd.DataFrame,
+    split_by: list[str] | None,
+    df: pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
   """Corrects the slices in the bucketized result.
 
   Jackknife has a precomputation step where we precompute leave-one-out (LOO)
@@ -465,6 +505,8 @@ def adjust_slices_for_loo(
   operation_lvl = unit_and_operation_lvl[1:]
   split_by_and_unit = indexes[: len(split_by) + 1]
   unit = split_by_and_unit[-1]
+  if df is None:
+    raise ValueError('df cannot be None')
   expected_units = (
       df.groupby(split_by_and_unit, observed=True).first().iloc[:, [0]]
   )
@@ -492,7 +534,9 @@ def adjust_slices_for_loo(
   return bucket_res.reindex(expected_slices, fill_value=0)
 
 
-def get_fully_expanded_equivalent_metric_tree(m, df=None):
+def get_fully_expanded_equivalent_metric_tree(
+    m: Any, df: pd.DataFrame | None = None
+) -> tuple[Any, pd.DataFrame | None]:
   """Gets a Metric that is equivalent to m, and cannot be further expanded.
 
   Some Metrics can be expressed by simpler Metrics like Sum and Count. Sum and
@@ -526,7 +570,9 @@ def get_fully_expanded_equivalent_metric_tree(m, df=None):
   return curr, df
 
 
-def get_equivalent_metric_tree(m, df=None, prefix=''):
+def get_equivalent_metric_tree(
+    m: Any, df: pd.DataFrame | None = None, prefix: str = ''
+) -> Any:
   """Replaces Metrics in the tree of m with equivalent Metrics."""
   if not is_metric(m):
     return m
@@ -542,7 +588,9 @@ def get_equivalent_metric_tree(m, df=None, prefix=''):
   return equiv
 
 
-def get_equivalent_metric(m, df=None, prefix=''):
+def get_equivalent_metric(
+    m: Any, df: pd.DataFrame | None = None, prefix: str = ''
+) -> tuple[Any, pd.DataFrame | None]:
   """Gets the equivalent Metric of m and adds auxiliary columns to df."""
   if df is not None and not prefix:
     prefix = get_unique_prefix(df)
@@ -551,16 +599,18 @@ def get_equivalent_metric(m, df=None, prefix=''):
   return equiv, df
 
 
-def get_unique_prefix(df):
+def get_unique_prefix(df: pd.DataFrame) -> str:
   prefix = 'meterstick_tmp:'
   while any(str(c).startswith(prefix) for c in df.columns):
     prefix += ':'
   return prefix
 
 
-def add_auxiliary_cols(auxiliary_cols,
-                       df: Optional[pd.DataFrame] = None,
-                       prefix: str = ''):
+def add_auxiliary_cols(
+    auxiliary_cols: Iterable[Any],
+    df: pd.DataFrame | None = None,
+    prefix: str = '',
+) -> tuple[pd.DataFrame | None, list[str]]:
   """Parses auxiliary_cols from Metric.get_auxiliary_cols and adds them to df.
 
   Some Metrics can be expressed by simpler Metrics. For example, Dot(x, y) is
@@ -602,7 +652,9 @@ def add_auxiliary_cols(auxiliary_cols,
   return df, auxiliary_col_names
 
 
-def parse_auxiliary_col(auxiliary_col, df: Optional[pd.DataFrame] = None):
+def parse_auxiliary_col(
+    auxiliary_col: Any, df: pd.DataFrame | None = None
+) -> tuple[str, Any]:
   """Parses an auxiliary_col and computes it.
 
   Args:
@@ -653,7 +705,10 @@ def parse_auxiliary_col(auxiliary_col, df: Optional[pd.DataFrame] = None):
 
 
 def pcollection_to_df_via_file_io(
-    pcol, pipeline, output_dir: str, cleanup=False
+    pcol: apache_beam.pvalue.PCollection,
+    pipeline: apache_beam.Pipeline,
+    output_dir: str,
+    cleanup: bool = False,
 ) -> pd.DataFrame:
   """Evaluates a PCollection, saves result, reads back to a DataFrame.
 
