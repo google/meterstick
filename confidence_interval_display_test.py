@@ -101,6 +101,55 @@ class DisplayMetricsTest(absltest.TestCase):
         auto_add_description=False)
     testing.assert_frame_equal(expected, actual, check_names=False)
 
+  def test_get_formatted_df_with_neutral_values(self):
+    expected = pd.DataFrame(
+        {
+            'Country': [
+                '<div>GB</div>',
+                '<div>GB</div>',
+                '<div>US</div>',
+                '<div>US</div>',
+            ],
+            'Experiment_Id': [
+                '<div>expr_foo</div>',
+                '<div>42</div>',
+                '<div>expr_foo</div>',
+                '<div>42</div>',
+            ],
+            'PLA_CONV_CVR': [
+                '<div class="ci-display-cell">0.7870</div>',
+                LINE_BREAK.join((
+                    '<div class="ci-display-cell"><div>0.7700',
+                    '<span class="ci-display-ratio">-1.4000</span>',
+                    (
+                        '<span class="ci-display-ci-range">[-5.0350,'
+                        ' 2.2350]</span></div></div>'
+                    ),
+                )),
+                '<div class="ci-display-cell">0.2160</div>',
+                LINE_BREAK.join((
+                    '<div class="ci-display-cell"><div>0.2220',
+                    '<span class="ci-display-ratio">2.7900</span>',
+                    (
+                        '<span class="ci-display-ci-range">[0.7300,'
+                        ' 4.8500]</span></div></div>'
+                    ),
+                )),
+            ],
+        },
+        columns=['Country', 'Experiment_Id', 'PLA_CONV_CVR'],
+    )
+    actual = confidence_interval_display.get_formatted_df(
+        DF_WITH_DIMENSIONS,
+        dims=['Country'],
+        aggregate_dimensions=False,
+        show_control=True,
+        ctrl_id='expr_foo',
+        auto_add_description=False,
+        neutral_values={'PLA_CONV_CVR': 1.0},
+    )
+    testing.assert_frame_equal(expected, actual, check_names=False)
+
   def test_add_control_rows_on_no_cotrol_rows(self):
     expected = pd.DataFrame({
         'CI_Lower': [5.0, np.nan],
@@ -557,6 +606,39 @@ class DisplayMetricsTest(absltest.TestCase):
     ))
     actual = confidence_interval_display.MetricFormatter(if_flip_color=True)(
         (1.2, -1.1, -1.02, -1.18))
+    self.assertEqual(expected, actual)
+
+  def test_metric_formatter_with_neutral_value_good(self):
+    expected = LINE_BREAK.join((
+        '<div class="ci-display-good-change ci-display-cell"><div>1.2000',
+        '<span class="ci-display-ratio">1.1000</span>',
+        '<span class="ci-display-ci-range">[1.0200, 1.1800]</span></div></div>',
+    ))
+    actual = confidence_interval_display.MetricFormatter(neutral_value=1.0)(
+        (1.2, 1.1, 1.02, 1.18)
+    )
+    self.assertEqual(expected, actual)
+
+  def test_metric_formatter_with_neutral_value_bad(self):
+    expected = LINE_BREAK.join((
+        '<div class="ci-display-bad-change ci-display-cell"><div>1.2000',
+        '<span class="ci-display-ratio">0.9000</span>',
+        '<span class="ci-display-ci-range">[0.8200, 0.9800]</span></div></div>',
+    ))
+    actual = confidence_interval_display.MetricFormatter(neutral_value=1.0)(
+        (1.2, 0.9, 0.82, 0.98)
+    )
+    self.assertEqual(expected, actual)
+
+  def test_metric_formatter_with_neutral_value_neutral(self):
+    expected = LINE_BREAK.join((
+        '<div class="ci-display-cell"><div>1.2000',
+        '<span class="ci-display-ratio">1.0000</span>',
+        '<span class="ci-display-ci-range">[0.9800, 1.0200]</span></div></div>',
+    ))
+    actual = confidence_interval_display.MetricFormatter(neutral_value=1.0)(
+        (1.2, 1.0, 0.98, 1.02)
+    )
     self.assertEqual(expected, actual)
 
   def test_dimension_formatter(self):
