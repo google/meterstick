@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Module to generate SQL scripts for Metrics."""
-
 from __future__ import absolute_import
+from __future__ import annotations
 from __future__ import division
 from __future__ import print_function
 
@@ -22,7 +22,7 @@ from collections import abc
 import copy
 import functools
 import re
-from typing import Any, Iterable, List, Optional, Text, Union
+from typing import Any
 
 
 DEFAULT_DIALECT = 'GoogleSQL'
@@ -63,15 +63,15 @@ COVAR_POP_FN = None
 COVAR_SAMP_FN = None
 
 
-def drop_table_if_exists(alias: str):
+def drop_table_if_exists(alias: str) -> str:
   return f'DROP TABLE IF EXISTS {alias};'
 
 
-def drop_temp_table_if_exists(alias: str):
+def drop_temp_table_if_exists(alias: str) -> str:
   return f'DROP TEMPORARY TABLE IF EXISTS {alias};'
 
 
-def drop_table_if_exists_then_create_temp_table(alias: str, query: str):
+def drop_table_if_exists_then_create_temp_table(alias: str, query: str) -> str:
   """Drops a table if it exists then creates a temporary table."""
   return (
       drop_table_if_exists(alias)
@@ -79,7 +79,9 @@ def drop_table_if_exists_then_create_temp_table(alias: str, query: str):
   )
 
 
-def drop_temp_table_if_exists_then_create_temp_table(alias: str, query: str):
+def drop_temp_table_if_exists_then_create_temp_table(
+    alias: str, query: str
+) -> str:
   """Drops a table if it exists then creates a temporary table."""
   return (
       drop_temp_table_if_exists(alias)
@@ -87,12 +89,12 @@ def drop_temp_table_if_exists_then_create_temp_table(alias: str, query: str):
   )
 
 
-def create_temp_table_fn_not_implemented(alias: str, query: str):
+def create_temp_table_fn_not_implemented(alias: str, query: str) -> Any:
   del alias, query  # Unused
   raise NotImplementedError('CREATE TEMP TABLE is not implemented.')
 
 
-def sql_server_rand_fn_not_implemented():
+def sql_server_rand_fn_not_implemented() -> Any:
   raise NotImplementedError(
       "SQL Server's RAND() without a seed parameter will return the same value"
       " for every row within the same SELECT statement, which doesn't work"
@@ -100,37 +102,37 @@ def sql_server_rand_fn_not_implemented():
   )
 
 
-def safe_divide_fn_default(numer: str, denom: str):
+def safe_divide_fn_default(numer: str, denom: str) -> str:
   return (
       f'CASE WHEN {{denom}} = 0 THEN NULL ELSE {FLOAT_CAST_FN("{numer}")} /'
       f' {FLOAT_CAST_FN("{denom}")} END'.format(numer=numer, denom=denom)
   )
 
 
-def approx_quantiles_fn(percentile):
+def approx_quantiles_fn(percentile: float) -> str:
   p = int(100 * percentile)
   return f'APPROX_QUANTILES({{}}, 100)[SAFE_OFFSET({p})]'
 
 
-def percentile_cont_fn(percentile):
+def percentile_cont_fn(percentile: float) -> str:
   return f'PERCENTILE_CONT({percentile}) WITHIN GROUP (ORDER BY {{}})'
 
 
-def approx_percentile_fn(percentile):
+def approx_percentile_fn(percentile: float) -> str:
   return f'APPROX_PERCENTILE({{}}, {percentile})'
 
 
-def quantile_fn_not_implemented(percentile):
+def quantile_fn_not_implemented(percentile: float) -> Any:
   del percentile  # Unused
   raise NotImplementedError('Quantile is not implemented.')
 
 
 def array_agg_fn_googlesql(
-    sort_by: Optional[str],
-    ascending: Optional[bool],
-    dropna: Optional[bool],
-    limit: Optional[int],
-):
+    sort_by: str | None,
+    ascending: bool | None,
+    dropna: bool | None,
+    limit: int | None,
+) -> str:
   """Uses GoogleSQL's ARRAY_AGG to aggregate arrays."""
   dropna = ' IGNORE NULLS' if dropna else ''
   order_by = f' ORDER BY {sort_by}' if sort_by else ''
@@ -141,11 +143,11 @@ def array_agg_fn_googlesql(
 
 
 def array_agg_fn_no_use_filter_no_limit(
-    sort_by: Optional[str],
-    ascending: Optional[bool],
-    dropna: Optional[bool],
-    limit: Optional[int],
-):
+    sort_by: str | None,
+    ascending: bool | None,
+    dropna: bool | None,
+    limit: int | None,
+) -> str:
   """Uses ARRAY_AGG to aggregate arrays. Use FILTER to filter out NULLs."""
   del limit  # LIMIT is not supported in PostgreSQL so just skip.
   dropna = ' FILTER (WHERE {} IS NOT NULL)' if dropna else ''
@@ -156,11 +158,11 @@ def array_agg_fn_no_use_filter_no_limit(
 
 
 def json_array_agg_fn(
-    sort_by: Optional[str],
-    ascending: Optional[bool],
-    dropna: Optional[bool],
-    limit: Optional[int],
-):
+    sort_by: str | None,
+    ascending: bool | None,
+    dropna: bool | None,
+    limit: int | None,
+) -> str:
   """Uses JSON_ARRAYAGG to aggregate arrays."""
   del limit  # LIMIT is not supported in PostgreSQL so just skip.
   if not dropna:
@@ -172,47 +174,47 @@ def json_array_agg_fn(
 
 
 def array_agg_fn_not_implemented(
-    sort_by: Optional[str],
-    ascending: Optional[bool],
-    dropna: Optional[bool],
-    limit: Optional[int],
-):
+    sort_by: str | None,
+    ascending: bool | None,
+    dropna: bool | None,
+    limit: int | None,
+) -> str:
   del sort_by, ascending, dropna, limit  # Unused
   raise NotImplementedError('ARRAY_AGG is not implemented.')
 
 
-def array_index_safe_offset_fn(array: str, zero_based_idx: int):
+def array_index_safe_offset_fn(array: str, zero_based_idx: int) -> str:
   return f'{array}[SAFE_OFFSET({zero_based_idx})]'
 
 
-def array_subscript_fn(array: str, zero_based_idx: int):
+def array_subscript_fn(array: str, zero_based_idx: int) -> str:
   return f'({array})[{zero_based_idx + 1}]'
 
 
-def element_at_index_fn(array: str, zero_based_idx: int):
+def element_at_index_fn(array: str, zero_based_idx: int) -> str:
   return f'element_at({array}, {zero_based_idx + 1})'
 
 
-def json_extract_fn(array: str, zero_based_idx: int):
+def json_extract_fn(array: str, zero_based_idx: int) -> str:
   return f"JSON_EXTRACT({array}, '$[{zero_based_idx}]')"
 
 
-def json_value_fn(array: str, zero_based_idx: int):
+def json_value_fn(array: str, zero_based_idx: int) -> str:
   return f"JSON_VALUE({array}, '$[{zero_based_idx}]')"
 
 
-def array_index_fn_not_implemented(array: str, zero_based_idx: int):
+def array_index_fn_not_implemented(array: str, zero_based_idx: int) -> str:
   del array, zero_based_idx  # Unused
   raise NotImplementedError('ARRAY_INDEX is not implemented.')
 
 
 def nth_fn_default(
     zero_based_idx: int,
-    sort_by: Optional[str],
-    ascending: Optional[bool],
-    dropna: Optional[bool],
-    limit: Optional[int],
-):
+    sort_by: str | None,
+    ascending: bool | None,
+    dropna: bool | None,
+    limit: int | None,
+) -> str:
   try:
     array = ARRAY_AGG_FN(sort_by, ascending, dropna, limit)
     return ARRAY_INDEX_FN(array, zero_based_idx)
@@ -220,16 +222,16 @@ def nth_fn_default(
     raise NotImplementedError('Nth value is not implemented.') from e
 
 
-def uniform_mapping_fn_not_implemented(_):
+def uniform_mapping_fn_not_implemented(_: Any) -> Any:
   raise NotImplementedError('Uniform mapping is not implemented.')
 
 
 def unnest_array_with_offset_fn(
     array: str,
-    alias: Optional[str] = None,
-    offset: Optional[int] = None,
-    limit: Optional[int] = None,
-):
+    alias: str | None = None,
+    offset: int | None = None,
+    limit: int | None = None,
+) -> str:
   """Unnests an array in GoogleSQL."""
   if alias is None:
     return f'UNNEST({array})'
@@ -241,10 +243,10 @@ def unnest_array_with_offset_fn(
 
 def unnest_array_with_ordinality_fn(
     array: str,
-    alias: Optional[str] = None,
-    offset: Optional[int] = None,
-    limit: Optional[int] = None,
-):
+    alias: str | None = None,
+    offset: int | None = None,
+    limit: int | None = None,
+) -> str:
   """Unnests an array in PostgreSQL."""
   if alias is None:
     return f'UNNEST({array})'
@@ -258,10 +260,10 @@ def unnest_array_with_ordinality_fn(
 
 def unnest_json_array_fn(
     array: str,
-    alias: Optional[str] = None,
-    offset: Optional[int] = None,
-    limit: Optional[int] = None,
-):
+    alias: str | None = None,
+    offset: int | None = None,
+    limit: int | None = None,
+) -> str:
   """Unnests a JSON_ARRAY in Oracle SQL."""
   where = f' WHERE {offset} < {limit + 1}' if limit else ''
   return f'''JSON_TABLE({array}, '$[*]'
@@ -274,38 +276,42 @@ def unnest_json_array_fn(
 
 def unnest_array_fn_not_implemented(
     array: str,
-    alias: Optional[str] = None,
-    offset: Optional[int] = None,
-    limit: Optional[int] = None,
-):
+    alias: str | None = None,
+    offset: int | None = None,
+    limit: int | None = None,
+) -> str:
   del array, alias, offset, limit  # Unused
   raise NotImplementedError('UNNEST is not implemented.')
 
 
-def unnest_array_literal_fn_googlesql(array: List[Any], alias: str = ''):
+def unnest_array_literal_fn_googlesql(array: list[Any], alias: str = '') -> str:
   return f'UNNEST({array}) {alias}'.strip()
 
 
-def unnest_array_literal_fn_postgresql(array: List[Any], alias: str = ''):
+def unnest_array_literal_fn_postgresql(
+    array: list[Any], alias: str = ''
+) -> str:
   return f'UNNEST(ARRAY{array}) {alias}'.strip()
 
 
-def unnest_array_literal_fn_not_implemented(array, alias=''):
+def unnest_array_literal_fn_not_implemented(
+    array: list[Any], alias: str = ''
+) -> str:
   del array, alias  # Unused
   raise NotImplementedError('UNNEST with literal array is not implemented.')
 
 
-def generate_array_fn(n):
+def generate_array_fn(n: int) -> str:
   """Generates an array of n elements using GENERATE_ARRAY."""
   return f'GENERATE_ARRAY(1, {n})'
 
 
-def generate_series_fn(n):
+def generate_series_fn(n: int) -> str:
   """Generates an array of n elements using GENERATE_SERIES."""
   return f'GENERATE_SERIES(1, {n})'
 
 
-def generate_sequence_fn_mariadb(n):
+def generate_sequence_fn_mariadb(n: int) -> str:
   """Generates an array of n elements using sequence in MariaDB."""
   try:
     n = int(n)
@@ -321,7 +327,7 @@ def generate_sequence_fn_mariadb(n):
     ) from e
 
 
-def generate_array_fn_oracle(n, alias: str = '_'):
+def generate_array_fn_oracle(n: int, alias: str = '_') -> str:
   """Generates an array of n elements using sequence in Oracle."""
   try:
     return f'SELECT LEVEL AS {alias} FROM DUAL CONNECT BY LEVEL <= {int(n)}'
@@ -331,75 +337,83 @@ def generate_array_fn_oracle(n, alias: str = '_'):
     ) from e
 
 
-def generate_sequence_fn_trino(n):
+def generate_sequence_fn_trino(n: int) -> str:
   """Generates an array of n elements using sequence in Trino."""
   return f'SEQUENCE(1, {n})'
 
 
-def generate_array_fn_not_implemented(n):
+def generate_array_fn_not_implemented(n: int) -> Any:
   del n  # Unused
   raise NotImplementedError(
       'GENERATE_ARRAY/GENERATE_SERIES is not implemented.'
   )
 
 
-def unnest_generated_array(n, alias: Optional[str] = None):
+def unnest_generated_array(n: int, alias: str | None = None) -> str:
   """Unnest a generated array, used to duplicate data."""
   return UNNEST_ARRAY_FN(GENERATE_ARRAY_FN(n), alias)
 
 
-def implicitly_unnest_generated_array(n, alias: Optional[str] = None):
+def implicitly_unnest_generated_array(
+    n: int, alias: str | None = None
+) -> str:
   """Unnest a generated series, used to duplicate data."""
   if not alias:
     return GENERATE_ARRAY_FN(n)
   return f'{GENERATE_ARRAY_FN(n)} {alias}'
 
 
-def implicitly_unnest_generated_sequence(n, alias: Optional[str] = None):
+def implicitly_unnest_generated_sequence(
+    n: int, alias: str | None = None
+) -> str:
   """Unnest a generated series, used to duplicate data."""
   if not alias:
     return GENERATE_ARRAY_FN(n)
   return f'(SELECT seq AS {alias} FROM {GENERATE_ARRAY_FN(n)}) unnested'
 
 
-def duplicate_data_n_times_oracle(n, alias: Optional[str] = None):
+def duplicate_data_n_times_oracle(
+    n: int, alias: str | None = None
+) -> str:
   if not alias:
     return generate_array_fn_oracle(n)
   return generate_array_fn_oracle(n, alias)
 
 
-def duplicate_data_n_times_not_implemented(n, alias: Optional[str] = None):
+def duplicate_data_n_times_not_implemented(
+    n: int, alias: str | None = None
+) -> Any:
   del n, alias  # Unused
   raise NotImplementedError(
       'Duplicate data n times is not implemented.'
   )
 
 
-def stddev_pop_not_implemented():
+def stddev_pop_not_implemented() -> Any:
   raise NotImplementedError('STDDEV_POP is not implemented.')
 
 
-def stddev_samp_not_implemented():
+def stddev_samp_not_implemented() -> Any:
   raise NotImplementedError('STDDEV_SAMP is not implemented.')
 
 
-def variance_pop_not_implemented():
+def variance_pop_not_implemented() -> Any:
   raise NotImplementedError('VARIANCE_POP is not implemented.')
 
 
-def variance_samp_not_implemented():
+def variance_samp_not_implemented() -> Any:
   raise NotImplementedError('VARIANCE_SAMP is not implemented.')
 
 
-def corr_not_implemented():
+def corr_not_implemented() -> Any:
   raise NotImplementedError('CORR is not implemented.')
 
 
-def covar_pop_not_implemented():
+def covar_pop_not_implemented() -> Any:
   raise NotImplementedError('COVAR_POP is not implemented.')
 
 
-def covar_samp_not_implemented():
+def covar_samp_not_implemented() -> Any:
   raise NotImplementedError('COVAR_SAMP is not implemented.')
 
 
@@ -608,7 +622,7 @@ COVAR_SAMP_OPTIONS = {
 }
 
 
-def set_dialect(dialect: Optional[str]):
+def set_dialect(dialect: str | None) -> None:
   """Sets the dialect of the SQL query."""
   # You can manually override the options below. You can manually test it in
   # https://colab.research.google.com/drive/1y3UigzEby1anMM3-vXocBx7V8LVblIAp?usp=sharing.
@@ -660,14 +674,14 @@ def set_dialect(dialect: Optional[str]):
   COVAR_SAMP_FN = _get_dialect_option(COVAR_SAMP_OPTIONS)
 
 
-def _get_dialect_option(options: dict[str, Any]):
+def _get_dialect_option(options: dict[str, Any]) -> Any:
   return options.get(DIALECT, options['Default'])
 
 
 set_dialect(DEFAULT_DIALECT)
 
 
-def is_compatible(sql0, sql1):
+def is_compatible(sql0: 'Sql', sql1: 'Sql') -> bool:
   """Checks if two datasources are compatible so their columns can be merged.
 
   Being compatible means datasources
@@ -695,7 +709,7 @@ def is_compatible(sql0, sql1):
   )
 
 
-def add_suffix(alias):
+def add_suffix(alias: str) -> str:
   """Adds an int suffix to alias."""
   alias = alias.strip('`')
   m = re.search(r'([0-9]+)$', alias)
@@ -707,7 +721,7 @@ def add_suffix(alias):
     return alias + '_1'
 
 
-def rand_run_only_once_in_with_clause(execute):
+def rand_run_only_once_in_with_clause(execute: abc.Callable[..., Any]) -> bool:
   """Check if the RAND() is only evaluated once in the WITH clause."""
   d = execute(
       f'''WITH T AS (SELECT {RAND_FN()} AS r)
@@ -717,7 +731,7 @@ def rand_run_only_once_in_with_clause(execute):
   return bool(d.iloc[0, 0] == 0)
 
 
-def dep_on_rand_table(query, rand_tables):
+def dep_on_rand_table(query: Any, rand_tables: abc.Iterable[str]) -> bool:
   """Returns if a SQL query depends on any stochastic table in rand_tables."""
   for rand_table in rand_tables:
     if re.search(r'\b%s\b' % rand_table, str(query)):
@@ -725,7 +739,7 @@ def dep_on_rand_table(query, rand_tables):
   return False
 
 
-def get_temp_tables(with_data: 'Datasources'):
+def get_temp_tables(with_data: 'Datasources') -> set[str]:
   """Gets all the subquery tables that need to be materialized.
 
   When generating the query, we assume that volatile functions like RAND() in
@@ -781,11 +795,11 @@ def get_temp_tables(with_data: 'Datasources'):
   return tmp_tables
 
 
-def get_alias(c):
+def get_alias(c: Any) -> str:
   return getattr(c, 'alias_raw', c)
 
 
-def escape_alias(alias):
+def escape_alias(alias: str) -> str:
   """Replaces special characters in SQL column name alias."""
   special = set(r""" `~!@#$%^&*()-=+[]{}\|;:'",.<>/?""")
   if not alias or not special.intersection(alias):
@@ -820,46 +834,46 @@ def escape_alias(alias):
 class SqlComponent:
   """Base class for a SQL component like column, tabel and filter."""
 
-  def __eq__(self, other):
+  def __eq__(self, other: Any) -> bool:
     return str(self) == str(other)
 
-  def __lt__(self, other):
+  def __lt__(self, other: Any) -> bool:
     return str(self) < other
 
-  def __repr__(self):
+  def __repr__(self) -> str:
     return str(self)
 
-  def __hash__(self):
+  def __hash__(self) -> int:
     return hash(str(self))
 
-  def __bool__(self):
+  def __bool__(self) -> bool:
     return bool(str(self))
 
-  def __nonzero__(self):
+  def __nonzero__(self) -> bool:
     return bool(str(self))
 
-  def __add__(self, other):
+  def __add__(self, other: str) -> str:
     return str.__add__(str(self), other)
 
-  def __mul__(self, other):
+  def __mul__(self, other: int) -> str:
     return str.__mul__(str(self), other)
 
-  def __rmul__(self, other):
+  def __rmul__(self, other: int) -> str:
     return str.__rmul__(str(self), other)
 
-  def __getitem__(self, idx):
+  def __getitem__(self, idx: Any) -> str:
     return str(self)[idx]
 
 
 class SqlComponents(SqlComponent):
   """Base class for a bunch of SQL components like columns and filters."""
 
-  def __init__(self, children=None):
+  def __init__(self, children: Any | None = None) -> None:
     super(SqlComponents, self).__init__()
     self.children = []
     self.add(children)
 
-  def add(self, children):
+  def add(self, children: Any) -> 'SqlComponents':
     if not isinstance(children, str) and isinstance(children, abc.Iterable):
       for c in list(children):
         self.add(c)
@@ -868,24 +882,24 @@ class SqlComponents(SqlComponent):
         self.children.append(children)
     return self
 
-  def __iter__(self):
+  def __iter__(self) -> abc.Iterable[Any]:
     for c in self.children:
       yield c
 
-  def __len__(self):
+  def __len__(self) -> int:
     return len(self.children)
 
-  def __getitem__(self, key):
+  def __getitem__(self, key: Any) -> Any:
     return self.children[key]
 
-  def __setitem__(self, key, value):
+  def __setitem__(self, key: Any, value: Any) -> None:
     self.children[key] = value
 
 
 class Filter(SqlComponent):
   """Represents single condition in SQL WHERE clause."""
 
-  def __init__(self, cond: Optional[Text]):
+  def __init__(self, cond: str | None) -> None:
     super(Filter, self).__init__()
     self.cond = ''
     if isinstance(cond, Filter):
@@ -893,7 +907,7 @@ class Filter(SqlComponent):
     elif cond:
       self.cond = cond.replace('==', '=') or ''
 
-  def __str__(self):
+  def __str__(self) -> str:
     if not self.cond:
       return ''
     return '(%s)' % self.cond if ' OR ' in self.cond.upper() else self.cond
@@ -903,16 +917,16 @@ class Filters(SqlComponents):
   """Represents a bunch of SQL conditions."""
 
   @property
-  def where(self):
+  def where(self) -> list[str]:
     return sorted((str(Filter(f)) for f in self.children))
 
-  def remove(self, filters):
+  def remove(self, filters: Any) -> 'Filters':
     if not filters:
       return self
     self.children = [c for c in self.children if c not in Filters(filters)]
     return self
 
-  def __str__(self):
+  def __str__(self) -> str:
     return ' AND '.join(self.where)
 
 
@@ -955,14 +969,14 @@ class Column(SqlComponent):
   def __init__(
       self,
       column,
-      fn: Text = '{}',
-      alias: Optional[Text] = None,
+      fn: str = '{}',
+      alias: str | None = None,
       filters=None,
       partition=None,
       order=None,
       window_frame=None,
       auto_alias=True,
-  ):
+  ) -> None:
     super(Column, self).__init__()
     self.column = [column] if isinstance(column, str) else column or []
     self.fn = fn
@@ -980,26 +994,26 @@ class Column(SqlComponent):
     self.suffix = 0
 
   @property
-  def alias(self):
+  def alias(self) -> str:
     a = self.alias_raw
     if self.suffix:
       a = '%s_%s' % (a, self.suffix)
     return escape_alias(a)
 
   @alias.setter
-  def alias(self, alias):
+  def alias(self, alias: str) -> None:
     self.alias_raw = alias.strip('`')
 
-  def set_alias(self, alias):
+  def set_alias(self, alias: str) -> 'Column':
     self.alias = alias
     return self
 
-  def add_suffix(self):
+  def add_suffix(self) -> str:
     self.suffix += 1
     return self.alias
 
   @property
-  def expression(self):
+  def expression(self) -> str:
     """Genereates the representation without the 'AS ...' part."""
     over = None
     if not (self.partition is None and self.order is None and
@@ -1028,7 +1042,7 @@ class Column(SqlComponent):
     res = self.fn.format(*column)
     return res + over if over else res
 
-  def __str__(self):
+  def __str__(self) -> str:
     if not self.expression:
       return ''
     res = self.expression
@@ -1036,42 +1050,42 @@ class Column(SqlComponent):
       return res
     return '%s AS %s' % (res, self.alias)
 
-  def __add__(self, other):
+  def __add__(self, other: Any) -> 'Column':
     return Column(
         '{} + {}'.format(*add_parenthesis_if_needed(self, other)),
         alias='%s + %s' % (self.alias_raw, get_alias(other)))
 
-  def __radd__(self, other):
+  def __radd__(self, other: Any) -> 'Column':
     alias = '%s + %s' % (get_alias(other), self.alias_raw)
     return Column(
         '{} + {}'.format(*add_parenthesis_if_needed(other, self)), alias=alias)
 
-  def __sub__(self, other):
+  def __sub__(self, other: Any) -> 'Column':
     return Column(
         '{} - {}'.format(*add_parenthesis_if_needed(self, other)),
         alias='%s - %s' % (self.alias_raw, get_alias(other)))
 
-  def __rsub__(self, other):
+  def __rsub__(self, other: Any) -> 'Column':
     alias = '%s - %s' % (get_alias(other), self.alias_raw)
     return Column(
         '{} - {}'.format(*add_parenthesis_if_needed(other, self)), alias=alias)
 
-  def __mul__(self, other):
+  def __mul__(self, other: Any) -> 'Column':
     return Column(
         '{} * {}'.format(*add_parenthesis_if_needed(self, other)),
         alias='%s * %s' % (self.alias_raw, get_alias(other)))
 
-  def __rmul__(self, other):
+  def __rmul__(self, other: Any) -> 'Column':
     alias = '%s * %s' % (get_alias(other), self.alias_raw)
     return Column(
         '{} * {}'.format(*add_parenthesis_if_needed(other, self)), alias=alias)
 
-  def __neg__(self):
+  def __neg__(self) -> 'Column':
     return Column(
         '-{}'.format(*add_parenthesis_if_needed(self)),
         alias='-%s' % self.alias_raw)
 
-  def __div__(self, other):
+  def __div__(self, other: Any) -> 'Column':
     return Column(
         SAFE_DIVIDE_FN(
             numer=self.expression, denom=getattr(other, 'expression', other)
@@ -1079,10 +1093,10 @@ class Column(SqlComponent):
         alias='%s / %s' % (self.alias_raw, get_alias(other)),
     )
 
-  def __truediv__(self, other):
+  def __truediv__(self, other: Any) -> 'Column':
     return self.__div__(other)
 
-  def __rdiv__(self, other):
+  def __rdiv__(self, other: Any) -> 'Column':
     alias = '%s / %s' % (get_alias(other), self.alias_raw)
     return Column(
         SAFE_DIVIDE_FN(
@@ -1091,10 +1105,10 @@ class Column(SqlComponent):
         alias=alias,
     )
 
-  def __rtruediv__(self, other):
+  def __rtruediv__(self, other: Any) -> 'Column':
     return self.__rdiv__(other)
 
-  def __pow__(self, other):
+  def __pow__(self, other: Any) -> 'Column':
     if isinstance(other, float) and other == 0.5:
       return Column(
           'SAFE.SQRT({})'.format(self.expression),
@@ -1104,7 +1118,7 @@ class Column(SqlComponent):
                                     getattr(other, 'expression', other)),
         alias='%s ^ %s' % (self.alias_raw, get_alias(other)))
 
-  def __rpow__(self, other):
+  def __rpow__(self, other: Any) -> 'Column':
     alias = '%s ^ %s' % (get_alias(other), self.alias_raw)
     return Column(
         'SAFE.POWER({}, {})'.format(
@@ -1112,7 +1126,7 @@ class Column(SqlComponent):
         alias=alias)
 
 
-def add_parenthesis_if_needed(*columns):
+def add_parenthesis_if_needed(*columns: Any) -> abc.Iterable[str]:
   for column in columns:
     if not isinstance(column, Column):
       yield column
@@ -1127,7 +1141,9 @@ def add_parenthesis_if_needed(*columns):
 class Columns(SqlComponents):
   """Represents a bunch of SQL columns."""
 
-  def __init__(self, columns=None, distinct=None):  # pylint: disable=super-init-not-called
+  def __init__(
+      self, columns: Any | None = None, distinct: bool | None = None
+  ) -> None:
     super(Columns, self).__init__()
     self.add(columns)
     self.distinct = distinct
@@ -1135,24 +1151,24 @@ class Columns(SqlComponents):
       self.distinct = columns.distinct
 
   @property
-  def aliases(self):
+  def aliases(self) -> list[str]:
     return [c.alias for c in self]
 
   @property
-  def original_columns(self):
+  def original_columns(self) -> list[Any]:
     # Returns the original Column instances added.
     return [c.column[0] for c in self]
 
-  def get_matched_column(self, expression):
+  def get_matched_column(self, expression: str) -> Any | None:
     return next((c for c in self if c.expression == expression), None)
 
-  def get_column(self, alias):
+  def get_column(self, alias: str) -> Any | None:
     res = [c for c in self if c.alias == alias]
     if res:
       return res[0]
     return None
 
-  def add(self, children):
+  def add(self, children: Any) -> 'Columns':
     """Adds a Column if not existing.
 
     Renames it when necessary.
@@ -1192,18 +1208,18 @@ class Columns(SqlComponents):
       children.add_suffix()
       return self.add(children)
 
-  def difference(self, columns):
+  def difference(self, columns: Any) -> 'Columns':
     return Columns((c for c in self if c not in Columns(columns)))
 
   @property
-  def expression(self):
+  def expression(self) -> list[str]:
     return list(map(str, self))
 
   @property
-  def expressions(self):
+  def expressions(self) -> list[str]:
     return [c.expression for c in self]
 
-  def get_columns(self, break_line=False, indent=True):
+  def get_columns(self, break_line: bool = False, indent: bool = True) -> str:
     delimiter = ',\n' if break_line else ', '
     if indent:
       res = delimiter.join(('  %s' % e for e in self.expression))
@@ -1211,17 +1227,19 @@ class Columns(SqlComponents):
     res = delimiter.join(self.expression)
     return 'DISTINCT ' + res if self.distinct else res
 
-  def as_groupby(self):
+  def as_groupby(self) -> str:
     return GROUP_BY_FN(self)
 
-  def __str__(self):
+  def __str__(self) -> str:
     return self.get_columns(True)
 
 
 class Datasource(SqlComponent):
   """Represents a SQL datasource, could be a table name or a SQL query."""
 
-  def __init__(self, table, alias=None):
+  def __init__(
+      self, table: str | SqlComponent, alias: str | None = None
+  ) -> None:
     super(Datasource, self).__init__()
     self.table = table
     self.alias = alias
@@ -1235,7 +1253,7 @@ class Datasource(SqlComponent):
         and 'WITH\n' not in str(self.table).upper()
     )
 
-  def get_expression(self, form='FROM'):
+  def get_expression(self, form: str = 'FROM') -> str:
     """Gets the expression that can be used in a FROM or WITH clause."""
     if form.upper() not in ('FROM', 'WITH'):
       raise ValueError('Unrecognized form for datasource!')
@@ -1248,7 +1266,14 @@ class Datasource(SqlComponent):
     else:
       return str(self)
 
-  def join(self, other, on=None, using=None, join='', alias=None):
+  def join(
+      self,
+      other: str | SqlComponent,
+      on: str | Filter | abc.Iterable[str | Filter] | None = None,
+      using: str | Column | abc.Iterable[str | Column] | None = None,
+      join: str = '',
+      alias: str | None = None,
+  ) -> Join:
     return Join(self, other, on, using, join, alias)
 
   def get_source_prefix(self, col: Column) -> str:
@@ -1256,7 +1281,7 @@ class Datasource(SqlComponent):
       return self.table.get_source_prefix(col)
     return (self.alias or self.table) + '.{c}'
 
-  def __str__(self):
+  def __str__(self) -> str:
     table = self.table if self.is_table else '(%s)' % self.table
     # No "AS" between a table and its alias is supported by more dialects.
     return '%s %s' % (table, self.alias) if self.alias else str(table)
@@ -1265,13 +1290,15 @@ class Datasource(SqlComponent):
 class Join(Datasource):
   """Represents a JOIN of two Datasources."""
 
-  def __init__(self,
-               datasource1,
-               datasource2,
-               on=None,
-               using=None,
-               join='',
-               alias=None):
+  def __init__(
+      self,
+      datasource1: str | SqlComponent,
+      datasource2: str | SqlComponent,
+      on: str | Filter | abc.Iterable[str | Filter] | None = None,
+      using: str | Column | abc.Iterable[str | Column] | None = None,
+      join: str = '',
+      alias: str | None = None,
+  ) -> None:
     if on and using:
       raise ValueError('A JOIN cannot have both ON and USING condition!')
     if join.upper() not in ('', 'INNER', 'FULL', 'FULL OUTER', 'LEFT',
@@ -1326,7 +1353,7 @@ class Join(Datasource):
       return right
     return left
 
-  def __str__(self):
+  def __str__(self) -> str:
     if self.ds1 == self.ds2:
       return str(self.ds1)
     join_type = self.join_type
@@ -1364,17 +1391,17 @@ class Join(Datasource):
 class Datasources(SqlComponents):
   """Represents a bunch of SQL datasources in a WITH clause."""
 
-  def __init__(self, datasources=None):
+  def __init__(self, datasources: Any | None = None) -> None:
     super(Datasources, self).__init__()
     self.children = collections.OrderedDict()
     self.temp_tables = set()
     self.add(datasources)
 
   @property
-  def datasources(self):
+  def datasources(self) -> abc.Iterable[Datasource]:
     return (Datasource(v, k) for k, v in self.children.items())
 
-  def merge(self, new_child: Union[Datasource, 'Datasources', 'Sql']):
+  def merge(self, new_child: Datasource | 'Datasources' | 'Sql') -> str | None:
     """Merges a datasource if possible.
 
     The difference between merge() and add() is that in add() we skip only when
@@ -1430,7 +1457,7 @@ class Datasources(SqlComponents):
     self.children[new_child.alias] = table
     return new_child.alias
 
-  def add(self, children: Union[Datasource, Iterable[Datasource]]):
+  def add(self, children: Datasource | abc.Iterable[Datasource]) -> str | None:
     """Adds a datasource if not existing.
 
     Renames it when necessary.
@@ -1473,7 +1500,9 @@ class Datasources(SqlComponents):
       children.alias = add_suffix(alias)
       return self.add(children)
 
-  def add_temp_table(self, table: Union[str, 'Sql', Join, Datasource]):
+  def add_temp_table(
+      self, table: str | 'Sql' | Join | Datasource
+  ) -> 'Datasources':
     """Marks alias and all its data dependencies as temp tables."""
     if isinstance(table, str):
       self.temp_tables.add(table)
@@ -1490,7 +1519,7 @@ class Datasources(SqlComponents):
       return self.add_temp_table(table.from_data)
     return self
 
-  def extend(self, other: 'Datasources'):
+  def extend(self, other: 'Datasources') -> 'Datasources':
     """Merge other to self. Adjust the query if a new alias is needed."""
     datasources = list(other.datasources)
     while datasources:
@@ -1504,7 +1533,7 @@ class Datasources(SqlComponents):
                               str(d2.table))
     return self
 
-  def __str__(self):
+  def __str__(self) -> str:
     temp_tables = []
     with_tables = []
     for d in self.datasources:
@@ -1526,12 +1555,12 @@ class Sql(SqlComponent):
   def __init__(
       self,
       columns,
-      from_data: Union[str, 'Sql', Datasource],
+      from_data: str | 'Sql' | Datasource,
       where=None,
       groupby=None,
       with_data=None,
       orderby=None,
-  ):
+  ) -> None:
     super(Sql, self).__init__()
     self.columns = Columns(columns)
     self.where = Filters(where)
@@ -1563,7 +1592,7 @@ class Sql(SqlComponent):
         self.from_data = from_data_table.from_data
 
   @property
-  def all_columns(self):
+  def all_columns(self) -> Columns:
     """Returns all columns in the SELECT clause."""
     cols = Columns(self.groupby).add(self.columns)
     if (
@@ -1583,11 +1612,11 @@ class Sql(SqlComponent):
       res.append(c)
     return Columns(res)
 
-  def add(self, attr, values):
+  def add(self, attr: str, values: Any) -> 'Sql':
     getattr(self, attr).add(values)
     return self
 
-  def merge(self, other: 'Sql'):
+  def merge(self, other: 'Sql') -> bool:
     """Merges columns from other to self if possible.
 
     If self and other are compatible, we can merge their columns. The columns
@@ -1608,7 +1637,7 @@ class Sql(SqlComponent):
     self.columns.add(other.columns)
     return True
 
-  def __str__(self):
+  def __str__(self) -> str:
     with_clause = str(self.with_data) if self.with_data else None
     all_columns = self.all_columns or '*'
     select_clause = f'SELECT\n{all_columns}'

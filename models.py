@@ -1086,6 +1086,7 @@ class LogisticRegression(Model):
     n_y = n_y.compute_on_sql(
         y, y.groupby.aliases[len(self.group_by):], execute
     )
+    assert isinstance(n_y, pd.DataFrame)
     if (n_y.values != 2).any():
       raise ValueError(
           f'Magic mode only support two classes but got {n_y} distinct y'
