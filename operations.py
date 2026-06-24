@@ -3240,21 +3240,35 @@ class Bootstrap(MetricWithCI):
       grped = df.groupby(grp_by, observed=True)
       idx = grped.indices
       n_units = len(idx)
-      units_df = grped.first().iloc[:, [0]]
+      # Create a DataFrame of unique units to sample from.
+      units_df = pd.DataFrame(index=grped[df.columns[0]].nth(0).index)
+      # Add positions of each unit in the df to use .iloc later. This is faster
+      # than using .set_index and .loc later.
+      units_df['df_pos'] = [idx[k] for k in units_df.index]
       units_grped = self.group(units_df, split_by)
       use_cache = np.log(self.n_replicates) / n_units > np.log(n_units)
       sampled = set()
       for _ in range(self.n_replicates):
-        resampled = units_grped.sample(frac=1, replace=True).index
+        resampled_df = units_grped.sample(frac=1, replace=True)
         if use_cache:
-          cache_key = tuple(resampled)
+          cache_key = tuple(resampled_df.index)
           if cache_key in sampled:
             yield cache_key, None
           else:
             sampled.add(cache_key)
-            yield cache_key, df.loc[resampled].reset_index()
+            sampled_rows = (
+                np.concatenate(resampled_df['df_pos'].values)
+                if not resampled_df.empty
+                else []
+            )
+            yield cache_key, df.iloc[sampled_rows].reset_index()
         else:
-          yield None, df.loc[resampled].reset_index()
+          sampled_rows = (
+              np.concatenate(resampled_df['df_pos'].values)
+              if not resampled_df.empty
+              else []
+          )
+          yield None, df.iloc[sampled_rows].reset_index()
 
   def compute_children_sql(
       self, table, split_by, execute, mode=None, batch_size=None
