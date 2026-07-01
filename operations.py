@@ -855,7 +855,7 @@ class PrePostChange(PercentChange):
         child = df.iloc[:, :len_child]
         prefix = utils.get_unique_prefix(child)
         df.columns = list(child.columns) + [
-            prefix + c for c in df.columns[len_child:]
+            f'{prefix}{i}_{c}' for i, c in enumerate(df.columns[len_child:])
         ]
         covariate = df.iloc[:, len_child:]
         if len(covariate.columns) > 1:
@@ -1193,7 +1193,7 @@ class CUPED(AbsoluteChange):
         child = df.iloc[:, :len_child]
         prefix = utils.get_unique_prefix(child)
         df.columns = list(child.columns) + [
-            prefix + c for c in df.columns[len_child:]
+            f'{prefix}{i}_{c}' for i, c in enumerate(df.columns[len_child:])
         ]
         covariate = df.iloc[:, len_child:]
         if len(covariate.columns) > 1:
