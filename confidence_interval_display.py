@@ -21,7 +21,7 @@ from IPython.display import display
 from IPython.display import HTML
 import pandas as pd
 import six
-from six.moves import range
+from six.moves import range  # pyrefly: ignore[missing-source-for-stubs]
 
 
 CSS = '''
@@ -130,7 +130,7 @@ def _sorted_long_to_wide(df, dims, sort_by):
       'Control_Id', 'Is_Control', 'Experiment_Id', 'Description'
   ]
   existing_index_cols = [x for x in default_dims if x in df]
-  if 'Control_Id' in df and all(pd.isnull(df.Control_Id)):
+  if 'Control_Id' in df and all(pd.isnull(df.Control_Id)):  # pyrefly: ignore[bad-argument-type]
     # All None column makes pivot_table fail.
     df.drop(columns=['Control_Id'], inplace=True)
     existing_index_cols = [c for c in existing_index_cols if c != 'Control_Id']
@@ -513,7 +513,7 @@ def add_control_rows(df, dims):
   if valid_ctrl.shape[0]:
     new_ctrl_rows = curr_ctrl_rows.merge(
         valid_ctrl, 'outer', ['Experiment_Id', 'Control_Id', 'Metric'] + dims)
-  new_ctrl_rows['Value'] = new_ctrl_rows['Value'].fillna(new_ctrl_rows['min'])
+  new_ctrl_rows['Value'] = new_ctrl_rows['Value'].fillna(new_ctrl_rows['min'])  # pyrefly: ignore[unbound-name]
   new_ctrl_rows.drop(columns='min', inplace=True)
   new_ctrl_rows['Is_Control'] = True
   if 'Description' in df:
