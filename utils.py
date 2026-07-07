@@ -314,7 +314,7 @@ class CacheKey:
     self.metric = copy.deepcopy(metric)
     # `where` accumulates the filters so far and already includes metric.where.
     self.metric.where = None
-    split_by = (split_by,) if isinstance(split_by, str) else split_by or ()
+    split_by = (split_by,) if isinstance(split_by, str) else split_by or ()  # pyrefly: ignore[bad-assignment]
     where = [where] if isinstance(where, str) else where or []
     if isinstance(key, CacheKey):
       self.key = key.key
@@ -331,7 +331,7 @@ class CacheKey:
     else:
       self.key = key
       self.where = set(where)
-      self.split_by = tuple(split_by)
+      self.split_by = tuple(split_by)  # pyrefly: ignore[bad-argument-type]
       self.slice_val = slice_val or {}
       self.extra_info = extra_info
     self.slice_val = tuple(sorted(self.slice_val.items()))
@@ -466,7 +466,7 @@ def adjust_slices_for_loo(
   split_by_and_unit = indexes[: len(split_by) + 1]
   unit = split_by_and_unit[-1]
   expected_units = (
-      df.groupby(split_by_and_unit, observed=True).first().iloc[:, [0]]
+      df.groupby(split_by_and_unit, observed=True).first().iloc[:, [0]]  # pyrefly: ignore[missing-attribute]
   )
   if not operation_lvl:
     return bucket_res.reindex(expected_units.index, fill_value=0)
@@ -649,7 +649,7 @@ def parse_auxiliary_col(auxiliary_col, df: Optional[pd.DataFrame] = None):
   elif fn == '**':
     name = 'POWER(%s, %s)' % (name0, name1)
     res = col0**col1 if df is not None else None
-  return name, res
+  return name, res  # pyrefly: ignore[unbound-name]
 
 
 def pcollection_to_df_via_file_io(
@@ -684,4 +684,4 @@ def pcollection_to_df_via_file_io(
     res.append(pd.read_csv(f))
     if cleanup:
       os.remove(f)
-  return pd.concat(res, ignore_index=True)
+  return pd.concat(res, ignore_index=True)  # pyrefly: ignore[bad-return]
