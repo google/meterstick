@@ -859,8 +859,13 @@ class Metric(object):
           'The input must be a PCollection but got %s!' % type(pcol)
       )
 
+    if not execute:
+      from apache_beam.runners.interactive import interactive_beam as ib
+
+      execute = ib.collect
+
     def e(q):
-      label = f'Meterstick at {datetime.datetime.now()} runs {q}'
+      label = f'Running SQL query for {self.name} ({datetime.datetime.now()})'
       res = execute(
           pcol
           | label
