@@ -314,14 +314,19 @@ class CacheKey:
     self.metric = copy.deepcopy(metric)
     # `where` accumulates the filters so far and already includes metric.where.
     self.metric.where = None
-    split_by = (split_by,) if isinstance(split_by, str) else split_by or ()  # pyrefly: ignore[bad-assignment]
+    if isinstance(split_by, str):
+      split_by_seq = (split_by,)
+    elif split_by:
+      split_by_seq = tuple(split_by)
+    else:
+      split_by_seq = ()
     where = [where] if isinstance(where, str) else where or []
     if isinstance(key, CacheKey):
       self.key = key.key
       self.where = key.where.copy()
       if where is not None:
         self.where.update(where)
-      self.split_by = tuple(split_by) if split_by else key.split_by[:]
+      self.split_by = split_by_seq if split_by_seq else tuple(key.split_by)
       self.slice_val = slice_val or {}
       self.extra_info = key.extra_info
       for k, v in key.slice_val:
@@ -331,7 +336,7 @@ class CacheKey:
     else:
       self.key = key
       self.where = set(where)
-      self.split_by = tuple(split_by)  # pyrefly: ignore[bad-argument-type]
+      self.split_by = split_by_seq
       self.slice_val = slice_val or {}
       self.extra_info = extra_info
     self.slice_val = tuple(sorted(self.slice_val.items()))
@@ -411,7 +416,9 @@ class CacheKey:
 
 
 def adjust_slices_for_loo(
-    bucket_res: pd.Series, split_by: Optional[List[Text]] = None, df=None
+    bucket_res: pd.Series,
+    split_by: Optional[List[Text]] = None,
+    df=None,
 ):
   """Corrects the slices in the bucketized result.
 
@@ -460,13 +467,15 @@ def adjust_slices_for_loo(
     A pd.Series that has the same index names as bucket_res, but with some
     levels removed and/or added.
   """
+  assert df is not None
+  split_by = split_by or []
   indexes = bucket_res.index.names
   unit_and_operation_lvl = indexes[len(split_by) :]
   operation_lvl = unit_and_operation_lvl[1:]
   split_by_and_unit = indexes[: len(split_by) + 1]
   unit = split_by_and_unit[-1]
   expected_units = (
-      df.groupby(split_by_and_unit, observed=True).first().iloc[:, [0]]  # pyrefly: ignore[missing-attribute]
+      df.groupby(split_by_and_unit, observed=True).first().iloc[:, [0]]
   )
   if not operation_lvl:
     return bucket_res.reindex(expected_units.index, fill_value=0)
@@ -649,7 +658,9 @@ def parse_auxiliary_col(auxiliary_col, df: Optional[pd.DataFrame] = None):
   elif fn == '**':
     name = 'POWER(%s, %s)' % (name0, name1)
     res = col0**col1 if df is not None else None
-  return name, res  # pyrefly: ignore[unbound-name]
+  else:
+    raise ValueError('Unsupported function/operator: %s' % fn)
+  return name, res
 
 
 def pcollection_to_df_via_file_io(
@@ -684,4 +695,8 @@ def pcollection_to_df_via_file_io(
     res.append(pd.read_csv(f))
     if cleanup:
       os.remove(f)
-  return pd.concat(res, ignore_index=True)  # pyrefly: ignore[bad-return]
+  if not res:
+    return pd.DataFrame()
+  concat_res = pd.concat(res, ignore_index=True)
+  assert isinstance(concat_res, pd.DataFrame)
+  return concat_res

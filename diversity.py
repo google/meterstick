@@ -99,7 +99,8 @@ class HHI(DiversityBase):
           c.alias,
           'SUM(POWER({}, 2))',
       )
-      col.set_alias(self.name_tmpl.format(c.alias_raw))  # pyrefly: ignore[missing-attribute]
+      assert self.name_tmpl is not None
+      col.set_alias(self.name_tmpl.format(c.alias_raw))
       columns.add(col)
     return (
         sql.Sql(columns, child_table_alias, groupby=indexes.aliases),
@@ -140,7 +141,8 @@ class Entropy(DiversityBase):
           (c.alias, c.alias),
           '-SUM({} * LOG({}))',
       )
-      col.set_alias(self.name_tmpl.format(c.alias_raw))  # pyrefly: ignore[missing-attribute]
+      assert self.name_tmpl is not None
+      col.set_alias(self.name_tmpl.format(c.alias_raw))
       columns.add(col)
     return (
         sql.Sql(columns, child_table_alias, groupby=indexes.aliases),
@@ -240,7 +242,8 @@ class TopK(DiversityBase):
           '(SELECT SUM(x) FROM'
           f' {sql.UNNEST_ARRAY_FN(top_k_array_col.alias, "x", "i", self.k)})',
       )
-      top_k_sum_col.set_alias(self.name_tmpl.format(c.alias_raw))  # pyrefly: ignore[missing-attribute]
+      assert self.name_tmpl is not None
+      top_k_sum_col.set_alias(self.name_tmpl.format(c.alias_raw))
       top_k_sum_columns.add(top_k_sum_col)
     top_k_sql = sql.Sql(
         top_k_array_columns, child_table_alias, groupby=indexes.aliases
@@ -343,7 +346,8 @@ class Nxx(DiversityBase):
       nxx_col = sql.Column(
           cumsum_col.alias, sql.COUNTIF_FN('{} < %s' % self.share) + ' + 1'
       )
-      nxx_col.set_alias(self.name_tmpl.format(c.alias_raw))  # pyrefly: ignore[missing-attribute]
+      assert self.name_tmpl is not None
+      nxx_col.set_alias(self.name_tmpl.format(c.alias_raw))
       nxx_cols.add(nxx_col)
     cumsum_sql = sql.Sql(cumsum_cols, child_table_alias)
     cumsum_table = sql.Datasource(cumsum_sql, 'CumulativeDistribution')

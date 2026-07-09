@@ -76,11 +76,15 @@ class Model(operations.Operation):
       raise ValueError(
           'y must be a 1D array but is %iD!' % operations.count_features(y)
       )
-    if isinstance(x, metrics.Metric):
+    if isinstance(x, metrics.MetricList):
+      x = list(x.children)
+    elif isinstance(x, (metrics.Metric, str)):
       x = [x]
+    elif x:
+      x = list(x)
     child = None
     if x and y:
-      child = metrics.MetricList([y] + x)  # pyrefly: ignore[unsupported-operation]
+      child = metrics.MetricList([y] + x)
     self.model = model
     self.model_name = model_name
     additional_fingerprint_attrs = (
@@ -109,16 +113,19 @@ class Model(operations.Operation):
       x_scaled = x - x.mean()
       norms = np.sqrt((x_scaled**2).sum())
       x = x_scaled / norms
-    self.model.fit(x, y)  # pyrefly: ignore[missing-attribute]
-    coef = self.model.coef_  # pyrefly: ignore[missing-attribute]
-    if self.normalize and self.fit_intercept:
-      coef = coef / norms.values  # pyrefly: ignore[unbound-name]
+      self.model.fit(x, y)
+      coef = self.model.coef_
+      coef = coef / norms.values
+    else:
+      self.model.fit(x, y)
+      coef = self.model.coef_
+
     names = list(df.columns[1:])
     if self.fit_intercept:
       if self.normalize:
         intercept = y.mean() - df.iloc[:, 1:].mean().dot(coef)
       else:
-        intercept = self.model.intercept_  # pyrefly: ignore[missing-attribute]
+        intercept = self.model.intercept_
       coef = [intercept] + list(coef)
       names = ['intercept'] + names
     return pd.DataFrame([coef], columns=names)
@@ -150,26 +157,28 @@ class Model(operations.Operation):
 
   @property
   def y(self):
-    if not self.children or not isinstance(
-        self.children[0], metrics.MetricList
-    ):
+    if not self.children:
       raise ValueError('y must be a Metric!')
-    return self.children[0][0]
+    child = self.children[0]
+    if not isinstance(child, metrics.MetricList):
+      raise ValueError('y must be a Metric!')
+    return child.children[0]
 
   @property
   def x(self):
-    if not self.children or not isinstance(
-        self.children[0], metrics.MetricList
-    ):
+    if not self.children:
       raise ValueError('x must be a MetricList!')
-    return metrics.MetricList(self.children[0][1:])
+    child = self.children[0]
+    if not isinstance(child, metrics.MetricList):
+      raise ValueError('x must be a MetricList!')
+    return metrics.MetricList(child.children[1:])
 
   @property
   def k(self):
     return operations.count_features(self.x)
 
   @property
-  def name(self):  # pyrefly: ignore[bad-override]
+  def name(self):
     if self.name_:
       return self.name_
     if not self.children:
@@ -186,7 +195,7 @@ class Model(operations.Operation):
     self.name_ = name
 
   @property
-  def name_tmpl(self):  # pyrefly: ignore[bad-override]
+  def name_tmpl(self):
     if self.name_tmpl_:
       return self.name_tmpl_
     return self.name + ' Coefficient: {}'
@@ -800,6 +809,8 @@ def compute_coef_for_elastic_net(
     sufficient_stats_elements, xs, l1, l2, fit_intercept, tol, max_iter
 ):
   """Computes the coefficients for ElasticNet. Lasso is just a special case."""
+  avg_xs = None
+  avg_y = None
   if fit_intercept:
     sufficient_stats_elements, avg_xs, avg_y = center_x(
         sufficient_stats_elements, len(xs)
@@ -814,7 +825,9 @@ def compute_coef_for_elastic_net(
   columns = list(xs.aliases)
   if fit_intercept:
     # We centered x and y above so the intercept from optimization is not right.
-    coef[0] = (avg_y - avg_xs @ coef[1:]).values[0]  # pyrefly: ignore[unbound-name]
+    assert avg_y is not None
+    assert avg_xs is not None
+    coef[0] = (avg_y - avg_xs @ coef[1:]).values[0]
     columns = ['intercept'] + columns
   return pd.DataFrame([list(coef)], columns=columns)
 
@@ -1034,13 +1047,13 @@ class LogisticRegression(Model):
     self.random_state = random_state
 
   def compute(self, df):
-    self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])  # pyrefly: ignore[missing-attribute]
-    coef = self.model.coef_  # pyrefly: ignore[missing-attribute]
+    self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
+    coef = self.model.coef_
     names = list(df.columns[1:])
     if coef.shape[0] == 1:
       coef = coef[0]
       if self.fit_intercept:
-        intercept = self.model.intercept_  # pyrefly: ignore[missing-attribute]
+        intercept = self.model.intercept_
         intercept = intercept[0]
         coef = [intercept] + list(coef)
         names = ['intercept'] + names
@@ -1048,14 +1061,14 @@ class LogisticRegression(Model):
     else:
       # Multi class
       if self.fit_intercept:
-        coef = np.hstack((self.model.intercept_.reshape(-1, 1), coef))  # pyrefly: ignore[missing-attribute]
+        coef = np.hstack((self.model.intercept_.reshape(-1, 1), coef))
         names = ['intercept'] + names
       res = pd.DataFrame(
           coef.reshape(1, -1),
-          columns=(  # pyrefly: ignore[bad-argument-type]
+          columns=[
               f'{n} for class {c}'
-              for c, n in itertools.product(self.model.classes_, names)  # pyrefly: ignore[missing-attribute]
-          ),
+              for c, n in itertools.product(self.model.classes_, names)
+          ],
       )
       return res
 
@@ -1074,7 +1087,8 @@ class LogisticRegression(Model):
     Returns:
       A pd.DataFrame holding model coefficients.
     """
-    if self.model.class_weight:  # pyrefly: ignore[missing-attribute]
+    sufficient_stats = None
+    if self.model.class_weight:
       raise ValueError("Magic mode doesn't support class_weight!")
     if self.intercept_scaling != 1:
       raise ValueError('intercept_scaling is not supported in magic mode!')
@@ -1250,6 +1264,7 @@ class LogisticRegression(Model):
       l1_ratio = self.l1_ratio if self.l1_ratio is not None else 1
       l1 = l1_ratio / self.c
       l2 = (1 - l1_ratio) / self.c
+      assert sufficient_stats is not None
       res = fista_for_logistic_regression(
           init_guess,
           split_by,
@@ -1259,7 +1274,7 @@ class LogisticRegression(Model):
           conds,
           l1,
           l2,
-          sufficient_stats,  # pyrefly: ignore[unbound-name]
+          sufficient_stats,
           self.fit_intercept,
       )
     else:
