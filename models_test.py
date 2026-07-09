@@ -80,6 +80,23 @@ class ModelsTest(parameterized.TestCase):
         ])
     pd.testing.assert_frame_equal(output, expected)
 
+  def test_multi_var_tuple(self, model, sklearn_model, name):
+    m = model(metrics.Sum('Y'), (metrics.Sum('X1'), metrics.Sum('X2')), 'grp1')
+    output = m.compute_on(DF)
+    model = sklearn_model().fit(GRPED1[['X1', 'X2']], GRPED1[['Y']])
+    expected = pd.DataFrame(
+        [[
+            model.intercept_[0],
+            model.coef_.flatten()[0],
+            model.coef_.flatten()[1]
+        ]],
+        columns=[
+            name + '(sum(Y) ~ sum(X1) + sum(X2)) Coefficient: intercept',
+            name + '(sum(Y) ~ sum(X1) + sum(X2)) Coefficient: sum(X1)',
+            name + '(sum(Y) ~ sum(X1) + sum(X2)) Coefficient: sum(X2)'
+        ])
+    pd.testing.assert_frame_equal(output, expected)
+
   def test_split_by(self, model, sklearn_model, name):
     m = model(metrics.Sum('Y'), metrics.Sum('X1'), 'grp1')
     output = m.compute_on(DF, 'grp2')

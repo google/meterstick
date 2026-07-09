@@ -76,8 +76,12 @@ class Model(operations.Operation):
       raise ValueError(
           'y must be a 1D array but is %iD!' % operations.count_features(y)
       )
-    if isinstance(x, metrics.Metric):
+    if isinstance(x, metrics.MetricList):
+      x = list(x.children)
+    elif isinstance(x, (metrics.Metric, str)):
       x = [x]
+    elif x:
+      x = list(x)
     child = None
     if x and y:
       child = metrics.MetricList([y] + x)  # pyrefly: ignore[unsupported-operation]
