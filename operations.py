@@ -2744,8 +2744,8 @@ class Jackknife(MetricWithCI):
 
     key = cache_key.replace_key(('_RESERVED', 'Jackknife', self.unit))
     if not self.in_cache(key):
-      each_bucket = utils.adjust_slices_for_loo(each_bucket, original_split_by,
-                                                df)
+      each_bucket = utils.adjust_slices_for_loo(each_bucket, df,
+                                                original_split_by)
       loo = total - each_bucket
       if split_by:
         # The levels might get messed up.
@@ -2882,7 +2882,7 @@ class Jackknife(MetricWithCI):
       else:
         total = bucket_res.sum()
       bucket_res = bucket_res.fillna(0)
-      bucket_res = utils.adjust_slices_for_loo(bucket_res, split_by, bucket_res)
+      bucket_res = utils.adjust_slices_for_loo(bucket_res, bucket_res, split_by)
       loo = total - bucket_res
       if all_split_by_no_unit:
         # The levels might get messed up.

@@ -30,7 +30,7 @@ class UtilsTest(absltest.TestCase):
   def test_adjust_slices_for_loo_no_splitby_no_operation_unit_filled(self):
     df = pd.DataFrame({'unit': list('abc'), 'x': range(1, 4)})
     bucket_res = df[df.unit != 'a'].groupby('unit').sum()
-    output = utils.adjust_slices_for_loo(bucket_res, [], df)
+    output = utils.adjust_slices_for_loo(bucket_res, df, [])
     expected = pd.DataFrame({'x': [0, 2, 3]},
                             index=pd.Index(list('abc'), name='unit'))
     testing.assert_frame_equal(output, expected)
@@ -42,7 +42,7 @@ class UtilsTest(absltest.TestCase):
         'x': range(1, 4)
     })
     bucket_res = df[df.unit != 'a'].groupby(['unit', 'grp']).sum()
-    output = utils.adjust_slices_for_loo(bucket_res, [], df)
+    output = utils.adjust_slices_for_loo(bucket_res, df, [])
     expected = pd.DataFrame({'x': [0, 0]},
                             index=pd.MultiIndex.from_tuples(
                                 (('a', 'b'), ('a', 'c')),
@@ -56,7 +56,7 @@ class UtilsTest(absltest.TestCase):
         'x': range(1, 4)
     })
     bucket_res = df[df.grp != 'b'].groupby(['grp', 'unit']).sum()
-    output = utils.adjust_slices_for_loo(bucket_res, ['grp'], df)
+    output = utils.adjust_slices_for_loo(bucket_res, df, ['grp'])
     expected = pd.DataFrame({'x': [1, 0, 0]},
                             index=pd.MultiIndex.from_tuples(
                                 (('a', 'a'), ('b', 'b'), ('b', 'c')),
@@ -71,7 +71,7 @@ class UtilsTest(absltest.TestCase):
         'x': range(1, 7)
     })
     bucket_res = df[df.unit != 1].groupby(['grp', 'unit', 'op']).sum()
-    output = utils.adjust_slices_for_loo(bucket_res, ['grp'], df)
+    output = utils.adjust_slices_for_loo(bucket_res, df, ['grp'])
     expected = pd.DataFrame({'x': [0, 0, 0, 0, 6, 0, 5]},
                             index=pd.MultiIndex.from_tuples(
                                 (
