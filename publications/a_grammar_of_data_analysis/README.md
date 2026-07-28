@@ -47,8 +47,24 @@ done by drawing from the uniform distribution between 0 and 1.
 
 The `Meterstick_example_implementations.ipynb` implements the `Metric`s and
 `Operations` mentioned in the paper, including `Sum`, `Count`, `PercentChange`
-and `Bootstrap`.
+and `Bootstrap`. `meterstick_example_implementations.py` is the Python version
+of this notebook.
 
 The `Meterstick_minimum_wage.ipynb` replicates the minimum wage study.
 
 The `Meterstick_churn_rate.ipynb` analyzes user churn rate on a simulated data.
+
+## Running the Python Script
+
+To run the standalone Python script, install the dependencies listed in
+`requirements.txt`:
+
+```bash
+pip install -r requirements.txt
+```
+
+Then run the script:
+
+```bash
+python3 meterstick_example_implementations.py
+```

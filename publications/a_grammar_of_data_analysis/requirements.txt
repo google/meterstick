@@ -1,0 +1,6 @@
+numpy
+pandas
+attrs
+pandas-gbq
+db-dtypes
+meterstick
