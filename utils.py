@@ -697,4 +697,4 @@ def pcollection_to_df_via_file_io(
   if not res:
     return pd.DataFrame()
   concat_res = pd.concat(res, ignore_index=True)
-  return concat_res
+  return concat_res  # pyrefly: ignore[bad-return]
