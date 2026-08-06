@@ -1012,7 +1012,7 @@ class Metric(object):
     """
     extra_idx = self.extra_index[:]  # pyrefly: ignore[bad-index]
     children_idx = [
-        c.get_extra_idx(return_superset)
+        c.get_extra_idx(return_superset)  # pyrefly: ignore[missing-attribute]
         for c in self.children
         if utils.is_metric(c)
     ]
@@ -1406,7 +1406,7 @@ class MetricList(Metric):
         sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
     children_sql = [
-        c.get_sql_and_with_clause(table, split_by, global_filter, indexes,
+        c.get_sql_and_with_clause(table, split_by, global_filter, indexes,  # pyrefly: ignore[missing-attribute]
                                   local_filter, with_data)[0]
         for c in self.children
     ]
@@ -1653,7 +1653,7 @@ class CompositeMetric(Metric):
 
     if not isinstance(self.children[0], Metric):
       constant = self.children[0]
-      query, with_data = self.children[1].get_sql_and_with_clause(
+      query, with_data = self.children[1].get_sql_and_with_clause(  # pyrefly: ignore[missing-attribute]
           table, split_by, global_filter, indexes, local_filter, with_data)
       query.columns = sql.Columns(
           (c if c in indexes else op(constant, c) for c in query.columns))

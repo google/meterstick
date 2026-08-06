@@ -21,7 +21,7 @@ from IPython.display import display
 from IPython.display import HTML
 import pandas as pd
 import six
-from six.moves import range
+from six.moves import range  # pyrefly: ignore[missing-source-for-stubs]
 
 
 CSS = '''

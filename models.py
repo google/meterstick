@@ -77,7 +77,7 @@ class Model(operations.Operation):
           'y must be a 1D array but is %iD!' % operations.count_features(y)
       )
     if isinstance(x, metrics.MetricList):
-      x = list(x.children)
+      x = list(x.children)  # pyrefly: ignore[bad-assignment]
     elif isinstance(x, (metrics.Metric, str)):
       x = [x]
     elif x:
