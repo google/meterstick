@@ -20,8 +20,6 @@ from __future__ import print_function
 from IPython.display import display
 from IPython.display import HTML
 import pandas as pd
-import six
-from six.moves import range  # pyrefly: ignore[missing-source-for-stubs]
 
 
 CSS = '''
@@ -549,7 +547,7 @@ def _add_is_control_and_control_id(df, ctrl_id):
     return df
 
   ctrl_id_lookup = {}
-  for ctrl, exp_ids in six.iteritems(ctrl_id):
+  for ctrl, exp_ids in ctrl_id.items():
     if not isinstance(exp_ids, list):
       raise ValueError('The experiment id(s) {} is not a list.'.format(exp_ids))
     for e in exp_ids:

@@ -32,10 +32,12 @@ import pandas as pd
 from scipy import stats
 
 
-def count_features(m: metrics.Metric):
+def count_features(m: Any = None):
   """Gets the width of the result of m.compute_on()."""
   if not m:
     return 0
+  if not isinstance(m, metrics.Metric):
+    return 1
   if isinstance(m, metrics.MetricList):
     return sum([count_features(i) for i in m])
   if isinstance(m, MetricWithCI):
@@ -49,11 +51,12 @@ def count_features(m: metrics.Metric):
   if isinstance(m, Operation):
     return count_features(m.child)
   if isinstance(m, metrics.CompositeMetric):
-    return max([count_features(i) for i in m.children])  # pyrefly: ignore[bad-argument-type]
+    return max([count_features(i) for i in m.children])
   if isinstance(m, metrics.Quantile):
     if m.one_quantile:
       return 1
-    return len(m.quantile)  # pyrefly: ignore[bad-argument-type]
+    assert isinstance(m.quantile, (Sequence, np.ndarray))
+    return len(m.quantile)
   return 1
 
 
@@ -121,15 +124,24 @@ class Operation(metrics.Metric):
                **kwargs):
     if name_tmpl and not name:
       name = name_tmpl.format(utils.get_name(child))
-    super(Operation,
-          self).__init__(name, child or (), where, name_tmpl, extra_split_by,  # pyrefly: ignore[bad-argument-type]
-                         extra_index, additional_fingerprint_attrs, **kwargs)
+    super(Operation, self).__init__(
+        name,
+        child or (),
+        where,
+        name_tmpl,
+        extra_split_by,
+        extra_index,
+        additional_fingerprint_attrs,
+        **kwargs,
+    )
     self.precomputable_in_jk_bs = True
     self.is_operation = True
 
   def compute_slices(self, df, split_by: Optional[List[Text]] = None):
     try:
-      children = self.compute_children(df, split_by + self.extra_split_by)  # pyrefly: ignore[unsupported-operation]
+      children = self.compute_children(
+          df, (split_by or []) + list(self.extra_split_by)
+      )
       res = self.compute_on_children(children, split_by)
       if isinstance(res, pd.Series):
         return pd.DataFrame([res], columns=children.columns)
@@ -193,7 +205,7 @@ class Operation(metrics.Metric):
 
   def __call__(self, child: metrics.Metric):
     op = copy.deepcopy(self) if self.child else self
-    op.name = op.name_tmpl.format(utils.get_name(child))  # pyrefly: ignore[missing-attribute]
+    op.name = op.name_tmpl.format(utils.get_name(child))
     op.children = (child,)
     return op
 
@@ -313,7 +325,7 @@ class CumulativeDistribution(Distribution):
         + (additional_fingerprint_attrs or []),
         **kwargs,
     )
-    if order and len(self.extra_index) > 1:  # pyrefly: ignore[bad-argument-type]
+    if order and len(list(self.extra_index)) > 1:
       raise ValueError(
           'Only one column is supported when "order" is specified.'
       )
@@ -326,7 +338,7 @@ class CumulativeDistribution(Distribution):
     )
     if self.order:
       order = self.order if self.ascending else reversed(self.order)
-      level = None if len(dist.index.names) == 1 else self.extra_index[0]  # pyrefly: ignore[bad-index]
+      level = None if len(dist.index.names) == 1 else list(self.extra_index)[0]
       dist = dist.reindex(order, level=level).dropna()
       res = self.group(dist, split_by).cumsum()
     elif not self.sort_by_values:
@@ -440,14 +452,16 @@ class Comparison(Operation):
 
   @property
   def stratified_by(self):
-    return self.extra_split_by[len(self.extra_index):]  # pyrefly: ignore[bad-argument-type, bad-index]
+    return list(self.extra_split_by)[len(list(self.extra_index)) :]
 
   @stratified_by.setter
   def stratified_by(self, stratified_by):
     stratified_by = (
         stratified_by if isinstance(stratified_by, list) else [stratified_by]
     )
-    self.extra_split_by[len(self.extra_index):] = stratified_by  # pyrefly: ignore[bad-argument-type, unsupported-operation]
+    extra_split_by = list(self.extra_split_by)
+    extra_split_by[len(list(self.extra_index)) :] = stratified_by
+    self.extra_split_by = extra_split_by
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -534,7 +548,7 @@ class Comparison(Operation):
     ):
       col = sql.Column(
           sql_template_for_comparison % {'r': r.alias, 'b': b.alias},
-          alias=self.name_tmpl.format(r.alias_raw),  # pyrefly: ignore[missing-attribute]
+          alias=self.name_tmpl.format(r.alias_raw),
       )
       columns.add(col)
     using = indexes.difference(cond_cols)
@@ -593,21 +607,29 @@ class PercentChange(Comparison):
     And all other attributes inherited from Operation.
   """
 
-  def __init__(self,
-               condition_column: Text,
-               baseline_key,
-               child: Optional[metrics.Metric] = None,
-               include_base: bool = False,
-               name_tmpl: Text = '{} Percent Change',
-               **kwargs):
-    super(PercentChange, self).__init__(condition_column, baseline_key, child,
-                                        include_base, name_tmpl, **kwargs)
+  def __init__(
+      self,
+      condition_column: Optional[Union[Text, Sequence[Text]]] = None,
+      baseline_key=None,
+      child: Optional[metrics.Metric] = None,
+      include_base: bool = False,
+      name_tmpl: Text = '{} Percent Change',
+      **kwargs,
+  ):
+    super(PercentChange, self).__init__(
+        condition_column,
+        baseline_key,
+        child,
+        include_base,
+        name_tmpl,
+        **kwargs,
+    )
 
   def compute_on_children(self, children, split_by):
     level = None
     if split_by:
-      level = self.extra_index[0] if len(  # pyrefly: ignore[bad-index]
-          self.extra_index) == 1 else self.extra_index  # pyrefly: ignore[bad-argument-type]
+      extra_index = list(self.extra_index)
+      level = extra_index[0] if len(extra_index) == 1 else extra_index
     # Avoid ZeroDivisionError when input is object dytpe.
     children = children.astype(float)
     res = (children / children.xs(self.baseline_key, level=level) - 1) * 100
@@ -644,21 +666,23 @@ class AbsoluteChange(Comparison):
     And all other attributes inherited from Operation.
   """
 
-  def __init__(self,
-               condition_column: Text,
-               baseline_key,
-               child: Optional[metrics.Metric] = None,
-               include_base: bool = False,
-               name_tmpl: Text = '{} Absolute Change',
-               **kwargs):
+  def __init__(
+      self,
+      condition_column: Optional[Union[Text, Sequence[Text]]] = None,
+      baseline_key=None,
+      child: Optional[metrics.Metric] = None,
+      include_base: bool = False,
+      name_tmpl: Text = '{} Absolute Change',
+      **kwargs,
+  ):
     super(AbsoluteChange, self).__init__(condition_column, baseline_key, child,
                                          include_base, name_tmpl, **kwargs)
 
   def compute_on_children(self, children, split_by):
     level = None
     if split_by:
-      level = self.extra_index[0] if len(  # pyrefly: ignore[bad-index]
-          self.extra_index) == 1 else self.extra_index  # pyrefly: ignore[bad-argument-type]
+      extra_index = list(self.extra_index)
+      level = extra_index[0] if len(extra_index) == 1 else extra_index
     # Don't use "-=". For multiindex it might go wrong. The reason is DataFrame
     # has different implementations for __sub__ and __isub__. ___isub__ tries
     # to reindex to update in place which sometimes lead to lots of NAs.
@@ -733,10 +757,10 @@ class PrePostChange(PercentChange):
                multiple_covariates=True,
                name_tmpl: Text = '{} PrePost Percent Change',
                **kwargs):
-    if isinstance(child, (List, Tuple)):
-      child = metrics.MetricList(child)  # pyrefly: ignore[bad-argument-type]
-    if isinstance(covariates, (List, Tuple)):
-      covariates = metrics.MetricList(covariates)  # pyrefly: ignore[bad-argument-type]
+    if isinstance(child, (list, tuple)):
+      child = metrics.MetricList(list(child))
+    if isinstance(covariates, (list, tuple)):
+      covariates = metrics.MetricList(list(covariates))
     if child and covariates:
       if not multiple_covariates:
         _check_covariates_match_base(child, covariates)
@@ -744,16 +768,22 @@ class PrePostChange(PercentChange):
     else:
       child = None
     self.multiple_covariates = multiple_covariates
-    stratified_by = [stratified_by] if isinstance(stratified_by,
-                                                  str) else stratified_by or []
-    condition_column = [condition_column] if isinstance(
-        condition_column, str) else condition_column
+    stratified_by = (
+        [stratified_by]
+        if isinstance(stratified_by, str)
+        else list(stratified_by or [])
+    )
+    condition_column = (
+        [condition_column]
+        if isinstance(condition_column, str)
+        else list(condition_column or [])
+    )
     additional_fingerprint_attrs = kwargs.pop(
         'additional_fingerprint_attrs', []
     )
     additional_fingerprint_attrs += ['multiple_covariates']
     super(PrePostChange, self).__init__(
-        condition_column + stratified_by,  # pyrefly: ignore[bad-argument-type]
+        condition_column + stratified_by,
         baseline_key,
         child,
         include_base,
@@ -790,8 +820,12 @@ class PrePostChange(PercentChange):
       return super(PrePostChange, self).compute_slices(df, split_by)
     equiv, _ = utils.get_equivalent_metric(self)
     res = self.compute_util_metric_on(equiv, df, split_by)
-    tmpl_len = len(self.name_tmpl.format(''))  # pyrefly: ignore[missing-attribute]
-    res.columns = [c[:-tmpl_len] for c in res.columns]
+    suffix = self.name_tmpl.format('')
+    if suffix:
+      cols = [
+          c[: -len(suffix)] if c.endswith(suffix) else c for c in res.columns
+      ]
+      res = res.set_axis(cols, axis=1)
     return res
 
   def compute_children(
@@ -805,8 +839,11 @@ class PrePostChange(PercentChange):
     if not self.multiple_covariates:
       raise NotImplementedError  # shouldn't be called.
     child, covariates = super(PrePostChange, self).compute_children(
-        df, split_by, return_dataframe=False, cache_key=cache_key)
-    original_split_by = [s for s in split_by if s not in self.extra_split_by]  # pyrefly: ignore[not-iterable]
+        df, split_by, return_dataframe=False, cache_key=cache_key
+    )
+    original_split_by = [
+        s for s in split_by or [] if s not in self.extra_split_by
+    ]
     return self.adjust_value(child, covariates, original_split_by)
 
   def adjust_value(self, child, covariates, split_by):
@@ -889,7 +926,9 @@ class PrePostChange(PercentChange):
         ]
         return pd.DataFrame([adjusted], columns=child_slice.columns)
 
-    return Adjust('').compute_on(aligned, split_by + self.extra_index)
+    return Adjust('').compute_on(
+        aligned, (split_by or []) + list(self.extra_index)
+    )
 
   def compute_through_sql(self, table, split_by, execute, mode):
     if self.multiple_covariates:
@@ -903,7 +942,7 @@ class PrePostChange(PercentChange):
     # The column name got messed up when there is only one base metric because
     # we squeeze the dataframe to a series.
     if len(res.columns) == 1:
-      res.columns = [self.name_tmpl.format(self.child.name)]  # pyrefly: ignore[missing-attribute]
+      res.columns = [self.name_tmpl.format(self.child.name)]
     return res
 
   def compute_children_sql(self, table, split_by, execute, mode=None):
@@ -1048,7 +1087,7 @@ class PrePostChange(PercentChange):
                 self.stratified_by,
                 self.include_base,
                 False,
-                self.name_tmpl,  # pyrefly: ignore[bad-argument-type]
+                self.name_tmpl,
             )
             for b, c in zip(self.child, self.covariates)
         ],
@@ -1100,10 +1139,10 @@ class CUPED(AbsoluteChange):
                multiple_covariates=True,
                name_tmpl: Text = '{} CUPED Change',
                **kwargs):
-    if isinstance(child, (List, Tuple)):
-      child = metrics.MetricList(child)  # pyrefly: ignore[bad-argument-type]
-    if isinstance(covariates, (List, Tuple)):
-      covariates = metrics.MetricList(covariates)  # pyrefly: ignore[bad-argument-type]
+    if isinstance(child, (list, tuple)):
+      child = metrics.MetricList(list(child))
+    if isinstance(covariates, (list, tuple)):
+      covariates = metrics.MetricList(list(covariates))
     if child and covariates:
       if not multiple_covariates:
         _check_covariates_match_base(child, covariates)
@@ -1111,16 +1150,22 @@ class CUPED(AbsoluteChange):
     else:
       child = None
     self.multiple_covariates = multiple_covariates
-    stratified_by = [stratified_by] if isinstance(stratified_by,
-                                                  str) else stratified_by or []
-    condition_column = [condition_column] if isinstance(
-        condition_column, str) else condition_column
+    stratified_by = (
+        [stratified_by]
+        if isinstance(stratified_by, str)
+        else list(stratified_by or [])
+    )
+    condition_column = (
+        [condition_column]
+        if isinstance(condition_column, str)
+        else list(condition_column or [])
+    )
     additional_fingerprint_attrs = kwargs.pop(
         'additional_fingerprint_attrs', []
     )
     additional_fingerprint_attrs += ['multiple_covariates']
     super(CUPED, self).__init__(
-        condition_column + stratified_by,  # pyrefly: ignore[bad-argument-type]
+        condition_column + stratified_by,
         baseline_key,
         child,
         include_base,
@@ -1157,8 +1202,12 @@ class CUPED(AbsoluteChange):
       return super(CUPED, self).compute_slices(df, split_by)
     equiv, _ = utils.get_equivalent_metric(self)
     res = self.compute_util_metric_on(equiv, df, split_by)
-    tmpl_len = len(self.name_tmpl.format(''))  # pyrefly: ignore[missing-attribute]
-    res.columns = [c[:-tmpl_len] for c in res.columns]
+    suffix = self.name_tmpl.format('')
+    if suffix:
+      cols = [
+          c[: -len(suffix)] if c.endswith(suffix) else c for c in res.columns
+      ]
+      res = res.set_axis(cols, axis=1)
     return res
 
   def compute_children(
@@ -1174,7 +1223,9 @@ class CUPED(AbsoluteChange):
     child, covariates = super(CUPED, self).compute_children(
         df, split_by, return_dataframe=False, cache_key=cache_key
     )
-    original_split_by = [s for s in split_by if s not in self.extra_split_by]  # pyrefly: ignore[not-iterable]
+    original_split_by = [
+        s for s in split_by or [] if s not in self.extra_split_by
+    ]
     return self.adjust_value(child, covariates, original_split_by)
 
   def adjust_value(self, child, covariates, split_by):
@@ -1226,7 +1277,9 @@ class CUPED(AbsoluteChange):
         covariate = df.iloc[:, len_child:]
         if len(covariate.columns) > 1:
           return super(Adjust, self).compute_slices(df, split_by)
-        adjusted = df.groupby(split_by + extra_index, observed=True).mean()  # pyrefly: ignore[unsupported-operation]
+        adjusted = df.groupby(
+            (split_by or []) + list(extra_index), observed=True
+        ).mean()
         covariate_col = covariate.columns[0]
         covariate_adjusted = adjusted.iloc[:, -1]
         for c in child:
@@ -1259,7 +1312,7 @@ class CUPED(AbsoluteChange):
     # The column name got messed up when there is only one base metric because
     # we squeeze the dataframe to a series.
     if len(res.columns) == 1:
-      res.columns = [self.name_tmpl.format(self.child.name)]  # pyrefly: ignore[missing-attribute]
+      res.columns = [self.name_tmpl.format(self.child.name)]
     return res
 
   def compute_children_sql(self, table, split_by, execute, mode=None):
@@ -1413,7 +1466,7 @@ class CUPED(AbsoluteChange):
                 self.stratified_by,
                 self.include_base,
                 False,
-                self.name_tmpl,  # pyrefly: ignore[bad-argument-type]
+                self.name_tmpl,
             )
             for b, c in zip(self.child, self.covariates)
         ],
@@ -1490,14 +1543,25 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       children = []
       for m in child.children:
+        assert isinstance(m, metrics.Metric)
         util_metric = metrics.MetricList(
-            [metrics.MetricList(m.children, where=m.where_)], where=child.where_  # pyrefly: ignore[missing-attribute]
+            [
+                metrics.MetricList(
+                    [c for c in m.children if isinstance(c, metrics.Metric)],
+                    where=m.where_,
+                )
+            ],
+            where=child.where_,
         )
         children.append(
             self.compute_util_metric_on(
                 util_metric, df, split_by, cache_key=cache_key))
       return children
-    util_metric = metrics.MetricList(child.children, where=child.where_)  # pyrefly: ignore[missing-attribute]
+    assert isinstance(child, metrics.Metric)
+    util_metric = metrics.MetricList(
+        [c for c in child.children if isinstance(c, metrics.Metric)],
+        where=child.where_,
+    )
     return self.compute_util_metric_on(
         util_metric, df, split_by, cache_key=cache_key)
 
@@ -1513,8 +1577,8 @@ class MH(Comparison):
 
   def compute_mh(self, child, df_all, split_by):
     """Computes MH statistics for one Metric."""
-    level = self.extra_index[0] if len(  # pyrefly: ignore[bad-index]
-        self.extra_index) == 1 else self.extra_index  # pyrefly: ignore[bad-argument-type]
+    extra_index = list(self.extra_index)
+    level = extra_index[0] if len(extra_index) == 1 else extra_index
     df_baseline = df_all.xs(self.baseline_key, level=level)
     suffix = '_base'
     numer = child.children[0].name
@@ -1531,13 +1595,17 @@ class MH(Comparison):
     if to_split:
       split_by = split_by or []
       extra_idx = [i for i in to_split if i not in split_by]
-      res = res.reorder_levels(split_by + self.extra_index + extra_idx)  # pyrefly: ignore[unsupported-operation]
+      res = res.reorder_levels(
+          (split_by or []) + list(self.extra_index) + list(extra_idx)
+      )
 
     if not self.include_base:
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
       res = res[~idx_to_match.isin([self.baseline_key])]
-    return pd.DataFrame(res.sort_index(level=split_by + self.extra_index))
+    return pd.DataFrame(
+        res.sort_index(level=(split_by or []) + list(self.extra_index))
+    )
 
   def compute_children_sql(self, table, split_by=None, execute=None, mode=None):
     child = self.child
@@ -1545,20 +1613,37 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       children = []
       for m in child.children:
+        assert isinstance(m, metrics.Metric)
         util_metric = metrics.MetricList(
-            [metrics.MetricList(m.children, where=m.where_)], where=child.where_  # pyrefly: ignore[missing-attribute]
+            [
+                metrics.MetricList(
+                    [c for c in m.children if isinstance(c, metrics.Metric)],
+                    where=m.where_,
+                )
+            ],
+            where=child.where_,
         )
         c = self.compute_util_metric_on_sql(
             util_metric,
             table,
-            split_by + self.extra_split_by,  # pyrefly: ignore[unsupported-operation]
+            (split_by or []) + list(self.extra_split_by),
             execute,
-            mode=mode)
+            mode=mode,
+        )
         children.append(c)
       return children
-    util_metric = metrics.MetricList(child.children, where=child.where_)  # pyrefly: ignore[missing-attribute]
+    assert isinstance(child, metrics.Metric)
+    util_metric = metrics.MetricList(
+        [c for c in child.children if isinstance(c, metrics.Metric)],
+        where=child.where_,
+    )
     return self.compute_util_metric_on_sql(
-        util_metric, table, split_by + self.extra_split_by, execute, mode=mode)  # pyrefly: ignore[unsupported-operation]
+        util_metric,
+        table,
+        (split_by or []) + list(self.extra_split_by),
+        execute,
+        mode=mode,
+    )
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
                               local_filter, with_data):
@@ -1629,10 +1714,19 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       grandchildren = []
       for m in child:
-        grandchildren.append(metrics.MetricList(m.children, where=m.where_))
+        grandchildren.append(
+            metrics.MetricList(
+                [c for c in m.children if isinstance(c, metrics.Metric)],
+                where=m.where_,
+            )
+        )
       util_metric = metrics.MetricList(grandchildren, where=child.where_)
     else:
-      util_metric = metrics.MetricList(child.children, where=child.where_)  # pyrefly: ignore[missing-attribute]
+      assert isinstance(child, metrics.Metric)
+      util_metric = metrics.MetricList(
+          [c for c in child.children if isinstance(c, metrics.Metric)],
+          where=child.where_,
+      )
 
     cond_cols = sql.Columns(self.extra_index)
     groupby = sql.Columns(split_by).add(self.extra_split_by)
@@ -1678,14 +1772,20 @@ class MH(Comparison):
     if isinstance(child, metrics.MetricList):
       for c in child:
         with_data2 = copy.deepcopy(with_data)
-        util = metrics.MetricList(c.children[:1], where=c.where_)
+        util = metrics.MetricList(
+            [x for x in c.children[:1] if isinstance(x, metrics.Metric)],
+            where=c.where_,
+        )
         numer_sql, with_data2 = util.get_sql_and_with_clause(
             table, groupby, global_filter, util_indexes, local_filter,
             with_data2)
         with_data2.merge(sql.Datasource(numer_sql))
         numer = numer_sql.columns[-1].alias
         with_data2 = copy.deepcopy(with_data)
-        util = metrics.MetricList(c.children[1:], where=c.where_)
+        util = metrics.MetricList(
+            [x for x in c.children[1:] if isinstance(x, metrics.Metric)],
+            where=c.where_,
+        )
         denom_sql, with_data2 = util.get_sql_and_with_clause(
             table, groupby, global_filter, util_indexes, local_filter,
             with_data2)
@@ -1693,30 +1793,38 @@ class MH(Comparison):
         denom = denom_sql.columns[-1].alias
         columns.add(
             sql.Column(
-                col_tmpl % {
-                    'numer': numer,
-                    'denom': denom
-                },
-                alias=alias_tmpl.format(c.name)))  # pyrefly: ignore[missing-attribute]
+                col_tmpl % {'numer': numer, 'denom': denom},
+                alias=alias_tmpl.format(c.name),
+            )
+        )
     else:
+      assert isinstance(child, metrics.Metric)
       with_data2 = copy.deepcopy(with_data)
-      util = metrics.MetricList(child.children[:1], where=child.where_)  # pyrefly: ignore[missing-attribute]
+      util = metrics.MetricList(
+          [x for x in child.children[:1] if isinstance(x, metrics.Metric)],
+          where=child.where_,
+      )
       numer_sql, with_data2 = util.get_sql_and_with_clause(
           table, groupby, global_filter, util_indexes, local_filter, with_data2)
       with_data2.merge(sql.Datasource(numer_sql))
       numer = numer_sql.columns[-1].alias
       with_data2 = copy.deepcopy(with_data)
-      util = metrics.MetricList(child.children[1:], where=child.where_)  # pyrefly: ignore[missing-attribute]
+      util = metrics.MetricList(
+          [x for x in child.children[1:] if isinstance(x, metrics.Metric)],
+          where=child.where_,
+      )
       denom_sql, with_data2 = util.get_sql_and_with_clause(
           table, groupby, global_filter, util_indexes, local_filter, with_data2)
       with_data2.merge(sql.Datasource(denom_sql))
       denom = denom_sql.columns[-1].alias
       columns = sql.Column(
-          col_tmpl % {
+          col_tmpl
+          % {
               'numer': numer,
               'denom': denom,
           },
-          alias=alias_tmpl.format(child.name))  # pyrefly: ignore[missing-attribute]
+          alias=alias_tmpl.format(child.name),
+      )
 
     using = indexes.difference(cond_cols).add(self.stratified_by)
     return (
@@ -1814,8 +1922,8 @@ def get_display_fn(name,
       # base always has the baseline so needs to be at left.
       res = base.join(res)
       comparison_suffix = [
-          AbsoluteChange('', '').name_tmpl.format(''),  # pyrefly: ignore[missing-attribute]
-          PercentChange('', '').name_tmpl.format('')  # pyrefly: ignore[missing-attribute]
+          AbsoluteChange('', '').name_tmpl.format(''),
+          PercentChange('', '').name_tmpl.format(''),
       ]
       comparison_suffix = '(%s)$' % '|'.join(comparison_suffix)
       # Don't use inplace=True. It will change the index of 'base' too.
@@ -2004,10 +2112,10 @@ class MetricWithCI(Operation):
       instead, you can overwrite get_ci_width() to directly store the bounds
       then make this function a no-op.
     """
-    res[self.prefix + ' CI-lower'] = (  # pyrefly: ignore[unsupported-operation]
-        res.iloc[:, 0] - res[self.prefix + ' CI-lower']
+    res[f'{self.prefix} CI-lower'] = (
+        res.iloc[:, 0] - res[f'{self.prefix} CI-lower']
     )
-    res[self.prefix + ' CI-upper'] += res.iloc[:, 0]  # pyrefly: ignore[unsupported-operation]
+    res[f'{self.prefix} CI-upper'] += res.iloc[:, 0]
     return res
 
   def compute_change_base(self,
@@ -2092,7 +2200,7 @@ class MetricWithCI(Operation):
         print(
             'Warning: Failed on%s sample data for reason %s. If you see many '
             'such failures, your data might be too sparse.'
-            % (self.name_tmpl.format(''), repr(e))  # pyrefly: ignore[missing-attribute]
+            % (self.name_tmpl.format(''), repr(e))
         )
     return estimates
 
@@ -2106,9 +2214,9 @@ class MetricWithCI(Operation):
     stderrs, dof = self.get_stderrs(bucket_estimates)
     if self.confidence:
       res = pd.DataFrame(self.get_ci_width(stderrs, dof)).T
-      res.columns = [self.prefix + ' CI-lower', self.prefix + ' CI-upper']  # pyrefly: ignore[unsupported-operation]
+      res.columns = [f'{self.prefix} CI-lower', f'{self.prefix} CI-upper']
     else:
-      res = pd.DataFrame(stderrs, columns=[self.prefix + ' SE'])  # pyrefly: ignore[unsupported-operation]
+      res = pd.DataFrame(stderrs, columns=[f'{self.prefix} SE'])
     res = utils.unmelt(res)
     return res
 
@@ -2120,13 +2228,15 @@ class MetricWithCI(Operation):
   def get_ci_width(self, stderrs, dof):
     """You can return asymmetrical confidence interval."""
     dof = dof.fillna(0).astype(int)  # Scipy might not recognize the Int64 type.
-    half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)  # pyrefly: ignore[unsupported-operation]
+    assert self.confidence is not None
+    half_width = stderrs * stats.t.ppf((1 + self.confidence) / 2, dof)
     return half_width, half_width
 
   def manipulate(
       self, res, melted=False, return_dataframe=True, apply_name_tmpl=None
   ):
     """Saves and restores the base in addition when has confidence."""
+    base = None
     if self.confidence:
       key = self.wrap_cache_key(self.cache_key)
       key.add_extra_info('base')
@@ -2142,7 +2252,7 @@ class MetricWithCI(Operation):
     res = super(MetricWithCI, self).manipulate(
         res, melted, return_dataframe, apply_name_tmpl or False
     )
-    return self.add_base_to_res(res, base) if self.confidence else res  # pyrefly: ignore[unbound-name]
+    return self.add_base_to_res(res, base) if self.confidence else res
 
   def final_compute(self,
                     res,
@@ -2187,7 +2297,7 @@ class MetricWithCI(Operation):
     res.display = types.MethodType(fn, res)
     return res
 
-  def compute_on_sql(  # pyrefly: ignore[bad-override]
+  def compute_on_sql(
       self,
       table,
       split_by=None,
@@ -2196,8 +2306,9 @@ class MetricWithCI(Operation):
       mode=None,
       cache_key=None,
       cache=None,
-      batch_size=None,
       return_dataframe=True,
+      batch_size=None,
+      **kwargs,
   ):
     """Computes self in pure SQL or a mixed of SQL and Python.
 
@@ -2223,9 +2334,10 @@ class MetricWithCI(Operation):
         ..).
       cache: The global cache the whole Metric tree shares. If it's None, we
         initiate an empty dict.
+      return_dataframe: Not used. MetricWithCI always returns a DataFrame.
       batch_size: The number of resamples to compute in one SQL run. It only has
         effect in the 'mixed' mode. It precedes self.batch_size.
-      return_dataframe: Not used. MetricWithCI always returns a DataFrame.
+      **kwargs: Keyword arguments.
 
     Returns:
       A pandas DataFrame. It's the computeation of self in SQL.
@@ -2307,8 +2419,8 @@ class MetricWithCI(Operation):
       # The columns are like metric1, metric1 jackknife SE, metric1 dof, ...
       metric_names = res.columns[::3]
       sub_dfs = []
-      ci_lower = self.prefix + ' CI-lower'  # pyrefly: ignore[unsupported-operation]
-      ci_upper = self.prefix + ' CI-upper'  # pyrefly: ignore[unsupported-operation]
+      ci_lower = f'{self.prefix} CI-lower'
+      ci_upper = f'{self.prefix} CI-upper'
       for i in range(0, len(res.columns), 3):
         pt_est = res.iloc[:, i]
         half_width = self.get_ci_width(res.iloc[:, i + 1], res.iloc[:, i + 2])
@@ -2328,7 +2440,7 @@ class MetricWithCI(Operation):
       metric_names = res.columns[::2]
       for i in range(0, len(res.columns), 2):
         sub_df = res.iloc[:, [i, i + 1]]
-        sub_df.columns = ['Value', self.prefix + ' SE']  # pyrefly: ignore[unsupported-operation]
+        sub_df.columns = ['Value', f'{self.prefix} SE']
         sub_dfs.append(sub_df)
 
     res = pd.concat((sub_dfs), axis=1, keys=metric_names, names=['Metric'])
@@ -2452,7 +2564,7 @@ class MetricWithCI(Operation):
     self._is_root_node = True
     if self.has_been_preaggregated or not self.can_precompute():
       if not self.where:
-        return super(MetricWithCI, self).to_sql(table, split_by)  # pyrefly: ignore[invalid-argument]
+        return super().to_sql(table, split_by)
       table = sql.Sql(None, table, self.where)
       self_no_filter = copy.deepcopy(self)
       self_no_filter.where = None
@@ -2541,7 +2653,7 @@ class MetricWithCI(Operation):
         sql.Filters(None) if self.has_been_preaggregated else global_filter
     )
 
-    name = self.name_tmpl.format('').strip()  # pyrefly: ignore[missing-attribute]
+    name = self.name_tmpl.format('').strip()
     se, with_data = self.get_se_sql(
         table,
         split_by,
@@ -2581,6 +2693,7 @@ class MetricWithCI(Operation):
     columns.add(cols)
 
     has_base_vals = False
+    base_alias = None
     if self.confidence:
       child = get_comparison_child(self)
       if child:
@@ -2606,8 +2719,8 @@ class MetricWithCI(Operation):
 
     join = 'LEFT' if using else 'CROSS'
     from_data = sql.Join(pt_est_alias, se_alias, join=join, using=using)
-    if has_base_vals:
-      from_data = from_data.join(base_alias, join=join, using=using)  # pyrefly: ignore[unbound-name]
+    if has_base_vals and base_alias:
+      from_data = from_data.join(base_alias, join=join, using=using)
     return sql.Sql(using.add(columns), from_data), with_data
 
   def get_se_sql(
@@ -2716,16 +2829,19 @@ class Jackknife(MetricWithCI):
       util, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)
       return self.compute_util_metric_on(util, df, split_by)
 
-    self.compute_child(df, split_by + [self.unit])  # pyrefly: ignore[unsupported-operation]
+    self.compute_child(df, (split_by or []) + [self.unit])
     precomputed = self.find_all_in_cache_by_metric_type(metric=metrics.Sum)
     precomputed.update(
         self.find_all_in_cache_by_metric_type(metric=metrics.Count)
     )
+    cache_key = self.cache_key
     precomputed = {
-        k: v for k, v in precomputed.items() if k.key == self.cache_key.key  # pyrefly: ignore[missing-attribute]
+        k: v
+        for k, v in precomputed.items()
+        if cache_key and k.key == cache_key.key
     }
     all_split_by = (
-        split_by  # pyrefly: ignore[unsupported-operation]
+        (split_by or [])
         + [self.unit]
         + list(utils.get_extra_split_by(self, return_superset=True))
     )
@@ -2798,7 +2914,7 @@ class Jackknife(MetricWithCI):
       )
     replicates = self.compute_child(
         df,
-        split_by + [self.unit],  # pyrefly: ignore[unsupported-operation]
+        (split_by or []) + [self.unit],
         True,
         cache_key=('_RESERVED', 'Jackknife', self.unit),
     )
@@ -3144,8 +3260,8 @@ class Bootstrap(MetricWithCI):
           ' percentiles (e.g. CI-lower and CI-upper)'
       )
 
-    col1 = self.prefix + ' ' + percentiles[0]  # pyrefly: ignore[unsupported-operation]
-    col2 = self.prefix + ' ' + percentiles[1]  # pyrefly: ignore[unsupported-operation]
+    col1 = f'{self.prefix} {percentiles[0]}'
+    col2 = f'{self.prefix} {percentiles[1]}'
 
     for i in range(0, len(res.columns), 3):
       sub_df = pd.DataFrame(
@@ -3173,7 +3289,8 @@ class Bootstrap(MetricWithCI):
           'Percentiles are only needed when `ci_method="percentile"`'
       )
 
-    alpha = 1 - self.confidence  # pyrefly: ignore[unsupported-operation]
+    assert self.confidence is not None
+    alpha = 1 - self.confidence
     lower_p = alpha / 2
     upper_p = 1 - alpha / 2
 
@@ -3343,7 +3460,11 @@ class Bootstrap(MetricWithCI):
     replicates = []
     for _ in range(self.n_replicates // batch_size):
       bst = self.child.compute_on_sql(
-          resampled, ['meterstick_resample_idx'] + split_by, execute, True, mode
+          resampled,
+          ['meterstick_resample_idx'] + list(split_by or []),
+          execute,
+          True,
+          mode,
       )
       replicates.append(bst.unstack('meterstick_resample_idx'))
     util_metric.n_replicates = self.n_replicates % batch_size
@@ -3358,7 +3479,11 @@ class Bootstrap(MetricWithCI):
       resampled = with_data2.children.popitem()[1]
       resampled.with_data = with_data2
       bst = self.child.compute_on_sql(
-          resampled, ['meterstick_resample_idx'] + split_by, execute, True, mode
+          resampled,
+          ['meterstick_resample_idx'] + list(split_by or []),
+          execute,
+          True,
+          mode,
       )
       replicates.append(bst.unstack('meterstick_resample_idx'))
     return replicates
@@ -3463,7 +3588,7 @@ class PoissonBootstrap(Bootstrap):
       A cache_key if it makes sense to cache otherwise None, and resampled data.
     """
     n_split_by = (
-        len(split_by)  # pyrefly: ignore[bad-argument-type]
+        len(split_by or [])
         + len([self.unit] if self.unit else [])
         + len(utils.get_extra_split_by(self, True))
     )
@@ -3472,7 +3597,7 @@ class PoissonBootstrap(Bootstrap):
         c for c in var_cols if c.startswith('sum_') or c.startswith('count_')
     ]
     if self.unit:
-      grp_by = split_by + [self.unit]  # pyrefly: ignore[unsupported-operation]
+      grp_by = (split_by or []) + [self.unit]
       grped = df.groupby(grp_by, observed=True)
       idx_rows = np.array([*grped.indices.values()], dtype=object)
       idx_vals = grped.first().index
@@ -3485,6 +3610,12 @@ class PoissonBootstrap(Bootstrap):
       sampled = set()
     else:
       n = len(df)
+      use_cache = False
+      sampled = set()
+      idx_rows = np.array([], dtype=object)
+      idx_vals = None
+      weight_col = ''
+      grp_by = []
     row = np.arange(n)
     for _ in range(self.n_replicates):
       # If there is no extra split_by added, each unit will correspond to one
@@ -3498,30 +3629,31 @@ class PoissonBootstrap(Bootstrap):
       else:
         weights = self.get_sample_weight(n)
         cache_key = None
-        if use_cache:  # pyrefly: ignore[unbound-name]
+        yielded = False
+        if use_cache:
           cache_key = tuple(weights)
-          if cache_key in sampled:  # pyrefly: ignore[unbound-name]
+          if cache_key in sampled:
             yielded = True
             yield cache_key, None
           else:
             sampled.add(cache_key)
             yielded = False
-        if not use_cache or not yielded:  # pyrefly: ignore[unbound-name]
+        if not use_cache or not yielded:
           if not self.has_been_preaggregated:
             sampled_rows = (
-                np.concatenate(idx_rows.repeat(weights, 0))  # pyrefly: ignore[unbound-name]
+                np.concatenate(idx_rows.repeat(weights, 0))
                 if weights.any()
                 else []
             )
             yield cache_key, df.iloc[sampled_rows]
           else:
-            weights = pd.Series(weights, index=idx_vals, name=weight_col)  # pyrefly: ignore[unbound-name]
+            weights = pd.Series(weights, index=idx_vals, name=weight_col)
             selected = weights > 0
             sampled_rows = (
-                np.concatenate(idx_rows[selected]) if selected.any() else []  # pyrefly: ignore[unbound-name]
+                np.concatenate(idx_rows[selected]) if selected.any() else []
             )
             weights = weights[selected]
-            resampled = df.iloc[sampled_rows].set_index(grp_by)  # pyrefly: ignore[unbound-name]
+            resampled = df.iloc[sampled_rows].set_index(grp_by)
             if not resampled.empty:
               resampled = resampled.join(weights)
               resampled[sum_or_ct_cols] = resampled[sum_or_ct_cols].multiply(
@@ -3737,9 +3869,9 @@ class PoissonBootstrap(Bootstrap):
         else:
           col = c * sql.Column('poisson_bootstrap_weight')
           poisson_sampled_columns.add(col.set_alias(c.alias))
-        poisson_sampled_table = sql.Sql(
-            poisson_sampled_columns, table_with_poisson_weight_alias
-        )
+      poisson_sampled_table = sql.Sql(
+          poisson_sampled_columns, table_with_poisson_weight_alias
+      )
     else:
       poisson_sampled_columns = sql.Columns(sql.Column('*', auto_alias=False))
       replicates = sql.Datasource(
@@ -3753,7 +3885,7 @@ class PoissonBootstrap(Bootstrap):
       )
 
     poisson_sampled_table_alias = with_data.add(
-        sql.Datasource(poisson_sampled_table, 'PoissonBootstrapResampledData')  # pyrefly: ignore[unbound-name]
+        sql.Datasource(poisson_sampled_table, 'PoissonBootstrapResampledData')
     )
     return poisson_sampled_table_alias, with_data
 
@@ -3816,7 +3948,7 @@ def get_preaggregated_metric_tree(m):
     return get_preaggregated_metric(m)
   m = copy.copy(m)
   m.children = [get_preaggregated_metric_tree(c) for c in m.children]
-  m.has_been_preaggregated = True  # pyrefly: ignore[missing-attribute]
+  setattr(m, 'has_been_preaggregated', True)
   return m
 
 
@@ -4443,8 +4575,11 @@ class MetricFunction(Operation):
       if c.alias in indexes.aliases:
         columns.add(c)
       else:
-        col = sql.Column(c.expression, self.sql_func,
-                         alias=self.name_tmpl.format(c.alias_raw))  # pyrefly: ignore[missing-attribute]
+        col = sql.Column(
+            c.expression,
+            self.sql_func,
+            alias=self.name_tmpl.format(c.alias_raw),
+        )
         columns.add(col)
     child_sql = copy.deepcopy(child_sql)
     child_sql.columns = columns
@@ -4609,7 +4744,11 @@ class ExponentialPercentTransform(MetricFunction):
     log_transform = LogTransform(
         log_transform.child, log_transform.base, name_tmpl='{}'
     )
-    self.children = tuple([ci_method(ab(log_transform))])  # pyrefly: ignore[not-callable]
+    assert isinstance(ci_method, Operation)
+    assert isinstance(ab, Operation)
+    transformed_ab = ab(log_transform)
+    assert isinstance(transformed_ab, metrics.Metric)
+    self.children = tuple([ci_method(transformed_ab)])
     return True
 
   def __call__(self, *args, **kwargs):

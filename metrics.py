@@ -20,7 +20,7 @@ from __future__ import print_function
 import copy
 import datetime
 import itertools
-from typing import Any, Iterable, List, Optional, Sequence, Text, Union
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Text, Union
 
 from meterstick import sql
 from meterstick import utils
@@ -227,18 +227,23 @@ class Metric(object):
       before setting this attribute to True.
     cache: A dict to store the result. It's shared across the Metric tree.
     cache_key: The key currently being used in computation.
+    name_: The underlying name of the Metric.
+    name_tmpl_: The underlying name template of the Metric.
   """
 
-  def __init__(self,
-               name: Text,
-               children: Optional[Union['Metric', Sequence[Union['Metric', int,
-                                                                 float]]]] = (),
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               name_tmpl=None,
-               extra_split_by: Optional[Union[Text, Iterable[Text]]] = None,
-               extra_index: Optional[Union[Text, Iterable[Text]]] = None,
-               additional_fingerprint_attrs: Optional[List[str]] = None):
-    self.name = name
+  def __init__(
+      self,
+      name: Optional[Text] = None,
+      children: Optional[
+          Union['Metric', Sequence[Union['Metric', int, float]]]
+      ] = (),
+      where: Optional[Union[Text, Sequence[Text]]] = None,
+      name_tmpl=None,
+      extra_split_by: Optional[Union[Text, Iterable[Text]]] = None,
+      extra_index: Optional[Union[Text, Iterable[Text]]] = None,
+      additional_fingerprint_attrs: Optional[List[str]] = None,
+  ):
+    self.name_ = name
     self.cache = {}
     self.cache_key = None
     self.children = [children] if isinstance(children,
@@ -253,10 +258,26 @@ class Metric(object):
       self.extra_index = [extra_index] if isinstance(extra_index,
                                                      str) else extra_index
     self.additional_fingerprint_attrs = set(additional_fingerprint_attrs or ())
-    self.name_tmpl = name_tmpl
+    self.name_tmpl_ = name_tmpl
     self.is_operation = False
     self.cache_across_instances = False
     self.cache_key = None
+
+  @property
+  def name(self):
+    return self.name_
+
+  @name.setter
+  def name(self, name):
+    self.name_ = name
+
+  @property
+  def name_tmpl(self):
+    return self.name_tmpl_
+
+  @name_tmpl.setter
+  def name_tmpl(self, name_tmpl):
+    self.name_tmpl_ = name_tmpl
 
   @property
   def child(self):
@@ -511,7 +532,9 @@ class Metric(object):
     """Applies compute() to all slices. Each slice needs a unique cache_key."""
     if self.children:
       try:
-        children = self.compute_children(df, split_by + self.extra_split_by)  # pyrefly: ignore[unsupported-operation]
+        children = self.compute_children(
+            df, (split_by or []) + list(self.extra_split_by)
+        )
         return self.compute_on_children(children, split_by)
       except NotImplementedError:
         pass
@@ -701,10 +724,16 @@ class Metric(object):
       df = df.squeeze()
     return df
 
-  def compute_on_sql_sql_mode(self, table, split_by=None, execute=None):
+  def compute_on_sql_sql_mode(
+      self,
+      table,
+      split_by=None,
+      execute: Optional[Callable[[str], pd.DataFrame]] = None,
+  ):
     """Executes the query from to_sql() and process the result."""
+    assert execute is not None
     query = self.to_sql(table, split_by)
-    res = execute(str(query))  # pyrefly: ignore[not-callable]
+    res = execute(str(query))
     extra_idx = list(self.get_extra_idx(return_superset=True))
     indexes = split_by + extra_idx if split_by else extra_idx
     columns = [a.alias_raw for a in query.groupby.add(query.columns)]
@@ -1019,11 +1048,11 @@ class Metric(object):
     Returns:
       A tuple of column names which are just the index of metric.compute_on(df).
     """
-    extra_idx = self.extra_index[:]  # pyrefly: ignore[bad-index]
+    extra_idx = list(self.extra_index)
     children_idx = [
-        c.get_extra_idx(return_superset)  # pyrefly: ignore[missing-attribute]
+        c.get_extra_idx(return_superset)
         for c in self.children
-        if utils.is_metric(c)
+        if isinstance(c, Metric)
     ]
     if len(set(children_idx)) > 1:
       if not return_superset:
@@ -1122,23 +1151,23 @@ class Metric(object):
       A sorted tuple of (attribute, value) pairs that uniquely identify the
       Metric.
     """
-    fingerprint = {'class': self.__class__}
+    fingerprint: dict[str, Any] = {'class': self.__class__}
     if self.where_:
-      fingerprint['where'] = sorted(self.where_)  # pyrefly: ignore[bad-assignment]
+      fingerprint['where'] = sorted(self.where_)
     # Caching across instances is tricky so only turned on for built-ins and
     # custom Metrics with cache_across_instances being True. Otherwise different
     # instances of the same class are always saved under different keys.
     if type(self).__name__ not in BUILT_INS and not self.cache_across_instances:
-      fingerprint['id'] = id(self)  # pyrefly: ignore[bad-assignment]
+      fingerprint['id'] = id(self)
     if self.children:
-      fingerprint['children'] = (  # pyrefly: ignore[bad-assignment]
+      fingerprint['children'] = (
           c.get_fingerprint(attr_to_exclude) if isinstance(c, Metric) else c
           for c in self.children
       )
     if self.extra_split_by:
-      fingerprint['extra_split_by'] = self.extra_split_by  # pyrefly: ignore[bad-assignment]
+      fingerprint['extra_split_by'] = self.extra_split_by
     if self.extra_index != self.extra_split_by:
-      fingerprint['extra_index'] = self.extra_index  # pyrefly: ignore[bad-assignment]
+      fingerprint['extra_index'] = self.extra_index
     for k in self.additional_fingerprint_attrs:
       val = getattr(self, k, None)
       if isinstance(val, dict):
@@ -1153,7 +1182,7 @@ class Metric(object):
     }
     for k, v in fingerprint.items():
       if not isinstance(v, str) and isinstance(v, Iterable):
-        fingerprint[k] = tuple(list(v))  # pyrefly: ignore[unsupported-operation]
+        fingerprint[k] = tuple(list(v))
     return tuple(sorted(fingerprint.items()))
 
   def __str__(self):
@@ -1197,12 +1226,14 @@ class MetricList(Metric):
     And all other attributes inherited from Metric.
   """
 
-  def __init__(self,
-               children: Sequence[Metric],
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               children_return_dataframe: bool = True,
-               name_tmpl=None,
-               rename_columns=None):
+  def __init__(
+      self,
+      children: Sequence[Metric],
+      where: Optional[Union[Text, Sequence[Text]]] = None,
+      children_return_dataframe: bool = True,
+      name_tmpl=None,
+      rename_columns=None,
+  ):
     for m in children:
       if not isinstance(m, Metric):
         raise ValueError('%s is not a Metric.' % m)
@@ -1268,7 +1299,7 @@ class MetricList(Metric):
       res: pd.Series,
       melted: bool = False,
       return_dataframe: bool = True,
-      apply_name_tmpl: bool = None,  # pyrefly: ignore[bad-function-definition]
+      apply_name_tmpl: Optional[bool] = None,
   ):
     """Rename columns if asked in addition to original manipulation."""
     res = super(MetricList, self).manipulate(
@@ -1415,9 +1446,11 @@ class MetricList(Metric):
         sql.Filters(self.where_).add(local_filter).remove(global_filter)
     )
     children_sql = [
-        c.get_sql_and_with_clause(table, split_by, global_filter, indexes,  # pyrefly: ignore[missing-attribute]
-                                  local_filter, with_data)[0]
+        c.get_sql_and_with_clause(
+            table, split_by, global_filter, indexes, local_filter, with_data
+        )[0]
         for c in self.children
+        if isinstance(c, Metric)
     ]
     children_sql_copy = copy.deepcopy(children_sql)
     incompatible_sqls = sql.Datasources()
@@ -1595,7 +1628,7 @@ class CompositeMetric(Metric):
     if isinstance(a, pd.DataFrame) and isinstance(b, pd.DataFrame):
       if len(a.columns) == len(b.columns):
         columns = [
-            self.name_tmpl.format(c1, c2)  # pyrefly: ignore[missing-attribute]
+            self.name_tmpl.format(c1, c2)
             for c1, c2 in zip(a.columns, b.columns)
         ]
         a.columns = columns
@@ -1605,7 +1638,7 @@ class CompositeMetric(Metric):
         a.iloc[:, i] = self.op(a.iloc[:, i], b)
       res = a
       columns = [
-          self.name_tmpl.format(c, getattr(m2, 'name', m2)) for c in res.columns  # pyrefly: ignore[missing-attribute]
+          self.name_tmpl.format(c, getattr(m2, 'name', m2)) for c in res.columns
       ]
       res.columns = columns
     elif isinstance(b, pd.DataFrame):
@@ -1613,7 +1646,7 @@ class CompositeMetric(Metric):
         b.iloc[:, i] = self.op(a, b.iloc[:, i])
       res = b
       columns = [
-          self.name_tmpl.format(getattr(m1, 'name', m1), c) for c in res.columns  # pyrefly: ignore[missing-attribute]
+          self.name_tmpl.format(getattr(m1, 'name', m1), c) for c in res.columns
       ]
       res.columns = columns
 
@@ -1662,8 +1695,11 @@ class CompositeMetric(Metric):
 
     if not isinstance(self.children[0], Metric):
       constant = self.children[0]
-      query, with_data = self.children[1].get_sql_and_with_clause(  # pyrefly: ignore[missing-attribute]
-          table, split_by, global_filter, indexes, local_filter, with_data)
+      c1 = self.children[1]
+      assert isinstance(c1, Metric)
+      query, with_data = c1.get_sql_and_with_clause(
+          table, split_by, global_filter, indexes, local_filter, with_data
+      )
       query.columns = sql.Columns(
           (c if c in indexes else op(constant, c) for c in query.columns))
     elif not isinstance(self.children[1], Metric):
@@ -1707,7 +1743,9 @@ class CompositeMetric(Metric):
               f'Indexes {idx0} and {idx1} are incompatible in'
               ' CompositeMetric!'
           )
-      using = indexes if has_same_idx else shared_idx  # pyrefly: ignore[unbound-name]
+        using = shared_idx
+      else:
+        using = indexes
 
       compatible = sql.is_compatible(query0, query1)
       # If two queries are compatible, merge them into one.
@@ -1720,7 +1758,7 @@ class CompositeMetric(Metric):
           if c0.alias in idx_aliases:
             columns.add(c0)
           else:
-            alias = self.name_tmpl.format(c0.alias_raw, c1.alias_raw)  # pyrefly: ignore[missing-attribute]
+            alias = self.name_tmpl.format(c0.alias_raw, c1.alias_raw)
             columns.add(op(c0, c1).set_alias(alias))
         query = copy.deepcopy(query0)
         query.columns = columns
@@ -1783,21 +1821,26 @@ class Ratio(CompositeMetric):
 
   def get_fingerprint(self, attr_to_exclude=()):
     # Make the fingerprint same as the equivalent CompositeMetric for caching.
-    util = self.children[0] / self.children[1]
-    util.where = self.where_  # pytype: disable=not-writable
-    return util.get_fingerprint(attr_to_exclude)  # pyrefly: ignore[missing-attribute]
+    c0 = self.children[0]
+    c1 = self.children[1]
+    assert isinstance(c0, Metric) and isinstance(c1, Metric)
+    util = c0 / c1
+    util.where = self.where_
+    return util.get_fingerprint(attr_to_exclude)
 
 
 class SimpleMetric(Metric):
   """Base class for common built-in aggregate functions of df.group_by()."""
 
-  def __init__(self,
-               var: Text,
-               name: Optional[Text] = None,
-               name_tmpl=None,
-               where: Optional[Union[Text, Sequence[Text]]] = None,
-               additional_fingerprint_attrs: Optional[List[str]] = None):
-    name = name or name_tmpl.format(var)  # pyrefly: ignore[missing-attribute]
+  def __init__(
+      self,
+      var: Text,
+      name: Optional[Text] = None,
+      name_tmpl: Optional[str] = None,
+      where: Optional[Union[Text, Sequence[Text]]] = None,
+      additional_fingerprint_attrs: Optional[List[str]] = None,
+  ):
+    name = name or (name_tmpl.format(var) if name_tmpl else None)
     self.var = var
     additional_fingerprint_attrs = ['var', 'var2'] + (
         additional_fingerprint_attrs or [])
@@ -2190,31 +2233,37 @@ class Quantile(SimpleMetric):
     And all other attributes inherited from SimpleMetric.
   """
 
-  def __init__(self,
-               var: Text,
-               quantile: Union[float, int, Sequence[Union[float, int]]] = 0.5,
-               weight: Optional[Text] = None,
-               interpolation='linear',
-               name: Optional[Text] = None,
-               where: Optional[Union[Text, Sequence[Text]]] = None):
+  def __init__(
+      self,
+      var: Text,
+      quantile: Union[float, int, Sequence[Union[float, int]]] = 0.5,
+      weight: Optional[Text] = None,
+      interpolation='linear',
+      name: Optional[Text] = None,
+      where: Optional[Union[Text, Sequence[Text]]] = None,
+  ):
     if isinstance(quantile, (int, float)):
       self.one_quantile = True
+      if not 0 <= quantile <= 1:
+        raise ValueError('quantiles must be in [0, 1].')
+      q = quantile
     else:
       self.one_quantile = False
-      quantile = np.array(quantile)  # pyrefly: ignore[bad-assignment]
-      if len(quantile) == 1:  # pyrefly: ignore[bad-argument-type]
-        quantile = quantile[0]  # pyrefly: ignore[bad-index]
+      quantile_arr = np.array(quantile)
+      if len(quantile_arr) == 1:
+        q = float(quantile_arr[0])
         self.one_quantile = True
-    if self.one_quantile and not 0 <= quantile <= 1:  # pyrefly: ignore[unsupported-operation]
-      raise ValueError('quantiles must be in [0, 1].')
-    if not self.one_quantile and not (np.all(quantile >= 0) and  # pyrefly: ignore[unsupported-operation]
-                                      np.all(quantile <= 1)):  # pyrefly: ignore[unsupported-operation]
-      raise ValueError('quantiles must be in [0, 1].')
+        if not 0 <= q <= 1:
+          raise ValueError('quantiles must be in [0, 1].')
+      else:
+        if not (np.all(quantile_arr >= 0) and np.all(quantile_arr <= 1)):
+          raise ValueError('quantiles must be in [0, 1].')
+        q = quantile_arr
     name_tmpl = 'quantile({}, {})'
     if weight:
       name_tmpl = '%s-weighted quantile({}, {})' % str(weight)
-    name = name or name_tmpl.format(var, str(quantile))
-    self.quantile = quantile
+    name = name or name_tmpl.format(var, str(q))
+    self.quantile = q
     self.interpolation = interpolation
     self.weight = weight
     super(Quantile, self).__init__(var, name, name_tmpl, where,
@@ -2229,9 +2278,19 @@ class Quantile(SimpleMetric):
           return res
         return pd.DataFrame(
             [res],
-            columns=[self.name_tmpl.format(self.var, q) for q in self.quantile])  # pyrefly: ignore[missing-attribute, not-iterable]
+            columns=[
+                self.name_tmpl.format(self.var, q)
+                for q in (
+                    self.quantile
+                    if isinstance(self.quantile, Iterable)
+                    else [self.quantile]
+                )
+            ],
+        )
 
-      aggregated_weight = df.groupby(split_by + [self.var])[self.weight].sum()  # pyrefly: ignore[unsupported-operation]
+      aggregated_weight = df.groupby((split_by or []) + [self.var])[
+          self.weight
+      ].sum()
       # See https://en.wikipedia.org/wiki/Percentile#Weighted_percentile.
       weighted_quantiles = (
           self.group(aggregated_weight, split_by).cumsum()
@@ -2251,10 +2310,10 @@ class Quantile(SimpleMetric):
       return res
     if split_by:
       res = res.unstack()
-      res.columns = [self.name_tmpl.format(self.var, c) for c in res]  # pyrefly: ignore[missing-attribute]
+      res.columns = [self.name_tmpl.format(self.var, c) for c in res]
       return res
     res = utils.unmelt(pd.DataFrame(res))
-    res.columns = [self.name_tmpl.format(self.var, c[0]) for c in res]  # pyrefly: ignore[missing-attribute]
+    res.columns = [self.name_tmpl.format(self.var, c[0]) for c in res]
     return res
 
   def get_sql_columns(self, local_filter):
@@ -2271,7 +2330,8 @@ class Quantile(SimpleMetric):
       )
 
     quantiles = []
-    for q in self.quantile:  # pyrefly: ignore[not-iterable]
+    assert isinstance(self.quantile, Iterable)
+    for q in self.quantile:
       alias = 'quantile(%s, %s)' % (self.var, q)
       if alias.startswith('0.'):
         alias = 'point_' + alias[2:]
@@ -2418,8 +2478,13 @@ class Quantile(SimpleMetric):
     next_w = next_w.alias
     next_v = next_val.alias
     cols = sql.Columns(split_by)
-    quantiles = [self.quantile] if self.one_quantile else self.quantile
-    for q in quantiles:  # pyrefly: ignore[not-iterable]
+    if self.one_quantile:
+      quantiles = [self.quantile]
+    elif isinstance(self.quantile, Iterable):
+      quantiles = self.quantile
+    else:
+      quantiles = [self.quantile]
+    for q in quantiles:
       interp = (
           f'({next_v} * ({q} - {w}) + ({next_w} - {q}) * {v})'
           f' / ({next_w} - {w})'

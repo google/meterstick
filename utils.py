@@ -141,10 +141,12 @@ def apply_name_tmpl(name_tmpl, res, melted=False):
     if melted:
       if len(res.index.names) > 1:
         res.index = res.index.set_levels(
-            map(name_tmpl.format, res.index.levels[0]), level=0)
+            map(name_tmpl.format, res.index.levels[0]), level=0
+        )
       else:
         res.index = pd.Index(
-            map(name_tmpl.format, res.index), name=res.index.name)
+            map(name_tmpl.format, res.index), name=res.index.name
+        )
     else:
       if len(res.columns.names) > 1:
         res.columns = res.columns.set_levels(
@@ -381,7 +383,12 @@ class CacheKey:
     return new_key
 
   def replace_where(self, where):
-    where = (where,) if isinstance(where, str) else tuple(sorted(where)) or ()
+    if isinstance(where, str):
+      where = (where,)
+    elif where:
+      where = tuple(sorted(where))
+    else:
+      where = ()
     new_key = copy.deepcopy(self)
     new_key.where = where
     new_key.fingerprint['where'] = where
@@ -697,4 +704,4 @@ def pcollection_to_df_via_file_io(
   if not res:
     return pd.DataFrame()
   concat_res = pd.concat(res, ignore_index=True)
-  return concat_res  # pyrefly: ignore[bad-return]
+  return pd.DataFrame(concat_res)

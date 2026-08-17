@@ -19,7 +19,7 @@ from __future__ import print_function
 
 import copy
 import itertools
-from typing import List, Optional, Sequence, Text, Union
+from typing import Any, List, Optional, Sequence, Text, Union
 
 from meterstick import metrics
 from meterstick import operations
@@ -77,15 +77,17 @@ class Model(operations.Operation):
           'y must be a 1D array but is %iD!' % operations.count_features(y)
       )
     if isinstance(x, metrics.MetricList):
-      x = list(x.children)  # pyrefly: ignore[bad-assignment]
-    elif isinstance(x, (metrics.Metric, str)):
-      x = [x]
+      x_list = [c for c in x.children if isinstance(c, metrics.Metric)]
+    elif isinstance(x, metrics.Metric):
+      x_list = [x]
     elif x:
-      x = list(x)
+      x_list = [c for c in x if isinstance(c, metrics.Metric)]
+    else:
+      x_list = []
     child = None
-    if x and y:
-      child = metrics.MetricList([y] + x)  # pyrefly: ignore[unsupported-operation]
-    self.model = model
+    if x_list and y:
+      child = metrics.MetricList([y] + x_list)
+    self.model: Any = model
     self.model_name = model_name
     additional_fingerprint_attrs = (
         [additional_fingerprint_attrs]
@@ -109,20 +111,21 @@ class Model(operations.Operation):
 
   def compute(self, df):
     x, y = df.iloc[:, 1:], df.iloc[:, 0]
+    norms = None
     if self.normalize and self.fit_intercept:
       x_scaled = x - x.mean()
       norms = np.sqrt((x_scaled**2).sum())
       x = x_scaled / norms
-    self.model.fit(x, y)  # pyrefly: ignore[missing-attribute]
-    coef = self.model.coef_  # pyrefly: ignore[missing-attribute]
-    if self.normalize and self.fit_intercept:
-      coef = coef / norms.values  # pyrefly: ignore[unbound-name]
+    self.model.fit(x, y)
+    coef = self.model.coef_
+    if self.normalize and self.fit_intercept and norms is not None:
+      coef = coef / norms.values
     names = list(df.columns[1:])
     if self.fit_intercept:
       if self.normalize:
         intercept = y.mean() - df.iloc[:, 1:].mean().dot(coef)
       else:
-        intercept = self.model.intercept_  # pyrefly: ignore[missing-attribute]
+        intercept = self.model.intercept_
       coef = [intercept] + list(coef)
       names = ['intercept'] + names
     return pd.DataFrame([coef], columns=names)
@@ -169,7 +172,7 @@ class Model(operations.Operation):
     return operations.count_features(self.x)
 
   @property
-  def name(self):  # pyrefly: ignore[bad-override]
+  def name(self):
     if self.name_:
       return self.name_
     if not self.children:
@@ -186,7 +189,7 @@ class Model(operations.Operation):
     self.name_ = name
 
   @property
-  def name_tmpl(self):  # pyrefly: ignore[bad-override]
+  def name_tmpl(self):
     if self.name_tmpl_:
       return self.name_tmpl_
     return self.name + ' Coefficient: {}'
@@ -800,6 +803,7 @@ def compute_coef_for_elastic_net(
     sufficient_stats_elements, xs, l1, l2, fit_intercept, tol, max_iter
 ):
   """Computes the coefficients for ElasticNet. Lasso is just a special case."""
+  avg_xs = avg_y = None
   if fit_intercept:
     sufficient_stats_elements, avg_xs, avg_y = center_x(
         sufficient_stats_elements, len(xs)
@@ -812,9 +816,9 @@ def compute_coef_for_elastic_net(
       init_guess, l1, l2, x_t_x, x_t_y, tol, max_iter, fit_intercept
   )
   columns = list(xs.aliases)
-  if fit_intercept:
+  if fit_intercept and avg_y is not None and avg_xs is not None:
     # We centered x and y above so the intercept from optimization is not right.
-    coef[0] = (avg_y - avg_xs @ coef[1:]).values[0]  # pyrefly: ignore[unbound-name]
+    coef[0] = (avg_y - avg_xs @ coef[1:]).values[0]
     columns = ['intercept'] + columns
   return pd.DataFrame([list(coef)], columns=columns)
 
@@ -1034,13 +1038,13 @@ class LogisticRegression(Model):
     self.random_state = random_state
 
   def compute(self, df):
-    self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])  # pyrefly: ignore[missing-attribute]
-    coef = self.model.coef_  # pyrefly: ignore[missing-attribute]
+    self.model.fit(df.iloc[:, 1:], df.iloc[:, 0])
+    coef = self.model.coef_
     names = list(df.columns[1:])
     if coef.shape[0] == 1:
       coef = coef[0]
       if self.fit_intercept:
-        intercept = self.model.intercept_  # pyrefly: ignore[missing-attribute]
+        intercept = self.model.intercept_
         intercept = intercept[0]
         coef = [intercept] + list(coef)
         names = ['intercept'] + names
@@ -1048,13 +1052,13 @@ class LogisticRegression(Model):
     else:
       # Multi class
       if self.fit_intercept:
-        coef = np.hstack((self.model.intercept_.reshape(-1, 1), coef))  # pyrefly: ignore[missing-attribute]
+        coef = np.hstack((self.model.intercept_.reshape(-1, 1), coef))
         names = ['intercept'] + names
       res = pd.DataFrame(
           coef.reshape(1, -1),
-          columns=(  # pyrefly: ignore[bad-argument-type]
+          columns=list(
               f'{n} for class {c}'
-              for c, n in itertools.product(self.model.classes_, names)  # pyrefly: ignore[missing-attribute]
+              for c, n in itertools.product(self.model.classes_, names)
           ),
       )
       return res
@@ -1074,7 +1078,7 @@ class LogisticRegression(Model):
     Returns:
       A pd.DataFrame holding model coefficients.
     """
-    if self.model.class_weight:  # pyrefly: ignore[missing-attribute]
+    if self.model.class_weight:
       raise ValueError("Magic mode doesn't support class_weight!")
     if self.intercept_scaling != 1:
       raise ValueError('intercept_scaling is not supported in magic mode!')
@@ -1092,6 +1096,7 @@ class LogisticRegression(Model):
           ' values!'
       )
 
+    sufficient_stats = None
     if self.penalty in ('l1', 'elasticnet'):
       _, sufficient_stats, _, _ = get_sufficient_stats_elements(
           self, table, split_by, execute, include_n_obs=True
@@ -1259,7 +1264,7 @@ class LogisticRegression(Model):
           conds,
           l1,
           l2,
-          sufficient_stats,  # pyrefly: ignore[unbound-name]
+          sufficient_stats,
           self.fit_intercept,
       )
     else:

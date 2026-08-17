@@ -711,6 +711,15 @@ class TestMetricList(parameterized.TestCase):
     expected = metrics.MetricList(children, name_tmpl='b a {}').compute_on(df)
     testing.assert_frame_equal(output, expected)
 
+  def test_metric_name_tmpl_default(self):
+    m = metrics.Metric()
+    self.assertIsNone(m.name_tmpl)
+
+  def test_metric_name_tmpl_custom(self):
+    m = metrics.Metric()
+    m.name_tmpl = 'custom_{}'
+    self.assertEqual(m.name_tmpl, 'custom_{}')
+
   def test_operations(self):
     df = pd.DataFrame({'X': [1, 1, 1], 'Y': ['a', 'a', 'b']})
     sumx = metrics.Sum('X')
