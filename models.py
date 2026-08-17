@@ -154,19 +154,15 @@ class Model(operations.Operation):
 
   @property
   def y(self):
-    if not self.children or not isinstance(
-        self.children[0], metrics.MetricList
-    ):
+    if not isinstance(self.child, metrics.MetricList):
       raise ValueError('y must be a Metric!')
-    return self.children[0][0]
+    return self.child[0]
 
   @property
   def x(self):
-    if not self.children or not isinstance(
-        self.children[0], metrics.MetricList
-    ):
+    if not isinstance(self.child, metrics.MetricList):
       raise ValueError('x must be a MetricList!')
-    return metrics.MetricList(self.children[0][1:])
+    return metrics.MetricList(self.child[1:])
 
   @property
   def k(self):
@@ -408,7 +404,7 @@ def get_data(m, table, split_by, execute, normalize=False):
     norms: Nonempty only when normalize is True. A pd.DataFrame which holds the
       l2-norm values of all centered-x columns.
   """
-  data = m.children[0].to_sql(table, split_by + m.group_by)
+  data = m.child.to_sql(table, split_by + m.group_by)
   with_data = data.with_data
   data.with_data = None
   table = with_data.merge(sql.Datasource(data, 'DataToFit'))

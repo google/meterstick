@@ -443,6 +443,21 @@ class TestMetricsMiscellaneous(absltest.TestCase):
     expected = pd.concat((c.compute_on(df) for c in m), axis=1)
     testing.assert_frame_equal(expected, actual)
 
+  def test_metric_child_none_when_no_children(self):
+    m = metrics.Metric('test')
+    self.assertIsNone(m.child)
+
+  def test_metric_child_returns_first_child(self):
+    child_metric = metrics.Sum('X')
+    m = metrics.Metric('test', children=child_metric)
+    self.assertEqual(m.child, child_metric)
+
+  def test_metric_child_raises_when_invalid_child_type(self):
+    m = metrics.Metric('test')
+    m.children = ['not_a_metric']
+    with self.assertRaises(AssertionError):
+      _ = m.child
+
 
 class TestCompositeMetric(absltest.TestCase):
   """Tests for composition of two metrics."""

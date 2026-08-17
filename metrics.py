@@ -259,6 +259,15 @@ class Metric(object):
     self.cache_key = None
 
   @property
+  def child(self):
+    """Returns the single child Metric if present."""
+    if not self.children:
+      return None
+    c = self.children[0]
+    assert isinstance(c, Metric)
+    return c
+
+  @property
   def where(self):
     if isinstance(self.where_, (list, tuple)):
       where_ = self.where_
