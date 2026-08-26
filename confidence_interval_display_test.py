@@ -585,6 +585,24 @@ class DisplayMetricsTest(absltest.TestCase):
     actual = confidence_interval_display.dimension_formatter(x)
     self.assertEqual(expected, actual)
 
+  def test_get_formatted_df_mixed_type_experiment_id(self):
+    df = pd.DataFrame({
+        'CI_Lower': [None, -5.0, -2.0, -1.0],
+        'CI_Upper': [None, 5.0, 2.0, 1.0],
+        'Experiment_Id': [42, 222, 666, 'treatment_foo'],
+        'Metric': ['Clicks', 'Clicks', 'Clicks', 'Clicks'],
+        'Ratio': [None, 2.5, 1.5, 0.5],
+        'Value': [100.0, 102.5, 101.5, 100.5],
+    })
+    # Should not raise TypeError when comparing mixed str and int types.
+    actual = confidence_interval_display.get_formatted_df(
+        df,
+        aggregate_dimensions=False,
+        show_control=False,
+        auto_add_description=False,
+    )
+    self.assertLen(actual, 4)
+
 
 if __name__ == '__main__':
   absltest.main()

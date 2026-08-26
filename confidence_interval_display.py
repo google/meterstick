@@ -171,7 +171,11 @@ def _sorted_long_to_wide(df, dims, sort_by):
           df[col] = pd.Categorical(df[col], s['order'], ordered=True)
           df.set_index(col, append=True, inplace=True)
   if sorting_cols:
-    df = df.sort_values(sorting_cols, ascending=ascending)
+    df = df.sort_values(
+        sorting_cols,
+        ascending=ascending,
+        key=lambda col: col.astype(str) if col.dtype == object else col,
+    )
   # Collects [Value, Ratio, CI_Lower, CI_Upper] for each Metric * slice. val_col
   # might be dropped during pivot b/c of na, so we make a dict first.
   df = df.T.groupby(level=1, observed=True).apply(
