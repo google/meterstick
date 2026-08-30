@@ -585,6 +585,124 @@ class DisplayMetricsTest(absltest.TestCase):
     actual = confidence_interval_display.dimension_formatter(x)
     self.assertEqual(expected, actual)
 
+  def test_get_formatted_df_mixed_type_experiment_id(self):
+    df_mixed = pd.DataFrame({
+        'CI_Lower': [None, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+        'CI_Upper': [None, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        'Control_Id': ['ctrl', 'ctrl', 'ctrl', 'ctrl', 'ctrl', 'ctrl', 'ctrl'],
+        'Control_Value': [None, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+        'Experiment_Id': ['ctrl', False, True, 42, 3.14, 222, 'treatment_foo'],
+        'Is_Control': [True, False, False, False, False, False, False],
+        'Metric': ['m1', 'm1', 'm1', 'm1', 'm1', 'm1', 'm1'],
+        'Ratio': [None, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        'Value': [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+    })
+    actual = confidence_interval_display.get_formatted_df(
+        df_mixed,
+        aggregate_dimensions=False,
+        show_control=True,
+        ctrl_id='ctrl',
+        auto_add_description=False,
+    )
+    self.assertEqual(
+        list(actual['Experiment_Id']),
+        [
+            '<div>ctrl</div>',
+            '<div>False</div>',
+            '<div>True</div>',
+            '<div>3.14</div>',
+            '<div>42</div>',
+            '<div>222</div>',
+            '<div>treatment_foo</div>',
+        ],
+    )
+
+  def test_get_formatted_df_missing_and_bool_in_mixed_dimensions(self):
+    df_mixed = pd.DataFrame({
+        'CI_Lower': [None, -1.0, -2.0, -3.0, -4.0, -5.0],
+        'CI_Upper': [None, 1.0, 2.0, 3.0, 4.0, 5.0],
+        'Control_Id': ['ctrl', 'ctrl', 'ctrl', 'ctrl', 'ctrl', 'ctrl'],
+        'Control_Value': [None, 10.0, 10.0, 10.0, 10.0, 10.0],
+        'dim': ['ctrl', False, True, 42, 3.14, 'str_val'],
+        'Experiment_Id': ['ctrl', 't1', 't2', 't3', 't4', 't5'],
+        'Is_Control': [True, False, False, False, False, False],
+        'Metric': ['m1', 'm1', 'm1', 'm1', 'm1', 'm1'],
+        'Ratio': [None, 0.1, 0.2, 0.3, 0.4, 0.5],
+        'Value': [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+    })
+    actual = confidence_interval_display.get_formatted_df(
+        df_mixed,
+        dims=['dim'],
+        aggregate_dimensions=False,
+        show_control=True,
+        ctrl_id='ctrl',
+        auto_add_description=False,
+    )
+    self.assertEqual(
+        list(actual['dim']),
+        [
+            '<div>False</div>',
+            '<div>True</div>',
+            '<div>3.14</div>',
+            '<div>42</div>',
+            '<div>ctrl</div>',
+            '<div>str_val</div>',
+        ],
+    )
+
+  def test_natural_sort_key(self):
+    # Non-object series should be returned as-is.
+    s_int = pd.Series([3, 1, 2])
+    pd.testing.assert_series_equal(
+        confidence_interval_display._natural_sort_key(s_int), s_int
+    )
+
+    # Object series with mixed types: None, NaN, bool, numbers, strings.
+    s_mixed = pd.Series(
+        [None, np.nan, True, False, 42, 3.14, 'Exp 2', 'Exp 10', 'abc'],
+        dtype=object,
+    )
+    keys = confidence_interval_display._natural_sort_key(s_mixed)
+    expected_keys = [
+        ((2, 0, ''),),
+        ((2, 0, ''),),
+        ((0, 1, ''),),
+        ((0, 0, ''),),
+        ((0, 42.0, ''),),
+        ((0, 3.14, ''),),
+        ((1, 0, 'Exp '), (0, 2, '')),
+        ((1, 0, 'Exp '), (0, 10, '')),
+        ((1, 0, 'abc'),),
+    ]
+    self.assertEqual(keys.tolist(), expected_keys)
+
+    sorted_s = s_mixed.sort_values(
+        key=confidence_interval_display._natural_sort_key
+    )
+    self.assertEqual(
+        list(sorted_s.iloc[:7]),
+        [False, True, 3.14, 42, 'Exp 2', 'Exp 10', 'abc'],
+    )
+    self.assertTrue(pd.isna(sorted_s.iloc[7]))
+    self.assertTrue(pd.isna(sorted_s.iloc[8]))
+
+  def test_natural_sort_order(self):
+    # Test numeric series
+    s_num = pd.Series([100, 2, 20, 10], dtype=object)
+    sorted_num = s_num.sort_values(
+        key=confidence_interval_display._natural_sort_key
+    )
+    self.assertEqual(list(sorted_num), [2, 10, 20, 100])
+
+    # Test embedded numbers in strings
+    s_str = pd.Series(['Exp 2', 'Exp 10'], dtype=object)
+    sorted_str = s_str.sort_values(
+        key=confidence_interval_display._natural_sort_key
+    )
+    self.assertEqual(list(sorted_str), ['Exp 2', 'Exp 10'])
+
 
 if __name__ == '__main__':
   absltest.main()
+
+

@@ -17,8 +17,10 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import re
 from IPython.display import display
 from IPython.display import HTML
+import numpy as np
 import pandas as pd
 
 
@@ -101,6 +103,29 @@ CSS = '''
 LINE_BREAK = '<div class="ci-display-flex-line-break"></div>'
 
 
+def _natural_sort_key(series):
+  """Sort key that performs natural sorting across mixed types and embedded numbers."""
+  if not pd.api.types.is_object_dtype(series):
+    return series
+
+  def _item_key(x):
+    if pd.isna(x):
+      return ((2, 0, ''),)
+    if isinstance(x, bool):
+      return ((0, int(x), ''),)
+    if isinstance(x, (int, float, np.number)):
+      return ((0, float(x), ''),)
+    parts = []
+    for chunk in re.split(r'(\d+)', str(x)):
+      if chunk.isdigit():
+        parts.append((0, int(chunk), ''))
+      elif chunk:
+        parts.append((1, 0, chunk))
+    return tuple(parts)
+
+  return series.map(_item_key)
+
+
 def _sorted_long_to_wide(df, dims, sort_by):
   """Returns a df in wide format for metrics.
 
@@ -171,7 +196,11 @@ def _sorted_long_to_wide(df, dims, sort_by):
           df[col] = pd.Categorical(df[col], s['order'], ordered=True)
           df.set_index(col, append=True, inplace=True)
   if sorting_cols:
-    df = df.sort_values(sorting_cols, ascending=ascending)
+    df = df.sort_values(
+        sorting_cols,
+        ascending=ascending,
+        key=_natural_sort_key,
+    )
   # Collects [Value, Ratio, CI_Lower, CI_Upper] for each Metric * slice. val_col
   # might be dropped during pivot b/c of na, so we make a dict first.
   df = df.T.groupby(level=1, observed=True).apply(
