@@ -899,7 +899,7 @@ def fista_for_elastic_net(
   # If we just use 1, depending on how a float is stored, maybe the step_size
   # will be slightly larger than the max allowed? I don't know if it will ever
   # happen but to be safe I use 1 - 1e-6.
-  step_size = (1 - 1e-6) / np.linalg.eigvals(x_t_x).max()
+  step_size = (1 - 1e-6) / np.linalg.eigvalsh(x_t_x).max()
   k = l2 * step_size + 1
   threshold = l1 * step_size / k
 
@@ -1346,7 +1346,7 @@ def fista_for_logistic_regression(
     # If we just use 4, depending on how a float is stored, maybe the step_size
     # will be slightly larger than the max allowed? I don't know if it will ever
     # happen but to be safe I use 3.999999.
-    return 3.999999 / np.linalg.eigvals(x_t_x).max()
+    return 3.999999 / np.linalg.eigvalsh(x_t_x).max()
 
   if not split_by:
     step_size = np.array([get_step_size(sufficient_stats)])
