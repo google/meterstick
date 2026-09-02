@@ -585,6 +585,123 @@ class DisplayMetricsTest(absltest.TestCase):
     actual = confidence_interval_display.dimension_formatter(x)
     self.assertEqual(expected, actual)
 
+  def test_resolve_metric_format_none(self):
+    self.assertIsNone(
+        confidence_interval_display._resolve_metric_format('Clicks', None)
+    )
+
+  def test_resolve_metric_format_flat_dict(self):
+    flat_format = {'Value': 'absolute', 'Ratio': 'percent'}
+    self.assertEqual(
+        confidence_interval_display._resolve_metric_format(
+            'Clicks', flat_format
+        ),
+        flat_format,
+    )
+
+  def test_resolve_metric_format_per_metric(self):
+    per_metric = {
+        'Clicks': {'Value': '{:0.0f}', 'Ratio': '{:.2f}%'},
+        'CTR': {'Value': '{:.4f}', 'Ratio': '{:.4f}%'},
+    }
+    self.assertEqual(
+        confidence_interval_display._resolve_metric_format(
+            'Clicks', per_metric
+        ),
+        {'Value': '{:0.0f}', 'Ratio': '{:.2f}%'},
+    )
+    self.assertEqual(
+        confidence_interval_display._resolve_metric_format('CTR', per_metric),
+        {'Value': '{:.4f}', 'Ratio': '{:.4f}%'},
+    )
+
+  def test_resolve_metric_format_per_metric_default_fallback(self):
+    per_metric = {
+        'Clicks': {'Value': '{:0.0f}', 'Ratio': '{:.2f}%'},
+        'default': {'Value': '{:.2f}', 'Ratio': '{:.2f}%'},
+    }
+    self.assertEqual(
+        confidence_interval_display._resolve_metric_format(
+            'Revenue', per_metric
+        ),
+        {'Value': '{:.2f}', 'Ratio': '{:.2f}%'},
+    )
+
+  def test_resolve_metric_format_shorthand(self):
+    shorthand = {
+        'Clicks': '{:0.0f}',
+    }
+    self.assertEqual(
+        confidence_interval_display._resolve_metric_format('Clicks', shorthand),
+        {'Ratio': '{:0.0f}'},
+    )
+
+  def test_resolve_metric_format_top_level_defaults(self):
+    formats = {
+        'Value': '{:.1f}',
+        'Clicks': '{:0.0f}',
+        'CTR': {'Ratio': '{:.5f}%'},
+    }
+    self.assertEqual(
+        confidence_interval_display._resolve_metric_format('Clicks', formats),
+        {'Value': '{:.1f}', 'Ratio': '{:0.0f}'},
+    )
+    self.assertEqual(
+        confidence_interval_display._resolve_metric_format('CTR', formats),
+        {'Value': '{:.1f}', 'Ratio': '{:.5f}%'},
+    )
+    self.assertEqual(
+        confidence_interval_display._resolve_metric_format('Other', formats),
+        {'Value': '{:.1f}'},
+    )
+
+  def test_get_formatted_df_per_metric_formats(self):
+    df_two_metrics = pd.DataFrame({
+        'CI_Lower': [None, -5.0, None, 0.001],
+        'CI_Upper': [None, 5.0, None, 0.005],
+        'Control_Id': ['expr_foo', 'expr_foo', 'expr_foo', 'expr_foo'],
+        'Control_Value': [None, 100.0, None, 0.05],
+        'Experiment_Id': ['expr_foo', 42, 'expr_foo', 42],
+        'Is_Control': [True, False, True, False],
+        'Metric': ['Clicks', 'Clicks', 'CTR', 'CTR'],
+        'Ratio': [None, 2.5, None, 0.003],
+        'Value': [100.0, 102.5, 0.05, 0.05015],
+    })
+    metric_formats = {
+        'Clicks': {'Value': '{:0.0f}', 'Ratio': '{:.1f}%'},
+        'CTR': {'Value': '{:.4f}', 'Ratio': '{:.4f}%'},
+    }
+    actual = confidence_interval_display.get_formatted_df(
+        df_two_metrics,
+        aggregate_dimensions=False,
+        show_control=True,
+        ctrl_id='expr_foo',
+        auto_add_description=False,
+        metric_formats=metric_formats,
+    )
+    # Check that Clicks has 0 decimals for value and 1 decimal for ratio
+    expected_clicks_ctrl = '<div class="ci-display-cell">100</div>'
+    expected_clicks_exp = LINE_BREAK.join((
+        '<div class="ci-display-cell"><div>102',
+        '<span class="ci-display-ratio">2.5%</span>',
+        '<span class="ci-display-ci-range">[-5.0%, 5.0%]</span></div></div>',
+    ))
+    self.assertEqual(actual['Clicks'].iloc[0], expected_clicks_ctrl)
+    self.assertEqual(actual['Clicks'].iloc[1], expected_clicks_exp)
+
+    # Check that CTR has 4 decimals for value and 4 decimals for ratio
+    expected_ctr_ctrl = '<div class="ci-display-cell">0.0500</div>'
+    expected_ctr_exp = LINE_BREAK.join((
+        '<div class="ci-display-good-change ci-display-cell"><div>0.0502',
+        '<span class="ci-display-ratio">0.0030%</span>',
+        (
+            '<span class="ci-display-ci-range">[0.0010%,'
+            ' 0.0050%]</span></div></div>'
+        ),
+    ))
+    self.assertEqual(actual['CTR'].iloc[0], expected_ctr_ctrl)
+    self.assertEqual(actual['CTR'].iloc[1], expected_ctr_exp)
+
   def test_get_formatted_df_mixed_type_experiment_id(self):
     df_mixed = pd.DataFrame({
         'CI_Lower': [None, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0],

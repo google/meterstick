@@ -17,6 +17,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import copy
+
 import re
 from IPython.display import display
 from IPython.display import HTML
@@ -476,6 +478,49 @@ def dimension_formatter(x,
   return div(div(line_break_join(d)))
 
 
+def _resolve_metric_format(col, metric_formats):
+  """Resolves the metric formatting dict for a given column."""
+  if not metric_formats:
+    return None
+  if not isinstance(metric_formats, dict):
+    return metric_formats
+
+  # Check if metric_formats is a per-metric configuration dictionary.
+  is_per_metric = (
+      'default' in metric_formats
+      or any(isinstance(v, dict) for v in metric_formats.values())
+      or any(k not in ('Value', 'Ratio') for k in metric_formats.keys())
+  )
+
+  if not is_per_metric:
+    return metric_formats
+
+  # Extract global default if provided via 'default' or top-level
+  # 'Value'/'Ratio' strings.
+  default_format = {}
+  if 'default' in metric_formats and isinstance(
+      metric_formats['default'], dict
+  ):
+    default_format.update(metric_formats['default'])
+  if 'Value' in metric_formats and isinstance(metric_formats['Value'], str):
+    default_format['Value'] = metric_formats['Value']
+  if 'Ratio' in metric_formats and isinstance(metric_formats['Ratio'], str):
+    default_format['Ratio'] = metric_formats['Ratio']
+
+  if col in metric_formats:
+    col_fmt = metric_formats[col]
+    if isinstance(col_fmt, dict):
+      res = copy.copy(default_format)
+      res.update(col_fmt)
+      return res
+    elif isinstance(col_fmt, str):
+      res = copy.copy(default_format)
+      res['Ratio'] = col_fmt
+      return res
+
+  return default_format
+
+
 def _get_formatter(df,
                    dims,
                    if_flip_colors,
@@ -491,10 +536,19 @@ def _get_formatter(df,
       scheme for that column.
     hide_null_ctrl: If to hide control value or use '-' to represent it when it
       is null,
-    metric_formats: A dict specifying how to display metric values. Keys can be
-      'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp' or a
-      formatting string. For example, '{:.2%}' would have the same effect as
-      'percent'. By default, Value is in absolute form and Ratio in percent.
+    metric_formats: A dict specifying how to display metric values. Can be a
+      flat dict applying globally to all metrics: Keys can be 'Value' and
+      'Ratio'. Values can be 'absolute', 'percent', 'pp', or a formatting string
+      (e.g., '{:.2%}'). By default, Value is in absolute form and Ratio in
+      percent. For example: {'Value': '{:,.0f}', 'Ratio': '{:.1f}%'} Can also be
+      a nested dict keyed by metric column name to specify different formats for
+      each metric (with an optional 'default' key for fallback). A metric key
+      can also map directly to a string, which sets its 'Ratio' format. For
+      example: { 'Clicks': {'Value': '{:,.0f}', 'Ratio': '{:.1f}%'}, 'CTR':
+        {'Value': '{:.4f}', 'Ratio': '{:.2f}%'}, 'Latency': '{:.2f}%',  #
+        shorthand string to format Ratio 'default': {'Value': 'absolute',
+        'Ratio': 'percent'}, } See confidence_interval_display_demo.ipynb for
+        interactive examples.
 
   Returns:
     A dict which can be used as a custom formatter for
@@ -507,8 +561,10 @@ def _get_formatter(df,
     elif col == 'Dimensions':
       custom_formatter[i] = dimension_formatter
     else:
-      custom_formatter[i] = MetricFormatter(metric_formats, if_flip_colors[i],
-                                            hide_null_ctrl)
+      col_format = _resolve_metric_format(col, metric_formats)
+      custom_formatter[i] = MetricFormatter(
+          col_format, if_flip_colors[i], hide_null_ctrl
+      )
   return custom_formatter
 
 
@@ -653,10 +709,20 @@ def get_formatted_df(
     dims: The column names of slicing dimesions, can be a list or a string.
     aggregate_dimensions: Whether to aggregate all dimensions in to one column.
     show_control: If False, only ratio values in non-control rows are shown.
-    metric_formats: A dict specifying how to display metric values. Keys can be
-      'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp' or a
-      formatting string. For example, '{:.2%}' would have the same effect as
-      'percent'. By default, Value is in absolute form and Ratio in percent.
+    metric_formats: A dict specifying how to display metric values. Can be a
+      flat dict applying globally to all metrics: Keys can be 'Value' and
+      'Ratio'. Values can be 'absolute', 'percent', 'pp', or a formatting string
+      (e.g., '{:.2%}'). By default, Value is in absolute form and Ratio in
+      percent. For example: {'Value': '{:,.0f}', 'Ratio': '{:.1f}%'} Can also be
+      a nested dict keyed by metric column name to specify different formats for
+      each metric (with an optional 'default' key for fallback). A metric key
+      can also map directly to a string, which sets its 'Ratio' format. For
+      example: { 'Clicks': {'Value': '{:,.0f}', 'Ratio': '{:.1f}%'}, 'CTR':
+        {'Value': '{:.4f}', 'Ratio': '{:.2f}%'}, 'Latency': '{:.2f}%',  #
+        shorthand string to format Ratio 'default': {'Value': 'absolute',
+        'Ratio': 'percent'}, } See
+        third_party/py/meterstick/v2/confidence_interval_display_demo.ipynb for
+        interactive examples.
     metric: The column name of metrics.
     ratio: The column name for ratio.
     value: The column name for value.
@@ -863,10 +929,20 @@ def render(
     dims: The column names of slicing dimesions, can be a list or a string.
     aggregate_dimensions: Whether to aggregate all dimensions in to one column.
     show_control: If False, only ratio values in non-control rows are shown.
-    metric_formats: A dict specifying how to display metric values. Keys can be
-      'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp' or a
-      formatting string. For example, '{:.2%}' would have the same effect as
-      'percent'. By default, Value is in absolute form and Ratio in percent.
+    metric_formats: A dict specifying how to display metric values. Can be a
+      flat dict applying globally to all metrics: Keys can be 'Value' and
+      'Ratio'. Values can be 'absolute', 'percent', 'pp', or a formatting string
+      (e.g., '{:.2%}'). By default, Value is in absolute form and Ratio in
+      percent. For example: {'Value': '{:,.0f}', 'Ratio': '{:.1f}%'} Can also be
+      a nested dict keyed by metric column name to specify different formats for
+      each metric (with an optional 'default' key for fallback). A metric key
+      can also map directly to a string, which sets its 'Ratio' format. For
+      example: { 'Clicks': {'Value': '{:,.0f}', 'Ratio': '{:.1f}%'}, 'CTR':
+        {'Value': '{:.4f}', 'Ratio': '{:.2f}%'}, 'Latency': '{:.2f}%',  #
+        shorthand string to format Ratio 'default': {'Value': 'absolute',
+        'Ratio': 'percent'}, } See
+        third_party/py/meterstick/v2/confidence_interval_display_demo.ipynb for
+        interactive examples.
     metric: The column name of metrics.
     ratio: The column name for ratio.
     value: The column name for value.
