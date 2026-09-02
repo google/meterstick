@@ -818,6 +818,28 @@ class DisplayMetricsTest(absltest.TestCase):
     )
     self.assertEqual(list(sorted_str), ['Exp 2', 'Exp 10'])
 
+  def test_integer_metrics_formatting(self):
+    df = pd.DataFrame({
+        'Control_Id': ['expr_foo', 'expr_foo'],
+        'Control_Value': [None, 10],
+        'Experiment_Id': ['expr_foo', 'expr_bar'],
+        'Is_Control': [True, False],
+        'Metric': ['clicks', 'clicks'],
+        'Ratio': [None, 5.5],
+        'Value': [10, 15],
+        'CI_Lower': [None, 1.0],
+        'CI_Upper': [None, 12.0],
+    })
+    res = confidence_interval_display.get_formatted_df(
+        df, integer_metrics=['clicks']
+    )
+    self.assertEqual(
+        res['clicks'].iloc[0], '<div class="ci-display-cell">10</div>'
+    )
+    self.assertIn('>15<', res['clicks'].iloc[1])
+    self.assertNotIn('10.0000', res['clicks'].iloc[0])
+    self.assertNotIn('15.0000', res['clicks'].iloc[1])
+
 
 if __name__ == '__main__':
   absltest.main()

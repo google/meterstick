@@ -350,12 +350,16 @@ class MetricFormatter(object):
       include html classes used to style with CSS.
   """
 
-  def __init__(self,
-               metric_formats=None,
-               if_flip_color=None,
-               hide_null_ctrl=False):
-    metric_formats = metric_formats or {}
-    metric_formats.setdefault('Value', 'absolute')
+  def __init__(
+      self,
+      metric_formats=None,
+      if_flip_color=None,
+      hide_null_ctrl=False,
+      is_integer=False,
+  ):
+    metric_formats = copy.copy(metric_formats) if metric_formats else {}
+    default_value_format = '{:.0f}' if is_integer else 'absolute'
+    metric_formats.setdefault('Value', default_value_format)
     metric_formats.setdefault('Ratio', 'absolute')
     self.if_flip_color = if_flip_color
     self.hide_null_ctrl = hide_null_ctrl
@@ -363,7 +367,8 @@ class MetricFormatter(object):
     self.form_lookup = {
         'percent': '{:.2f}',
         'absolute': '{:.4f}',
-        'pp': '{:.2f}'
+        'pp': '{:.2f}',
+        'int': '{:.0f}',
     }
     self.unit_lookup = {'percent': '%', 'pp': 'pp'}
 
@@ -525,7 +530,8 @@ def _get_formatter(df,
                    dims,
                    if_flip_colors,
                    hide_null_ctrl=False,
-                   metric_formats=None):
+                   metric_formats=None,
+                   integer_metrics=None):
   """Returns a custom formatter for df.
 
   Args:
@@ -549,6 +555,8 @@ def _get_formatter(df,
         shorthand string to format Ratio 'default': {'Value': 'absolute',
         'Ratio': 'percent'}, } See confidence_interval_display_demo.ipynb for
         interactive examples.
+    integer_metrics: An optional iterable of metric names whose Value column
+      should be formatted as whole numbers by default (using '{:.0f}').
 
   Returns:
     A dict which can be used as a custom formatter for
@@ -562,8 +570,15 @@ def _get_formatter(df,
       custom_formatter[i] = dimension_formatter
     else:
       col_format = _resolve_metric_format(col, metric_formats)
+      is_int = (
+          integer_metrics is not None and col in integer_metrics
+      ) or (
+          integer_metrics is None
+          and 'Value' in df
+          and pd.api.types.is_integer_dtype(df['Value'])
+      )
       custom_formatter[i] = MetricFormatter(
-          col_format, if_flip_colors[i], hide_null_ctrl
+          col_format, if_flip_colors[i], hide_null_ctrl, is_integer=is_int
       )
   return custom_formatter
 
@@ -668,6 +683,7 @@ def get_formatted_df(
     auto_add_description=True,
     show_metric_value_when_control_hidden=False,
     return_pre_agg_df=False,
+    integer_metrics=None,
 ):
   """Gets the formatted df with raw HTML as values in every cell.
 
@@ -765,6 +781,8 @@ def get_formatted_df(
       False. If True, we also display the raw metric value, otherwise only the
       change and confidence interval are displayed.
     return_pre_agg_df: If to return the pre-aggregated df.
+    integer_metrics: An optional iterable of metric names whose Value column
+      should be formatted as whole numbers by default (using '{:.0f}').
 
   Returns:
     A DataFrame with raw HTML in each cell ready to be rendered. If
@@ -826,8 +844,14 @@ def get_formatted_df(
   flip_color = flip_color or []
   if_flip_colors = [c in flip_color for c in formatted_df.columns]
 
-  custom_formatters = _get_formatter(formatted_df, dims, if_flip_colors,
-                                     hide_null_ctrl, metric_formats)
+  custom_formatters = _get_formatter(
+      formatted_df,
+      dims,
+      if_flip_colors,
+      hide_null_ctrl,
+      metric_formats,
+      integer_metrics=integer_metrics,
+  )
   formatted_df = formatted_df.rename(columns={
       'Experiment_Id': expr_id,
       'Description': description
@@ -888,6 +912,7 @@ def render(
     show_metric_value_when_control_hidden=False,
     return_pre_agg_df=False,
     return_formatted_df=False,
+    integer_metrics=None,
 ):
   """Gets the formatted df with raw HTML as values in every cell.
 
@@ -986,6 +1011,8 @@ def render(
       change and confidence interval are displayed.
     return_pre_agg_df: If to return the pre-aggregated df.
     return_formatted_df: If to return raw HTML df to be rendered.
+    integer_metrics: An optional iterable of metric names whose Value column
+      should be formatted as whole numbers by default (using '{:.0f}').
 
   Returns:
     Displays confidence interval nicely for df, or aggregated/formatted if
@@ -1016,6 +1043,7 @@ def render(
       auto_add_description,
       show_metric_value_when_control_hidden,
       return_pre_agg_df,
+      integer_metrics=integer_metrics,
   )
   if return_pre_agg_df or return_formatted_df:
     return formatted_df
