@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import copy
 import inspect
+import re
 import types
 from typing import Any, Iterable, List, Literal, Optional, Sequence, Text, Tuple, Type, Union
 import warnings
@@ -693,6 +694,12 @@ class AbsoluteChange(Comparison):
       to_drop = [i for i in res.index.names if i not in self.extra_index]
       idx_to_match = res.index.droplevel(to_drop) if to_drop else res.index
       res = res[~idx_to_match.isin([self.baseline_key])]
+    for col in children.columns:
+      if pd.api.types.is_integer_dtype(children[col].dtype):
+        try:
+          res[col] = res[col].astype(children[col].dtype)
+        except (ValueError, TypeError):
+          pass
     return res
 
   def get_sql_template_for_comparison(self, raw_table_alias, base_table_alias):
@@ -1929,19 +1936,40 @@ def get_display_fn(name,
       return_pre_agg_df/return_formatted_df is True.
     """
     base = res.meterstick_change_base
+    integer_metrics = set()
+    comparison_suffix = [
+        AbsoluteChange('', '').name_tmpl.format(''),
+        PercentChange('', '').name_tmpl.format(''),
+    ]
+    comparison_suffix_re = '(%s)$' % '|'.join(comparison_suffix)
+
+    if isinstance(res.columns, pd.MultiIndex):
+      for metric, stat in res.columns:
+        if stat == 'Value' and pd.api.types.is_integer_dtype(
+            res[(metric, stat)]
+        ):
+          integer_metrics.add(metric)
+          integer_metrics.add(re.sub(comparison_suffix_re, '', str(metric)))
+    else:
+      for col in res.columns:
+        if pd.api.types.is_integer_dtype(res[col]):
+          integer_metrics.add(col)
+          integer_metrics.add(re.sub(comparison_suffix_re, '', str(col)))
+
+    if base is not None and hasattr(base, 'metric_dtypes'):
+      for metric, dtype in base.metric_dtypes.items():
+        if pd.api.types.is_integer_dtype(dtype):
+          integer_metrics.add(metric)
+          integer_metrics.add(re.sub(comparison_suffix_re, '', str(metric)))
+
     if res.index.names[0] != 'Metric':
       res = utils.melt(res)
     if base is not None:
       # base always has the baseline so needs to be at left.
       res = base.join(res)
-      comparison_suffix = [
-          AbsoluteChange('', '').name_tmpl.format(''),
-          PercentChange('', '').name_tmpl.format(''),
-      ]
-      comparison_suffix = '(%s)$' % '|'.join(comparison_suffix)
       # Don't use inplace=True. It will change the index of 'base' too.
       res.index = res.index.set_levels(
-          res.index.levels[0].str.replace(comparison_suffix, '', regex=True),
+          res.index.levels[0].str.replace(comparison_suffix_re, '', regex=True),
           level=0,
       )
       show_control = True if show_control is None else show_control
@@ -1980,6 +2008,7 @@ def get_display_fn(name,
         auto_add_description=auto_add_description,
         show_metric_value_when_control_hidden=show_metric_value_when_control_hidden,
         return_pre_agg_df=return_pre_agg_df,
+        integer_metrics=integer_metrics,
     )
     if return_pre_agg_df or return_formatted_df:
       return formatted_df
@@ -2094,19 +2123,69 @@ class MetricWithCI(Operation):
 
   def compute_slices(self, df, split_by=None):
     std = super(MetricWithCI, self).compute_slices(df, split_by)
-    point_est = self.compute_point_estimate(df, split_by)
+    try:
+      point_est_unmelted = self.compute_point_estimate(
+          df, split_by, melted=False
+      )
+    except TypeError:
+      point_est_unmelted = self.compute_point_estimate(df, split_by)
+    if isinstance(point_est_unmelted, pd.DataFrame):
+      if 'Value' in point_est_unmelted.columns:
+        point_est_dtypes = None
+        point_est = point_est_unmelted
+      else:
+        point_est_dtypes = point_est_unmelted.dtypes
+        point_est = utils.melt(point_est_unmelted)
+    else:
+      point_est_dtypes = None
+      try:
+        point_est = self.compute_point_estimate(df, split_by, melted=True)
+      except TypeError:
+        point_est = self.compute_point_estimate(df, split_by)
+      if not (
+          isinstance(point_est, pd.DataFrame)
+          and 'Value' in point_est.columns
+      ):
+        point_est = utils.melt(point_est)
     res = point_est.join(utils.melt(std))
     if self.confidence:
       res = self.compute_ci(res)
 
     res = utils.unmelt(res)
+    if point_est_dtypes is not None:
+      res = self.restore_dtypes(res, point_est_dtypes)
     if not self.confidence:
       return res
     base = self.compute_change_base(df, split_by)
     return self.add_base_to_res(res, base)
 
-  def compute_point_estimate(self, df, split_by):
-    return self.compute_child(df, split_by, melted=True)
+  def compute_point_estimate(self, df, split_by, melted=True):
+    return self.compute_child(df, split_by, melted=melted)
+
+  @staticmethod
+  def restore_dtypes(res, point_est_dtypes):
+    """Restores column dtypes for point estimates in res."""
+    if not isinstance(res, pd.DataFrame):
+      return res
+    for col, orig_dtype in point_est_dtypes.items():
+      if pd.api.types.is_integer_dtype(orig_dtype):
+        if isinstance(res.columns, pd.MultiIndex):
+          if (col, 'Value') in res.columns:
+            try:
+              res[(col, 'Value')] = res[(col, 'Value')].astype(orig_dtype)
+            except (ValueError, TypeError):
+              pass
+        elif col in res.columns:
+          try:
+            res[col] = res[col].astype(orig_dtype)
+          except (ValueError, TypeError):
+            pass
+        elif 'Value' in res.columns and len(point_est_dtypes) == 1:
+          try:
+            res['Value'] = res['Value'].astype(orig_dtype)
+          except (ValueError, TypeError):
+            pass
+    return res
 
   def compute_ci(self, res):
     """Constructs the confidence interval.
@@ -2158,8 +2237,12 @@ class MetricWithCI(Operation):
       base = self.compute_util_metric_on_sql(
           util_metric, df, to_split, execute, mode=mode, cache_key=cache_key)
     base.columns = [change.name_tmpl.format(c) for c in base.columns]
+    base_dtypes = base.dtypes
     base = utils.melt(base)
     base.columns = ['_base_value']
+    with warnings.catch_warnings():
+      warnings.simplefilter(action='ignore', category=UserWarning)
+      base.metric_dtypes = base_dtypes
     return base
 
   @staticmethod

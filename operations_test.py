@@ -900,6 +900,9 @@ class JackknifeTests(parameterized.TestCase):
             names=['Metric', None],
         ),
     )
+    expected[('count(x)', 'Value')] = expected[('count(x)', 'Value')].astype(
+        int
+    )
     testing.assert_frame_equal(unmelted, expected)
 
     melted = self.jk.compute_on(df, melted=True)
@@ -980,11 +983,12 @@ class JackknifeTests(parameterized.TestCase):
     jk = operations.Jackknife('cookie', metrics.Sum('x'))
     output = jk.compute_on(df)
     expected = pd.DataFrame(
-        [[1.0, np.nan]],
+        [[1, np.nan]],
         columns=pd.MultiIndex.from_product(
             [['sum(x)'], ['Value', 'Jackknife SE']], names=['Metric', None]
         ),
     )
+    expected[('sum(x)', 'Value')] = expected[('sum(x)', 'Value')].astype(int)
     testing.assert_frame_equal(output, expected)
 
   @parameterized.named_parameters(*PRECOMPUTABLE_METRICS_JK)
@@ -1210,7 +1214,7 @@ class JackknifeTests(parameterized.TestCase):
     m = operations.Jackknife('cookie', metrics.Count('x', distinct=True))
     output = m.compute_on(df)
     expected = pd.DataFrame({
-        ('count(distinct x)', 'Value'): [2.0],
+        ('count(distinct x)', 'Value'): [2],
         ('count(distinct x)', 'Jackknife SE'): [2.0 / 3],
     })
     expected.columns.names = ['Metric', None]
@@ -1457,10 +1461,10 @@ class JackknifeTests(parameterized.TestCase):
                 ),
             ],
             'sum(x)': [
-                '<div class="ci-display-cell">6.0000</div>',
+                '<div class="ci-display-cell">6</div>',
                 (
                     '<div class="ci-display-good-change'
-                    ' ci-display-cell"><div>300.0000<div'
+                    ' ci-display-cell"><div>300<div'
                     ' class="ci-display-flex-line-break"></div><span'
                     ' class="ci-display-ratio">4900.00%</span><div'
                     ' class="ci-display-flex-line-break"></div><span'
@@ -1472,6 +1476,61 @@ class JackknifeTests(parameterized.TestCase):
     )
     expected.columns.name = 'Metric'
     testing.assert_frame_equal(output, expected)
+
+  def test_jackknife_metric_dtypes_preserved(self):
+    df = pd.DataFrame({
+        'x': [1.5, 2.5, 3.5, 4.5, 5.5],
+        'y': [1, 2, 3, 4, 5],
+        'cookie': [1, 1, 2, 3, 4],
+        'grp': ['foo', 'foo', 'bar', 'bar', 'bar'],
+    })
+    ms = metrics.MetricList(
+        [metrics.Sum('y'), metrics.Count('x'), metrics.Sum('x')]
+    )
+    change = operations.AbsoluteChange('grp', 'foo', ms)
+    jk = operations.Jackknife('cookie', change, confidence=0.9)
+    res = jk.compute_on(df)
+
+    self.assertTrue(
+        pd.api.types.is_integer_dtype(res[('sum(y) Absolute Change', 'Value')])
+    )
+    self.assertTrue(
+        pd.api.types.is_integer_dtype(
+            res[('count(x) Absolute Change', 'Value')]
+        )
+    )
+    self.assertTrue(
+        pd.api.types.is_float_dtype(res[('sum(x) Absolute Change', 'Value')])
+    )
+
+    formatted = res.display(return_formatted_df=True)
+    sum_y_cells = ' '.join(formatted['sum(y)'])
+    self.assertIn('>3<', sum_y_cells)
+    self.assertNotIn('3.0000', sum_y_cells)
+
+    # Also verify PercentChange preserves underlying metric dtypes in
+    # meterstick_change_base and formats baseline/treatment counts as integers.
+    change_pct = operations.PercentChange('grp', 'foo', ms)
+    jk_pct = operations.Jackknife('cookie', change_pct, confidence=0.9)
+    res_pct = jk_pct.compute_on(df)
+
+    self.assertTrue(
+        pd.api.types.is_float_dtype(res_pct[('sum(y) Percent Change', 'Value')])
+    )
+    self.assertTrue(
+        pd.api.types.is_integer_dtype(
+            res_pct.meterstick_change_base.metric_dtypes[
+                'sum(y) Percent Change'
+            ]
+        )
+    )
+
+    formatted_pct = res_pct.display(return_formatted_df=True)
+    sum_y_pct_cells = ' '.join(formatted_pct['sum(y)'])
+    self.assertIn('>3<', sum_y_pct_cells)
+    self.assertIn('>12<', sum_y_pct_cells)
+    self.assertNotIn('3.0000', sum_y_pct_cells)
+    self.assertNotIn('12.0000', sum_y_pct_cells)
 
   def test_display_change_split_by(self):
     df = pd.DataFrame({
@@ -1513,20 +1572,20 @@ class JackknifeTests(parameterized.TestCase):
                 ),
             ],
             'sum(x)': [
-                '<div class="ci-display-cell">6.0000</div>',
+                '<div class="ci-display-cell">6</div>',
                 (
                     '<div class="ci-display-good-change'
-                    ' ci-display-cell"><div>1001.0000<div'
+                    ' ci-display-cell"><div>1001<div'
                     ' class="ci-display-flex-line-break"></div><span'
                     ' class="ci-display-ratio">995.0000</span><div'
                     ' class="ci-display-flex-line-break"></div><span'
                     ' class="ci-display-ci-range">[988.6862,'
                     ' 1001.3138]</span></div></div>'
                 ),
-                '<div class="ci-display-cell">4.0000</div>',
+                '<div class="ci-display-cell">4</div>',
                 (
                     '<div class="ci-display-cell">'
-                    '<div>3005.0000<div class="ci-display-flex-line-break">'
+                    '<div>3005<div class="ci-display-flex-line-break">'
                     '</div><span class="ci-display-ratio">3001.0000</span>'
                     '<div class="ci-display-flex-line-break"></div>'
                     '<span class="ci-display-ci-range">[-380.8246, 6382.8246]'
@@ -1829,6 +1888,9 @@ class BootstrapTests(parameterized.TestCase):
             names=['Metric', None],
         ),
     )
+    expected[('count(x)', 'Value')] = expected[('count(x)', 'Value')].astype(
+        int
+    )
     testing.assert_frame_equal(unmelted, expected)
 
     np.random.seed(42)
@@ -1882,7 +1944,11 @@ class BootstrapTests(parameterized.TestCase):
         columns=pd.MultiIndex.from_product(
             [[m.name], ['Value', 'Bootstrap SE']], names=['Metric', None]
         ),
-    ).astype(float)
+    )
+    if isinstance(m, metrics.Count):
+      expected[(m.name, 'Value')] = expected[(m.name, 'Value')].astype(int)
+    else:
+      expected = expected.astype(float)
 
     testing.assert_frame_equal(output1, expected)
     mock_fn_opt.mock.assert_called_once()
@@ -2133,6 +2199,9 @@ class BootstrapTests(parameterized.TestCase):
             ],
             names=['Metric', None],
         ),
+    )
+    expected[('count(x)', 'Value')] = expected[('count(x)', 'Value')].astype(
+        int
     )
     testing.assert_frame_equal(unmelted, expected, rtol=0.1)
     unmelted.display()  # Check display() runs.
@@ -2456,6 +2525,9 @@ class PoissonBootstrapTests(parameterized.TestCase):
             ],
             names=['Metric', None],
         ),
+    )
+    expected[('count(x)', 'Value')] = expected[('count(x)', 'Value')].astype(
+        int
     )
     testing.assert_frame_equal(unmelted, expected, rtol=0.1)
     unmelted.display()  # Check display() runs.
