@@ -336,7 +336,7 @@ class MetricFormatter(object):
 
   Attributes:
     metric_formats: A dict specifying how to display metric values. Keys can be
-      'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp', 'int' or a
+      'Value' and 'Ratio'. Values can be 'absolute', 'percent', 'pp' or a
       formatting string. For example, '{:.2%}' would have the same effect as
       'percent'. By default, Value is in absolute form and Ratio in percent.
     if_flip_color: A boolean indicating if to flip green/red coloring scheme.
@@ -350,16 +350,12 @@ class MetricFormatter(object):
       include html classes used to style with CSS.
   """
 
-  def __init__(
-      self,
-      metric_formats=None,
-      if_flip_color=None,
-      hide_null_ctrl=False,
-      is_integer=False,
-  ):
-    metric_formats = copy.copy(metric_formats) if metric_formats else {}
-    default_value_format = 'int' if is_integer else 'absolute'
-    metric_formats.setdefault('Value', default_value_format)
+  def __init__(self,
+               metric_formats=None,
+               if_flip_color=None,
+               hide_null_ctrl=False):
+    metric_formats = metric_formats or {}
+    metric_formats.setdefault('Value', 'absolute')
     metric_formats.setdefault('Ratio', 'absolute')
     self.if_flip_color = if_flip_color
     self.hide_null_ctrl = hide_null_ctrl
@@ -367,8 +363,7 @@ class MetricFormatter(object):
     self.form_lookup = {
         'percent': '{:.2f}',
         'absolute': '{:.4f}',
-        'pp': '{:.2f}',
-        'int': '{:.0f}',
+        'pp': '{:.2f}'
     }
     self.unit_lookup = {'percent': '%', 'pp': 'pp'}
 
@@ -377,7 +372,7 @@ class MetricFormatter(object):
 
     Args:
       val: A single value or a list of [ci_lower, ci_upper].
-      form: 'Absolute', 'percent', 'pp', 'int' or a formatting string.
+      form: 'Absolute', 'percent', 'pp' or a formatting string.
       is_ci: If val is a list for CI values.
 
     Returns:
@@ -526,19 +521,6 @@ def _resolve_metric_format(col, metric_formats):
   return default_format
 
 
-def _is_integer_column(col_series):
-  """Checks if all non-null values in a metric column are whole numbers."""
-  vals = []
-  for x in col_series:
-    if isinstance(x, (list, tuple)) and x:
-      val = x[0]
-      if val is not None and not pd.isna(val):
-        vals.append(val)
-  if not vals:
-    return False
-  return all(abs(v - round(v)) < 1e-9 for v in vals)
-
-
 def _get_formatter(df,
                    dims,
                    if_flip_colors,
@@ -555,16 +537,18 @@ def _get_formatter(df,
     hide_null_ctrl: If to hide control value or use '-' to represent it when it
       is null,
     metric_formats: A dict specifying how to display metric values. Can be a
-      flat dict applying globally to all metrics (e.g. {'Value': '{:,.0f}',
-      'Ratio': '{:.1f}%'}). Keys can be 'Value' and 'Ratio'. Values can be
-      'absolute', 'percent', 'pp', or a formatting string (e.g., '{:.2%}'). By
-      default, Value is in absolute form (or integer if all values are whole
-      numbers) and Ratio in percent. Can also be a nested dict keyed by metric
-      column name to specify different formats for each metric (with an optional
-      'default' key for fallback), e.g. {'Clicks': {'Value': '{:,.0f}', 'Ratio':
-      '{:.1f}%'}, 'Latency': '{:.2f}%', 'default': {'Value': 'absolute',
-      'Ratio': 'percent'}}. See confidence_interval_display_demo.ipynb for
-      interactive examples.
+      flat dict applying globally to all metrics: Keys can be 'Value' and
+      'Ratio'. Values can be 'absolute', 'percent', 'pp', or a formatting string
+      (e.g., '{:.2%}'). By default, Value is in absolute form and Ratio in
+      percent. For example: {'Value': '{:,.0f}', 'Ratio': '{:.1f}%'} Can also be
+      a nested dict keyed by metric column name to specify different formats for
+      each metric (with an optional 'default' key for fallback). A metric key
+      can also map directly to a string, which sets its 'Ratio' format. For
+      example: { 'Clicks': {'Value': '{:,.0f}', 'Ratio': '{:.1f}%'}, 'CTR':
+        {'Value': '{:.4f}', 'Ratio': '{:.2f}%'}, 'Latency': '{:.2f}%',  #
+        shorthand string to format Ratio 'default': {'Value': 'absolute',
+        'Ratio': 'percent'}, } See confidence_interval_display_demo.ipynb for
+        interactive examples.
 
   Returns:
     A dict which can be used as a custom formatter for
@@ -578,9 +562,8 @@ def _get_formatter(df,
       custom_formatter[i] = dimension_formatter
     else:
       col_format = _resolve_metric_format(col, metric_formats)
-      is_int = _is_integer_column(df[col])
       custom_formatter[i] = MetricFormatter(
-          col_format, if_flip_colors[i], hide_null_ctrl, is_integer=is_int
+          col_format, if_flip_colors[i], hide_null_ctrl
       )
   return custom_formatter
 
