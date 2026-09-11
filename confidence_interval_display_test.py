@@ -818,8 +818,84 @@ class DisplayMetricsTest(absltest.TestCase):
     )
     self.assertEqual(list(sorted_str), ['Exp 2', 'Exp 10'])
 
+  def test_is_integer_column_with_integers(self):
+    int_series = pd.Series([
+        (100.0, 1.2, 1.0, 1.4),
+        (200.0, None, None, None),
+        (50.0, 0.5, 0.2, 0.8),
+    ])
+    self.assertTrue(confidence_interval_display._is_integer_column(int_series))
+
+  def test_is_integer_column_with_floats(self):
+    float_series = pd.Series([
+        (100.5, 1.2, 1.0, 1.4),
+        (200.0, None, None, None),
+    ])
+    self.assertFalse(
+        confidence_interval_display._is_integer_column(float_series)
+    )
+
+  def test_is_integer_column_with_all_none(self):
+    none_series = pd.Series([(None, None, None, None)])
+    self.assertFalse(
+        confidence_interval_display._is_integer_column(none_series)
+    )
+
+  def test_is_integer_column_empty(self):
+    empty_series = pd.Series([], dtype=object)
+    self.assertFalse(
+        confidence_interval_display._is_integer_column(empty_series)
+    )
+
+  def test_get_formatted_df_auto_detect_integer(self):
+    df = pd.DataFrame({
+        'CI_Lower': [None, -5.0, None, 0.001],
+        'CI_Upper': [None, 5.0, None, 0.005],
+        'Control_Id': ['expr_foo', 'expr_foo', 'expr_foo', 'expr_foo'],
+        'Control_Value': [None, 100.0, None, 0.05],
+        'Experiment_Id': ['expr_foo', 42, 'expr_foo', 42],
+        'Is_Control': [True, False, True, False],
+        'Metric': ['Clicks', 'Clicks', 'CTR', 'CTR'],
+        'Ratio': [None, 2.5, None, 0.003],
+        'Value': [100.0, 102.0, 0.05, 0.05015],
+    })
+    # No metric_formats provided: Clicks should auto-detect as int, CTR as float
+    actual = confidence_interval_display.get_formatted_df(
+        df,
+        aggregate_dimensions=False,
+        show_control=True,
+        ctrl_id='expr_foo',
+        auto_add_description=False,
+    )
+    # Clicks Value should be 100 and 102 (no decimals)
+    expected_clicks_ctrl = '<div class="ci-display-cell">100</div>'
+    expected_clicks_exp = LINE_BREAK.join((
+        '<div class="ci-display-cell"><div>102',
+        '<span class="ci-display-ratio">2.5000</span>',
+        (
+            '<span class="ci-display-ci-range">[-5.0000,'
+            ' 5.0000]</span></div></div>'
+        ),
+    ))
+    self.assertEqual(actual['Clicks'].iloc[0], expected_clicks_ctrl)
+    self.assertEqual(actual['Clicks'].iloc[1], expected_clicks_exp)
+
+    # CTR Value should be 0.0500 and 0.0502 (4 decimals)
+    expected_ctr_ctrl = '<div class="ci-display-cell">0.0500</div>'
+    expected_ctr_exp = LINE_BREAK.join((
+        '<div class="ci-display-good-change ci-display-cell"><div>0.0502',
+        '<span class="ci-display-ratio">0.0030</span>',
+        '<span class="ci-display-ci-range">[0.0010, 0.0050]</span></div></div>',
+    ))
+    self.assertEqual(actual['CTR'].iloc[0], expected_ctr_ctrl)
+    self.assertEqual(actual['CTR'].iloc[1], expected_ctr_exp)
+
+  def test_metric_formatter_is_integer(self):
+    formatter = confidence_interval_display.MetricFormatter(is_integer=True)
+    self.assertEqual(formatter.metric_formats['Value'], 'int')
+    result = formatter((100.0, 1.2, 0.5, 2.0))
+    self.assertIn('<div>100', result)
+
 
 if __name__ == '__main__':
   absltest.main()
-
-

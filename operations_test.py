@@ -1457,10 +1457,10 @@ class JackknifeTests(parameterized.TestCase):
                 ),
             ],
             'sum(x)': [
-                '<div class="ci-display-cell">6.0000</div>',
+                '<div class="ci-display-cell">6</div>',
                 (
                     '<div class="ci-display-good-change'
-                    ' ci-display-cell"><div>300.0000<div'
+                    ' ci-display-cell"><div>300<div'
                     ' class="ci-display-flex-line-break"></div><span'
                     ' class="ci-display-ratio">4900.00%</span><div'
                     ' class="ci-display-flex-line-break"></div><span'
@@ -1513,20 +1513,20 @@ class JackknifeTests(parameterized.TestCase):
                 ),
             ],
             'sum(x)': [
-                '<div class="ci-display-cell">6.0000</div>',
+                '<div class="ci-display-cell">6</div>',
                 (
                     '<div class="ci-display-good-change'
-                    ' ci-display-cell"><div>1001.0000<div'
+                    ' ci-display-cell"><div>1001<div'
                     ' class="ci-display-flex-line-break"></div><span'
                     ' class="ci-display-ratio">995.0000</span><div'
                     ' class="ci-display-flex-line-break"></div><span'
                     ' class="ci-display-ci-range">[988.6862,'
                     ' 1001.3138]</span></div></div>'
                 ),
-                '<div class="ci-display-cell">4.0000</div>',
+                '<div class="ci-display-cell">4</div>',
                 (
                     '<div class="ci-display-cell">'
-                    '<div>3005.0000<div class="ci-display-flex-line-break">'
+                    '<div>3005<div class="ci-display-flex-line-break">'
                     '</div><span class="ci-display-ratio">3001.0000</span>'
                     '<div class="ci-display-flex-line-break"></div>'
                     '<span class="ci-display-ci-range">[-380.8246, 6382.8246]'
