@@ -2235,6 +2235,7 @@ class MetricWithCI(Operation):
 
   @staticmethod
   def get_stderrs(bucket_estimates):
+    bucket_estimates = bucket_estimates.replace([np.inf, -np.inf], np.nan)
     dof = bucket_estimates.count(axis=1) - 1
     return bucket_estimates.std(1), dof
 
@@ -2781,6 +2782,17 @@ class MetricWithCI(Operation):
     return False
 
 
+def _iter_leaves_with_split_by(metric, split_by):
+  """Yields (leaf_metric, accumulated_split_by) for every leaf path."""
+  curr_split_by = list(split_by) + list(metric.extra_split_by)
+  if not metric.children:
+    yield metric, curr_split_by
+    return
+  for c in metric.children:
+    if utils.is_metric(c):
+      yield from _iter_leaves_with_split_by(c, curr_split_by)
+
+
 class Jackknife(MetricWithCI):
   """Class for Jackknife estimates of standard errors.
 
@@ -2824,7 +2836,7 @@ class Jackknife(MetricWithCI):
     Metrics in self can be expressed by Sum or Count so we apply the trick by
     1. replace self with an equivalent tree whose leaf Metrics are all Sum or
     Count.
-    2. computes it on self.unit + split_by.
+    2. computes the leaf Metrics on self.unit + split_by.
     3. loop through the cache and find all Sum and Count results in #2. Use them
     to compute the LOOs and save to cache.
     4. call super().compute_slices() which will just hits the cached results.
@@ -2842,7 +2854,13 @@ class Jackknife(MetricWithCI):
       util, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)
       return self.compute_util_metric_on(util, df, split_by)
 
-    self.compute_child(df, (split_by or []) + [self.unit])
+    child_with_pushed_filters = utils.push_filters_to_leaf(
+        self.children[0], is_root=False
+    )
+    for leaf, leaf_split_by in _iter_leaves_with_split_by(
+        child_with_pushed_filters, (split_by or []) + [self.unit]
+    ):
+      self.compute_util_metric_on(leaf, df, leaf_split_by)
     precomputed = self.find_all_in_cache_by_metric_type(metric=metrics.Sum)
     precomputed.update(
         self.find_all_in_cache_by_metric_type(metric=metrics.Count)
@@ -2971,7 +2989,14 @@ class Jackknife(MetricWithCI):
   @staticmethod
   def get_stderrs(bucket_estimates):
     stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
-    return stderrs * dof / np.sqrt(dof + 1), dof
+    valid = dof > 0
+    denom = np.where(valid, np.sqrt(dof + 1), np.nan)
+    se = np.where(valid, stderrs * dof / denom, np.nan)
+    if isinstance(stderrs, pd.Series):
+      se = pd.Series(se, index=stderrs.index, name=stderrs.name)
+    elif isinstance(stderrs, pd.DataFrame):
+      se = pd.DataFrame(se, index=stderrs.index, columns=stderrs.columns)
+    return se, dof
 
   def compute_children_sql(
       self, table, split_by, execute, mode=None, batch_size=None
@@ -4566,7 +4591,8 @@ class MetricFunction(Operation):
     self.sql_func = sql_func
 
   def compute_on_children(self, children, split_by):
-    new_df = self.func(children)
+    with np.errstate(divide='ignore', invalid='ignore'):
+      new_df = self.func(children)
     new_df = copy_meterstick_metadata(children, new_df)
     return new_df
 
