@@ -1100,13 +1100,13 @@ class Metric(object):
     return CompositeMetric(lambda x, _: -x, '-{}', (self, -1))
 
   def __div__(self, other):
-    return CompositeMetric(lambda x, y: x / y, '{} / {}', (self, other))
+    return CompositeMetric(_safe_divide, '{} / {}', (self, other))
 
   def __truediv__(self, other):
     return self.__div__(other)
 
   def __rdiv__(self, other):
-    return CompositeMetric(lambda x, y: x / y, '{} / {}', (other, self))
+    return CompositeMetric(_safe_divide, '{} / {}', (other, self))
 
   def __rtruediv__(self, other):
     return self.__rdiv__(other)
@@ -1803,6 +1803,26 @@ class CompositeMetric(Metric):
     return super(CompositeMetric, self).get_fingerprint(attr_to_exclude)
 
 
+def _safe_divide(x, y):
+  """Divides x by y, returning NaN instead of +/-inf on division by zero."""
+  if isinstance(x, sql.Column) or isinstance(y, sql.Column):
+    return x / y
+  if isinstance(x, (pd.Series, pd.DataFrame)):
+    x = x.astype(float)
+  if isinstance(y, (pd.Series, pd.DataFrame)):
+    y = y.astype(float)
+  with np.errstate(divide='ignore', invalid='ignore'):
+    try:
+      res = x / y
+    except ZeroDivisionError:
+      return np.nan
+  if isinstance(res, (pd.Series, pd.DataFrame)):
+    return res.replace([np.inf, -np.inf], np.nan)
+  if np.ndim(res) == 0:
+    return np.nan if np.isinf(res) else res
+  return np.where(np.isinf(res), np.nan, res)
+
+
 class Ratio(CompositeMetric):
   """Syntactic sugar for Sum('A') / Sum('B')."""
 
@@ -1812,7 +1832,7 @@ class Ratio(CompositeMetric):
                name: Optional[Text] = None,
                where: Optional[Text] = None):
     super(Ratio, self).__init__(
-        lambda x, y: x / y,
+        _safe_divide,
         '{} / {}', (Sum(numerator), Sum(denominator)),
         where=where)
     self.numerator = numerator
