@@ -1294,7 +1294,7 @@ class MetricList(Metric):
       children.columns = self.columns
     return children
 
-  def manipulate(  # pytype: disable=annotation-type-mismatch
+  def manipulate(
       self,
       res: pd.Series,
       melted: bool = False,
