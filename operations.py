@@ -2235,6 +2235,7 @@ class MetricWithCI(Operation):
 
   @staticmethod
   def get_stderrs(bucket_estimates):
+    bucket_estimates = bucket_estimates.replace([np.inf, -np.inf], np.nan)
     dof = bucket_estimates.count(axis=1) - 1
     return bucket_estimates.std(1), dof
 
@@ -2971,7 +2972,14 @@ class Jackknife(MetricWithCI):
   @staticmethod
   def get_stderrs(bucket_estimates):
     stderrs, dof = super(Jackknife, Jackknife).get_stderrs(bucket_estimates)
-    return stderrs * dof / np.sqrt(dof + 1), dof
+    valid = dof > 0
+    denom = np.where(valid, np.sqrt(dof + 1), np.nan)
+    se = np.where(valid, stderrs * dof / denom, np.nan)
+    if isinstance(stderrs, pd.Series):
+      se = pd.Series(se, index=stderrs.index, name=stderrs.name)
+    elif isinstance(stderrs, pd.DataFrame):
+      se = pd.DataFrame(se, index=stderrs.index, columns=stderrs.columns)
+    return se, dof
 
   def compute_children_sql(
       self, table, split_by, execute, mode=None, batch_size=None
@@ -4566,7 +4574,8 @@ class MetricFunction(Operation):
     self.sql_func = sql_func
 
   def compute_on_children(self, children, split_by):
-    new_df = self.func(children)
+    with np.errstate(divide='ignore', invalid='ignore'):
+      new_df = self.func(children)
     new_df = copy_meterstick_metadata(children, new_df)
     return new_df
 
