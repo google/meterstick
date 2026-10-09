@@ -18,6 +18,7 @@ from __future__ import print_function
 
 import copy
 import inspect
+import warnings
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -531,6 +532,42 @@ class TestCompositeMetric(absltest.TestCase):
     expected = metrics.Sum('X') / metrics.Sum('Y')
     expected = expected.compute_on(self.df)
     testing.assert_frame_equal(output, expected)
+
+  def test_ratio_and_div_zero_denominator(self):
+    df = pd.DataFrame({
+        'X': [0.0, 2.0, 0.0],
+        'Y': [0.0, 0.0, 0.0],
+        'grp': ['a', 'b', 'b'],
+    })
+    for m in (
+        metrics.Ratio('X', 'Y'),
+        metrics.Sum('X') / metrics.Sum('Y'),
+        1.0 / metrics.Sum('Y'),
+    ):
+      with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always', RuntimeWarning)
+        scalar_out = m.compute_on(df, return_dataframe=False)
+        series_out = m.compute_on(df, split_by='grp', return_dataframe=False)
+      self.assertEmpty(w)
+      self.assertTrue(np.isnan(scalar_out))
+      self.assertTrue(series_out.isna().all())
+
+  def test_ratio_zero_denominator_partial_split_by_and_object_dtype(self):
+    df = pd.DataFrame({
+        'X': [10, 20, 0, 5],
+        'Y': [2, 3, 0, 0],
+        'grp': ['a', 'a', 'b', 'c'],
+    }).astype(object)
+    for m in (metrics.Ratio('X', 'Y'), metrics.Sum('X') / metrics.Sum('Y')):
+      with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always', RuntimeWarning)
+        res = m.compute_on(df, split_by='grp')
+      self.assertEmpty(w)
+      expected = pd.DataFrame(
+          {m.name: [6.0, np.nan, np.nan]},
+          index=pd.Index(['a', 'b', 'c'], name='grp'),
+      )
+      testing.assert_frame_equal(res, expected)
 
   def test_to_dataframe(self):
     metric = 5 + metrics.Sum('X')
