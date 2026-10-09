@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+import warnings
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -302,6 +303,14 @@ class SimpleOperationTests(absltest.TestCase):
     )
     testing.assert_frame_equal(output, expected)
 
+  def test_exponential_transform_log10(self):
+    metric = operations.ExponentialTransform(metrics.Sum('x'), base='log10')
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame(
+        {'10^(sum(x))': [10**8]}
+    )
+    testing.assert_frame_equal(output, expected)
+
   def test_exponential_percent_transform_ln(self):
     metric = operations.ExponentialPercentTransform(metrics.Sum('x'), base='ln')
     output = metric.compute_on(self.df)
@@ -326,7 +335,29 @@ class SimpleOperationTests(absltest.TestCase):
       operations.LogTransform(metrics.Sum('x'), base='log2')
 
     with self.assertRaisesRegex(ValueError, "base must be 'ln' or 'log10'"):
+      operations.ExponentialTransform(metrics.Sum('x'), base='log2')
+
+    with self.assertRaisesRegex(ValueError, "base must be 'ln' or 'log10'"):
       operations.ExponentialPercentTransform(metrics.Sum('x'), base='log2')
+
+  def test_metric_function_rejects_metric_with_ci_without_confidence(self):
+    df = pd.DataFrame({'x': [1.0, 2.0, 3.0], 'unit': [0, 1, 2]})
+    m = (
+        metrics.Sum('x')
+        | operations.LogTransform()
+        | operations.Jackknife('unit')
+        | operations.ExponentialTransform()
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        'standard error.*cannot be transformed.*confidence',
+    ):
+      m.compute_on(df)
+    with self.assertRaisesRegex(
+        ValueError,
+        'standard error.*cannot be transformed.*confidence',
+    ):
+      m.to_sql('T')
 
 
 class PrePostChangeTests(parameterized.TestCase):
@@ -775,6 +806,11 @@ SIMPLE_OPERATIONS = [
     ('Nxx', diversity.Nxx('grp', 0.4)),
     ('LogTransform ln', operations.LogTransform()),
     ('LogTransform log10', operations.LogTransform(base='log10')),
+    ('ExponentialTransform ln', operations.ExponentialTransform()),
+    (
+        'ExponentialTransform log10',
+        operations.ExponentialTransform(base='log10'),
+    ),
     (
         'ExponentialPercentTransform ln',
         operations.ExponentialPercentTransform(),
@@ -983,6 +1019,56 @@ class JackknifeTests(parameterized.TestCase):
         [[1.0, np.nan]],
         columns=pd.MultiIndex.from_product(
             [['sum(x)'], ['Value', 'Jackknife SE']], names=['Metric', None]
+        ),
+    )
+    testing.assert_frame_equal(output, expected)
+
+  def test_jackknife_zero_denominator_in_one_loo_replicate(self):
+    df = pd.DataFrame({
+        'x': [2.0, 0.0, 0.0, 0.0],
+        'y': [4.0, 0.0, 0.0, 0.0],
+        'cookie': [0, 1, 2, 3],
+    })
+    jk = operations.Jackknife('cookie', metrics.Ratio('x', 'y'))
+    with warnings.catch_warnings(record=True) as w:
+      warnings.simplefilter('always', RuntimeWarning)
+      output = jk.compute_on(df)
+    self.assertEmpty(w)
+    # Dropping cookie 0 gives 0/0 -> NaN; dropping 1, 2, or 3 gives 2/4 = 0.5.
+    expected = pd.DataFrame(
+        [[0.5, 0.0]],
+        columns=pd.MultiIndex.from_product(
+            [['sum(x) / sum(y)'], ['Value', 'Jackknife SE']],
+            names=['Metric', None],
+        ),
+    )
+    testing.assert_frame_equal(output, expected)
+
+  def test_jackknife_inf_loo_replicate_filtered(self):
+    df = pd.DataFrame({
+        'x': [6.0, 0.0, 0.0, 0.0],
+        'y': [2.0, 1.0, 2.0, 3.0],
+        'cookie': [0, 1, 2, 3],
+    })
+    m = operations.LogTransform(metrics.Ratio('x', 'y'))
+    jk = operations.Jackknife('cookie', m)
+    with warnings.catch_warnings(record=True) as w:
+      warnings.simplefilter('always', RuntimeWarning)
+      output = jk.compute_on(df)
+    self.assertEmpty(w)
+    # Point estimate: log(6 / 8).
+    # LOO replicates:
+    # - drop 0: log(0 / 6) = -inf -> filtered to NaN
+    # - drop 1: log(6 / 7)
+    # - drop 2: log(6 / 6)
+    # - drop 3: log(6 / 5)
+    valid_loos = [np.log(6.0 / 7.0), np.log(6.0 / 6.0), np.log(6.0 / 5.0)]
+    expected_se = np.std(valid_loos, ddof=1) * 2.0 / np.sqrt(3.0)
+    expected = pd.DataFrame(
+        [[np.log(6.0 / 8.0), expected_se]],
+        columns=pd.MultiIndex.from_product(
+            [['Ln(sum(x) / sum(y))'], ['Value', 'Jackknife SE']],
+            names=['Metric', None],
         ),
     )
     testing.assert_frame_equal(output, expected)
@@ -2856,6 +2942,8 @@ class CommonTest(parameterized.TestCase):
         operations.Bootstrap('x', confidence=0.95),
         operations.LogTransform(),
         operations.LogTransform(base='log10'),
+        operations.ExponentialTransform(),
+        operations.ExponentialTransform(base='log10'),
         operations.ExponentialPercentTransform(),
         operations.ExponentialPercentTransform(base='log10'),
         diversity.HHI('x'),

@@ -2235,6 +2235,7 @@ class MetricWithCI(Operation):
 
   @staticmethod
   def get_stderrs(bucket_estimates):
+    bucket_estimates = bucket_estimates.replace([np.inf, -np.inf], np.nan)
     dof = bucket_estimates.count(axis=1) - 1
     return bucket_estimates.std(1), dof
 
@@ -4566,7 +4567,14 @@ class MetricFunction(Operation):
     self.sql_func = sql_func
 
   def compute_on_children(self, children, split_by):
-    new_df = self.func(children)
+    if isinstance(self.child, MetricWithCI) and self.child.confidence is None:
+      raise ValueError(
+          'The standard error of a MetricWithCI cannot be transformed '
+          'element-wise. Specify `confidence=...` on the MetricWithCI '
+          'to transform confidence interval bounds instead.'
+      )
+    with np.errstate(divide='ignore', invalid='ignore'):
+      new_df = self.func(children)
     new_df = copy_meterstick_metadata(children, new_df)
     return new_df
 
@@ -4576,6 +4584,12 @@ class MetricFunction(Operation):
     if not self.sql_func:
       raise NotImplementedError(
           f'SQL generation not supported for {type(self)}.'
+      )
+    if isinstance(self.child, MetricWithCI) and self.child.confidence is None:
+      raise ValueError(
+          'The standard error of a MetricWithCI cannot be transformed '
+          'element-wise. Specify `confidence=...` on the MetricWithCI '
+          'to transform confidence interval bounds instead.'
       )
     local_filter = (
         sql.Filters(self.where_).add(local_filter).remove(global_filter)
@@ -4641,15 +4655,30 @@ class LogTransform(MetricFunction):
 
 
 class ExponentialTransform(MetricFunction):
-  """Base class for applying exponential transformations to Metric."""
+  """Applies exponential function (exp or 10^x) to Metric results.
 
-  def __init__(self, child=None, name_tmpl='Exp({})', **kwargs):
-    sql_func = 'EXP({})'
+  Attributes:
+    base: The exponential base, 'ln' or 'log10'.
+    func: The exponential function (np.exp or 10**x).
+    sql_func: The exponential function in SQL ('EXP({})' or 'POWER(10, {})').
+    children: A tuple containing the child Metric.
+    name_tmpl: The template to generate the name from child Metric's name.
+  """
+
+  def __init__(self, child=None, base: str = 'ln', name_tmpl=None, **kwargs):
+    if base not in ('ln', 'log10'):
+      raise ValueError("base must be 'ln' or 'log10'")
+    self.base = base
+    func = np.exp if base == 'ln' else lambda x: 10**x
+    sql_func = 'EXP({})' if base == 'ln' else 'POWER(10, {})'
+    if name_tmpl is None:
+      name_tmpl = 'Exp({})' if base == 'ln' else '10^({})'
     super().__init__(
         child,
-        np.exp,
+        func,
         sql_func,
         name_tmpl,
+        additional_fingerprint_attrs=['base'],
         **kwargs
     )
 
