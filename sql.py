@@ -1014,13 +1014,10 @@ class Column(SqlComponent):
       frame = self.window_frame
       window_clause = ' '.join(c for c in (partition, order, frame) if c)
       over = ' OVER (%s)' % window_clause
-    # Some Beam engines don't support SUM(IF(cond, var, NULL)) well so we use 0
-    # as the base to make it work.
-    base = '0' if self.fn == 'SUM({})' else 'NULL'
     # CASE WHEN has better compatibility with other engines than
     # IF(filter, c, NULL). For example, PostgreSQL only supports CASE WHEN.
     column = (
-        f'CASE WHEN {self.filters} THEN {c} ELSE {base} END'
+        f'CASE WHEN {self.filters} THEN {c} ELSE NULL END'
         if self.filters
         else c
         for c in self.column
