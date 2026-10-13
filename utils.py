@@ -687,11 +687,20 @@ def pcollection_to_df_via_file_io(
   # pylint: disable=g-import-not-at-top
   from apache_beam.dataframe import convert
   from apache_beam.dataframe import io
+  from apache_beam.typehints import row_type
   # pylint: enable=g-import-not-at-top
 
   now = datetime.datetime.now()
   filename = f'Meterstick pcollection_to_df_via_file_io at {now}'
   output_path = os.path.join(output_dir, filename)
+  # SqlTransform may infer non-nullable types (e.g., int -> np.int64) in
+  # pcol.element_type even when SQL aggregations (such as filtered SUM) return
+  # NULL. Wrap fields in Optional so convert.to_dataframe maps integer columns
+  # to nullable pd.Int64Dtype() instead of raising IntCastingNaNError.
+  if isinstance(pcol.element_type, row_type.RowTypeConstraint):
+    pcol.element_type = row_type.RowTypeConstraint.from_fields(
+        [(name, Optional[t]) for name, t in pcol.element_type._fields]
+    )
   pcol = convert.to_dataframe(pcol, label=f'to df at {now}')
   pcol = io.to_csv(pcol, output_path, f'to csv at {now}', index=False)
   pipeline.run()
