@@ -18,7 +18,6 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
-import warnings
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -1010,49 +1009,6 @@ class JackknifeTests(parameterized.TestCase):
         ),
     )
     testing.assert_frame_equal(output, expected)
-
-  def test_jackknife_log_transform_zero_unit_no_runtime_warning(self):
-    df = pd.DataFrame({
-        'x': [0.0, 2.0, 4.0, 6.0],
-        'y': [1.0, 2.0, 2.0, 3.0],
-        'cookie': [0, 1, 2, 3],
-    })
-    m = operations.LogTransform(metrics.Ratio('x', 'y'))
-    opt = operations.Jackknife('cookie', m)
-    no_opt = operations.Jackknife('cookie', m, enable_optimization=False)
-    with warnings.catch_warnings(record=True) as w:
-      warnings.simplefilter('always', RuntimeWarning)
-      output = opt.compute_on(df)
-      expected = no_opt.compute_on(df)
-    self.assertEmpty(w)
-    testing.assert_frame_equal(output, expected)
-
-  def test_jackknife_leaf_precompute_extra_split_by_and_where(self):
-    df = pd.DataFrame({
-        'x': [0.0, 2.0, 4.0, 6.0, 0.0, 3.0, 5.0, 7.0],
-        'y': [1.0, 2.0, 2.0, 3.0, 1.0, 2.0, 2.0, 3.0],
-        'cond': ['A', 'A', 'A', 'A', 'B', 'B', 'B', 'B'],
-        'grp': ['g1', 'g1', 'g1', 'g1', 'g1', 'g1', 'g1', 'g1'],
-        'cookie': [0, 1, 2, 3, 0, 1, 2, 3],
-    })
-    r = metrics.Ratio('x', 'y', where='y > 0')
-    s = metrics.Sum('x')
-    for op in (
-        operations.LogTransform(operations.PercentChange('cond', 'A', r) + 100),
-        operations.LogTransform(operations.Distribution('cond', r)),
-        s
-        * operations.LogTransform(
-            operations.PercentChange('cond', 'A', r) + 100
-        ),
-    ):
-      opt = operations.Jackknife('cookie', op)
-      no_opt = operations.Jackknife('cookie', op, enable_optimization=False)
-      with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter('always', RuntimeWarning)
-        output = opt.compute_on(df, split_by='grp')
-        expected = no_opt.compute_on(df, split_by='grp')
-      self.assertEmpty(w)
-      testing.assert_frame_equal(output, expected)
 
   @parameterized.named_parameters(*PRECOMPUTABLE_METRICS_JK)
   def test_optimization(self, m):

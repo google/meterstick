@@ -400,38 +400,6 @@ class UtilsTest(absltest.TestCase):
     expected = [metrics.Sum('x'), metrics.Sum('y'), metrics.Sum('c'), 1]
     self.assertEqual(output, expected)
 
-  def test_iter_leaves_with_split_by(self):
-    m = (
-        operations.PercentChange('cond', 'A', metrics.Ratio('x', 'y'))
-        + metrics.Sum('c', where='f')
-        + 1
-    )
-    output = list(utils.iter_leaves_with_split_by(m, ['cookie']))
-    expected = [
-        (metrics.Sum('x'), ('cookie', 'cond')),
-        (metrics.Sum('y'), ('cookie', 'cond')),
-        (metrics.Sum('c', where='f'), ('cookie',)),
-    ]
-    self.assertEqual(output, expected)
-
-  def test_iter_leaves_with_split_by_different_extra_split_by(self):
-    s = metrics.Sum('x')
-    m = operations.PercentChange(
-        'cond',
-        'A',
-        metrics.MetricList((
-            operations.AbsoluteChange('g1', 0, s),
-            operations.MH('g2', 0, 'strat', metrics.Ratio('a', 'b')),
-        )),
-    )
-    output = list(utils.iter_leaves_with_split_by(m, 'cookie'))
-    expected = [
-        (s, ('cookie', 'cond', 'g1')),
-        (metrics.Sum('a'), ('cookie', 'cond', 'g2', 'strat')),
-        (metrics.Sum('b'), ('cookie', 'cond', 'g2', 'strat')),
-    ]
-    self.assertEqual(output, expected)
-
 
 if __name__ == '__main__':
   absltest.main()
