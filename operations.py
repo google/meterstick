@@ -4647,16 +4647,47 @@ class LogTransform(MetricFunction):
 
 
 class ExponentialTransform(MetricFunction):
-  """Base class for applying exponential transformations to Metric."""
+  """Applies exponential function (exp or 10^x) to Metric results.
 
-  def __init__(self, child=None, name_tmpl='Exp({})', **kwargs):
-    sql_func = 'EXP({})'
+  Attributes:
+    base: The exponential base, 'ln' or 'log10'.
+    func: The exponential function (np.exp or 10**x).
+    sql_func: The exponential function in SQL ('EXP({})' or 'POWER(10, {})').
+    children: A tuple containing the child Metric.
+    name_tmpl: The template to generate the name from child Metric's name.
+  """
+
+  def __init__(self, child=None, base: str = 'ln', name_tmpl=None, **kwargs):
+    """Initializes an ExponentialTransform.
+
+    Args:
+      child: The child Metric to apply the exponential transform to.
+      base: The exponential base, 'ln' or 'log10'. Default is 'ln'.
+      name_tmpl: The template to generate the name from child Metric's name. If
+        None, defaults to 'Exp({})' for 'ln' and '10^({})' for 'log10'.
+      **kwargs: Other keyword arguments passed to MetricFunction.__init__.
+    """
+    match base:
+      case 'ln':
+        func = np.exp
+        sql_func = 'EXP({})'
+        default_name_tmpl = 'Exp({})'
+      case 'log10':
+        func = lambda x: 10**x
+        sql_func = 'POWER(10, {})'
+        default_name_tmpl = '10^({})'
+      case _:
+        raise ValueError("base must be 'ln' or 'log10'")
+    self.base = base
+    if name_tmpl is None:
+      name_tmpl = default_name_tmpl
     super().__init__(
         child,
-        np.exp,
+        func,
         sql_func,
         name_tmpl,
-        **kwargs
+        additional_fingerprint_attrs=['base'],
+        **kwargs,
     )
 
 

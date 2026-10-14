@@ -303,6 +303,21 @@ class SimpleOperationTests(absltest.TestCase):
     )
     testing.assert_frame_equal(output, expected)
 
+  def test_exponential_transform_log10(self):
+    metric = operations.ExponentialTransform(metrics.Sum('x'), base='log10')
+    output = metric.compute_on(self.df)
+    expected = pd.DataFrame({'10^(sum(x))': [10**8]})
+    testing.assert_frame_equal(output, expected)
+
+  def test_exponential_transform_log10_round_trip(self):
+    round_trip = (
+        metrics.Sum('x')
+        | operations.LogTransform(base='log10')
+        | operations.ExponentialTransform(base='log10')
+    ).compute_on(self.df)
+    expected_round_trip = pd.DataFrame({'10^(Log10(sum(x)))': [8.0]})
+    testing.assert_frame_equal(round_trip, expected_round_trip)
+
   def test_exponential_percent_transform_ln(self):
     metric = operations.ExponentialPercentTransform(metrics.Sum('x'), base='ln')
     output = metric.compute_on(self.df)
@@ -325,6 +340,9 @@ class SimpleOperationTests(absltest.TestCase):
   def test_invalid_transform_base(self):
     with self.assertRaisesRegex(ValueError, "base must be 'ln' or 'log10'"):
       operations.LogTransform(metrics.Sum('x'), base='log2')
+
+    with self.assertRaisesRegex(ValueError, "base must be 'ln' or 'log10'"):
+      operations.ExponentialTransform(metrics.Sum('x'), base='log2')
 
     with self.assertRaisesRegex(ValueError, "base must be 'ln' or 'log10'"):
       operations.ExponentialPercentTransform(metrics.Sum('x'), base='log2')
@@ -776,6 +794,11 @@ SIMPLE_OPERATIONS = [
     ('Nxx', diversity.Nxx('grp', 0.4)),
     ('LogTransform ln', operations.LogTransform()),
     ('LogTransform log10', operations.LogTransform(base='log10')),
+    ('ExponentialTransform ln', operations.ExponentialTransform()),
+    (
+        'ExponentialTransform log10',
+        operations.ExponentialTransform(base='log10'),
+    ),
     (
         'ExponentialPercentTransform ln',
         operations.ExponentialPercentTransform(),
@@ -2900,6 +2923,8 @@ class CommonTest(parameterized.TestCase):
         operations.Bootstrap('x', confidence=0.95),
         operations.LogTransform(),
         operations.LogTransform(base='log10'),
+        operations.ExponentialTransform(),
+        operations.ExponentialTransform(base='log10'),
         operations.ExponentialPercentTransform(),
         operations.ExponentialPercentTransform(base='log10'),
         diversity.HHI('x'),
