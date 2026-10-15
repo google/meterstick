@@ -102,6 +102,7 @@ def sql_server_rand_fn_not_implemented():
 
 def safe_divide_fn_default(numer: str, denom: str):
   return (
+      # pyrefly: ignore[not-callable]
       f'CASE WHEN {{denom}} = 0 THEN NULL ELSE {FLOAT_CAST_FN("{numer}")} /'
       f' {FLOAT_CAST_FN("{denom}")} END'.format(numer=numer, denom=denom)
   )
@@ -132,11 +133,11 @@ def array_agg_fn_googlesql(
     limit: Optional[int],
 ):
   """Uses GoogleSQL's ARRAY_AGG to aggregate arrays."""
-  dropna = ' IGNORE NULLS' if dropna else ''
+  dropna = ' IGNORE NULLS' if dropna else ''  # pyrefly: ignore[bad-assignment]
   order_by = f' ORDER BY {sort_by}' if sort_by else ''
   if order_by is not None:
     order_by += '' if ascending else ' DESC'
-  limit = f' LIMIT {limit}' if limit else ''
+  limit = f' LIMIT {limit}' if limit else ''  # pyrefly: ignore[bad-assignment]
   return f'ARRAY_AGG({{}}{dropna}{order_by}{limit})'
 
 
@@ -148,7 +149,7 @@ def array_agg_fn_no_use_filter_no_limit(
 ):
   """Uses ARRAY_AGG to aggregate arrays. Use FILTER to filter out NULLs."""
   del limit  # LIMIT is not supported in PostgreSQL so just skip.
-  dropna = ' FILTER (WHERE {} IS NOT NULL)' if dropna else ''
+  dropna = ' FILTER (WHERE {} IS NOT NULL)' if dropna else ''  # pyrefly: ignore[bad-assignment]
   order_by = f' ORDER BY {sort_by}' if sort_by else ''
   if order_by is not None:
     order_by += '' if ascending else ' DESC'
@@ -214,8 +215,8 @@ def nth_fn_default(
     limit: Optional[int],
 ):
   try:
-    array = ARRAY_AGG_FN(sort_by, ascending, dropna, limit)
-    return ARRAY_INDEX_FN(array, zero_based_idx)
+    array = ARRAY_AGG_FN(sort_by, ascending, dropna, limit)  # pyrefly: ignore[not-callable]
+    return ARRAY_INDEX_FN(array, zero_based_idx)  # pyrefly: ignore[not-callable]
   except NotImplementedError as e:
     raise NotImplementedError('Nth value is not implemented.') from e
 
@@ -345,21 +346,21 @@ def generate_array_fn_not_implemented(n):
 
 def unnest_generated_array(n, alias: Optional[str] = None):
   """Unnest a generated array, used to duplicate data."""
-  return UNNEST_ARRAY_FN(GENERATE_ARRAY_FN(n), alias)
+  return UNNEST_ARRAY_FN(GENERATE_ARRAY_FN(n), alias)  # pyrefly: ignore[not-callable]
 
 
 def implicitly_unnest_generated_array(n, alias: Optional[str] = None):
   """Unnest a generated series, used to duplicate data."""
   if not alias:
-    return GENERATE_ARRAY_FN(n)
-  return f'{GENERATE_ARRAY_FN(n)} {alias}'
+    return GENERATE_ARRAY_FN(n)  # pyrefly: ignore[not-callable]
+  return f'{GENERATE_ARRAY_FN(n)} {alias}'  # pyrefly: ignore[not-callable]
 
 
 def implicitly_unnest_generated_sequence(n, alias: Optional[str] = None):
   """Unnest a generated series, used to duplicate data."""
   if not alias:
-    return GENERATE_ARRAY_FN(n)
-  return f'(SELECT seq AS {alias} FROM {GENERATE_ARRAY_FN(n)}) unnested'
+    return GENERATE_ARRAY_FN(n)  # pyrefly: ignore[not-callable]
+  return f'(SELECT seq AS {alias} FROM {GENERATE_ARRAY_FN(n)}) unnested'  # pyrefly: ignore[not-callable]
 
 
 def duplicate_data_n_times_oracle(n, alias: Optional[str] = None):
@@ -661,7 +662,7 @@ def set_dialect(dialect: Optional[str]):
 
 
 def _get_dialect_option(options: dict[str, Any]):
-  return options.get(DIALECT, options['Default'])
+  return options.get(DIALECT, options['Default'])  # pyrefly: ignore[no-matching-overload]
 
 
 set_dialect(DEFAULT_DIALECT)
@@ -710,6 +711,7 @@ def add_suffix(alias):
 def rand_run_only_once_in_with_clause(execute):
   """Check if the RAND() is only evaluated once in the WITH clause."""
   d = execute(
+      # pyrefly: ignore[not-callable]
       f'''WITH T AS (SELECT {RAND_FN()} AS r)
       SELECT t1.r - t2.r AS d
       FROM T t1 CROSS JOIN T t2'''
@@ -762,7 +764,7 @@ def get_temp_tables(with_data: 'Datasources'):
   tmp_tables = set()
   for rand_table in with_data:
     query = with_data[rand_table]
-    if RAND_FN() not in str(query):
+    if RAND_FN() not in str(query):  # pyrefly: ignore[not-callable]
       continue
     dep_on_rand = set([rand_table])
     for alias in with_data:
@@ -1005,7 +1007,7 @@ class Column(SqlComponent):
     if not (self.partition is None and self.order is None and
             self.window_frame is None):
       partition_cols_str = [
-          STRING_CAST_FN(c) for c in Columns(self.partition).expressions
+          STRING_CAST_FN(c) for c in Columns(self.partition).expressions  # pyrefly: ignore[not-callable]
       ]
       partition = 'PARTITION BY %s' % ', '.join(
           partition_cols_str) if self.partition else ''
@@ -1073,7 +1075,7 @@ class Column(SqlComponent):
 
   def __div__(self, other):
     return Column(
-        SAFE_DIVIDE_FN(
+        SAFE_DIVIDE_FN(  # pyrefly: ignore[not-callable]
             numer=self.expression, denom=getattr(other, 'expression', other)
         ),
         alias='%s / %s' % (self.alias_raw, get_alias(other)),
@@ -1085,7 +1087,7 @@ class Column(SqlComponent):
   def __rdiv__(self, other):
     alias = '%s / %s' % (get_alias(other), self.alias_raw)
     return Column(
-        SAFE_DIVIDE_FN(
+        SAFE_DIVIDE_FN(  # pyrefly: ignore[not-callable]
             numer=getattr(other, 'expression', other), denom=self.expression
         ),
         alias=alias,
@@ -1212,7 +1214,7 @@ class Columns(SqlComponents):
     return 'DISTINCT ' + res if self.distinct else res
 
   def as_groupby(self):
-    return GROUP_BY_FN(self)
+    return GROUP_BY_FN(self)  # pyrefly: ignore[not-callable]
 
   def __str__(self):
     return self.get_columns(True)
@@ -1366,13 +1368,13 @@ class Datasources(SqlComponents):
 
   def __init__(self, datasources=None):
     super(Datasources, self).__init__()
-    self.children = collections.OrderedDict()
+    self.children = collections.OrderedDict()  # pyrefly: ignore[bad-assignment]
     self.temp_tables = set()
-    self.add(datasources)
+    self.add(datasources)  # pyrefly: ignore[bad-argument-type]
 
   @property
   def datasources(self):
-    return (Datasource(v, k) for k, v in self.children.items())
+    return (Datasource(v, k) for k, v in self.children.items())  # pyrefly: ignore[missing-attribute]
 
   def merge(self, new_child: Union[Datasource, 'Datasources', 'Sql']):
     """Merges a datasource if possible.
@@ -1414,12 +1416,12 @@ class Datasources(SqlComponents):
     alias, table = new_child.alias, new_child.table
     # If there is a compatible data, most likely it has the same alias.
     if alias in self.children:
-      target = self.children[alias]
+      target = self.children[alias]  # pyrefly: ignore[bad-index]
       if isinstance(target, Sql):
         merged = target.merge(table)
         if merged:
           return alias
-    for a, t in self.children.items():
+    for a, t in self.children.items():  # pyrefly: ignore[missing-attribute]
       if a == alias or not isinstance(t, Sql):
         continue
       merged = t.merge(table)
@@ -1427,7 +1429,7 @@ class Datasources(SqlComponents):
         return a
     while new_child.alias in self.children:
       new_child.alias = add_suffix(new_child.alias)
-    self.children[new_child.alias] = table
+    self.children[new_child.alias] = table  # pyrefly: ignore[unsupported-operation]
     return new_child.alias
 
   def add(self, children: Union[Datasource, Iterable[Datasource]]):
@@ -1462,13 +1464,13 @@ class Datasources(SqlComponents):
       raise ValueError('Not a Datasource!')
     alias, table = children.alias, children.table
     if alias not in self.children:
-      if table not in self.children.values():
-        self.children[alias] = table
+      if table not in self.children.values():  # pyrefly: ignore[missing-attribute]
+        self.children[alias] = table  # pyrefly: ignore[unsupported-operation]
         return alias
-      children.alias = [k for k, v in self.children.items() if v == table][0]
+      children.alias = [k for k, v in self.children.items() if v == table][0]  # pyrefly: ignore[missing-attribute]
       return children.alias
     else:
-      if table == self.children[alias]:
+      if table == self.children[alias]:  # pyrefly: ignore[bad-index]
         return alias
       children.alias = add_suffix(alias)
       return self.add(children)
@@ -1478,7 +1480,7 @@ class Datasources(SqlComponents):
     if isinstance(table, str):
       self.temp_tables.add(table)
       if table in self.children:
-        self.add_temp_table(self.children[table])
+        self.add_temp_table(self.children[table])  # pyrefly: ignore[bad-index]
       return
     if isinstance(table, Join):
       self.add_temp_table(table.ds1)
@@ -1511,7 +1513,7 @@ class Datasources(SqlComponents):
       if d.alias in self.temp_tables:
         cp = copy.copy(d)
         cp.alias = None
-        temp_tables.append(CREATE_TEMP_TABLE_FN(alias=d.alias, query=str(cp)))
+        temp_tables.append(CREATE_TEMP_TABLE_FN(alias=d.alias, query=str(cp)))  # pyrefly: ignore[not-callable]
       else:
         with_tables.append(d.get_expression('WITH'))
     res = '\n'.join(temp_tables)
@@ -1545,7 +1547,7 @@ class Sql(SqlComponent):
     if isinstance(from_data_table, Sql) and not self.from_data.is_table:
       if from_data_table.with_data:
         with_data_to_merge = from_data_table.with_data
-        from_data_table.with_data = None
+        from_data_table.with_data = None  # pyrefly: ignore[bad-assignment]
         self.from_data = Datasource(
             with_data_to_merge.add(Datasource(from_data, 'NoNameTable'))
         )

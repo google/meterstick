@@ -232,11 +232,12 @@ class TopK(DiversityBase):
 
       top_k_array_col = sql.Column(
           c.alias,
-          sql.ARRAY_AGG_FN(c.alias, ascending=False, dropna=True, limit=self.k),
+          sql.ARRAY_AGG_FN(c.alias, ascending=False, dropna=True, limit=self.k),  # pyrefly: ignore[not-callable]
       )
       top_k_array_col.set_alias(c.alias_raw)
       top_k_array_columns.add(top_k_array_col)
       top_k_sum_col = sql.Column(
+          # pyrefly: ignore[not-callable]
           '(SELECT SUM(x) FROM'
           f' {sql.UNNEST_ARRAY_FN(top_k_array_col.alias, "x", "i", self.k)})',
       )
@@ -341,7 +342,7 @@ class Nxx(DiversityBase):
       cumsum_cols.add(cumsum_col)
 
       nxx_col = sql.Column(
-          cumsum_col.alias, sql.COUNTIF_FN('{} < %s' % self.share) + ' + 1'
+          cumsum_col.alias, sql.COUNTIF_FN('{} < %s' % self.share) + ' + 1'  # pyrefly: ignore[not-callable]
       )
       nxx_col.set_alias((self.name_tmpl or '{}').format(c.alias_raw))
       nxx_cols.add(nxx_col)

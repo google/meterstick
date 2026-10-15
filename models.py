@@ -1237,7 +1237,7 @@ class LogisticRegression(Model):
       # https://colab.research.google.com/drive/1Srfs4weM4LO9vt1HbOkGrD4kVbG8cso8
       # For 'l1' and 'elasticnet', we use FISTA, which uses unregularized
       # gradient.
-      n = sql.COUNTIF_FN(condition) if condition else 'COUNT(*)'
+      n = sql.COUNTIF_FN(condition) if condition else 'COUNT(*)'  # pyrefly: ignore[not-callable]
       if self.penalty == 'l2':
         for i in range(self.k):
           grads[i] += sql.Column(f'{coef[i]} / {n}') / self.c

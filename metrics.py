@@ -768,7 +768,7 @@ class Metric(object):
     if isinstance(table, sql.Sql) and table.with_data:
       table = copy.deepcopy(table)
       with_data = table.with_data
-      table.with_data = None
+      table.with_data = None  # pyrefly: ignore[bad-assignment]
     if not sql.Datasource(table).is_table:
       table = with_data.add(sql.Datasource(table, 'Data'))
     query, with_data = self.get_sql_and_with_clause(table,
@@ -1464,7 +1464,7 @@ class MetricList(Metric):
 
     name_tmpl = self.name_tmpl or '{}'
     if len(incompatible_sqls) == 1:
-      res = next(iter(incompatible_sqls.children.values()))
+      res = next(iter(incompatible_sqls.children.values()))  # pyrefly: ignore[missing-attribute]
       for c in res.columns:
         if c not in indexes:
           c.alias_raw = name_tmpl.format(c.alias_raw)
@@ -1496,7 +1496,7 @@ class MetricList(Metric):
               )
           )
 
-    query = sql.Sql(columns, from_data)
+    query = sql.Sql(columns, from_data)  # pyrefly: ignore[bad-argument-type]
     if self.columns:
       columns = query.columns[len(indexes):]
       if len(columns) != len(self.columns):
@@ -2206,7 +2206,7 @@ class Nth(SimpleMetric):
           'This case should be handled by get_sql_and_with_clause() already.'
       )
 
-    tmpl = sql.NTH_VALUE_FN(
+    tmpl = sql.NTH_VALUE_FN(  # pyrefly: ignore[not-callable]
         self.n, self.sort_by, self.ascending, self.dropna, self.n + 1
     )
     return sql.Column(
@@ -2324,7 +2324,7 @@ class Quantile(SimpleMetric):
       alias = 'quantile(%s, %s)' % (self.var, self.quantile)
       return sql.Column(
           self.var,
-          sql.QUANTILE_FN(self.quantile),
+          sql.QUANTILE_FN(self.quantile),  # pyrefly: ignore[not-callable]
           alias,
           local_filter,
       )
@@ -2336,7 +2336,7 @@ class Quantile(SimpleMetric):
       if alias.startswith('0.'):
         alias = 'point_' + alias[2:]
       quantiles.append(
-          sql.Column(self.var, sql.QUANTILE_FN(q), alias, local_filter))
+          sql.Column(self.var, sql.QUANTILE_FN(q), alias, local_filter))  # pyrefly: ignore[not-callable]
     return sql.Columns(quantiles)
 
   def get_sql_and_with_clause(self, table, split_by, global_filter, indexes,
@@ -2551,9 +2551,9 @@ class Variance(SimpleMetric):
     if self.weight:
       return
     if self.ddof == 1:
-      return sql.Column(self.var, sql.VARIANCE_SAMP_FN, self.name, local_filter)
+      return sql.Column(self.var, sql.VARIANCE_SAMP_FN, self.name, local_filter)  # pyrefly: ignore[bad-argument-type]
     else:
-      return sql.Column(self.var, sql.VARIANCE_POP_FN, self.name, local_filter)
+      return sql.Column(self.var, sql.VARIANCE_POP_FN, self.name, local_filter)  # pyrefly: ignore[bad-argument-type]
 
 
 class StandardDeviation(SimpleMetric):
@@ -2595,9 +2595,9 @@ class StandardDeviation(SimpleMetric):
     if self.weight:
       return
     if self.ddof == 1:
-      return sql.Column(self.var, sql.STDDEV_SAMP_FN, self.name, local_filter)
+      return sql.Column(self.var, sql.STDDEV_SAMP_FN, self.name, local_filter)  # pyrefly: ignore[bad-argument-type]
     else:
-      return sql.Column(self.var, sql.STDDEV_POP_FN, self.name, local_filter)
+      return sql.Column(self.var, sql.STDDEV_POP_FN, self.name, local_filter)  # pyrefly: ignore[bad-argument-type]
 
 
 class CV(SimpleMetric):
@@ -2631,11 +2631,11 @@ class CV(SimpleMetric):
 
   def get_sql_columns(self, local_filter):
     if self.ddof == 1:
-      res = sql.Column(self.var, sql.STDDEV_SAMP_FN,
+      res = sql.Column(self.var, sql.STDDEV_SAMP_FN,  # pyrefly: ignore[bad-argument-type]
                        self.name, local_filter) / sql.Column(
                            self.var, 'AVG({})', self.name, local_filter)
     else:
-      res = sql.Column(self.var, sql.STDDEV_POP_FN,
+      res = sql.Column(self.var, sql.STDDEV_POP_FN,  # pyrefly: ignore[bad-argument-type]
                        self.name, local_filter) / sql.Column(
                            self.var, 'AVG({})', self.name, local_filter)
     return res.set_alias(self.name)
@@ -2708,7 +2708,7 @@ class Correlation(SimpleMetric):
       return
     if self.method != 'pearson':
       raise ValueError('Only Pearson correlation is supported!')
-    return sql.Column((self.var, self.var2), sql.CORR_FN, self.name,
+    return sql.Column((self.var, self.var2), sql.CORR_FN, self.name,  # pyrefly: ignore[bad-argument-type]
                       local_filter)
 
   def get_fingerprint(self, attr_to_exclude=()):
@@ -2821,11 +2821,11 @@ class Cov(SimpleMetric):
       ddof = 0 if self.bias else 1
     if ddof == 1:
       return sql.Column(
-          (self.var, self.var2), sql.COVAR_SAMP_FN, self.name, local_filter
+          (self.var, self.var2), sql.COVAR_SAMP_FN, self.name, local_filter  # pyrefly: ignore[bad-argument-type]
       )
     elif ddof == 0:
       return sql.Column(
-          (self.var, self.var2), sql.COVAR_POP_FN, self.name, local_filter
+          (self.var, self.var2), sql.COVAR_POP_FN, self.name, local_filter  # pyrefly: ignore[bad-argument-type]
       )
     return
 

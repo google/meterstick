@@ -643,7 +643,7 @@ class PercentChange(Comparison):
 
   def get_sql_template_for_comparison(self, raw_table_alias, base_table_alias):
     return (
-        sql.SAFE_DIVIDE_FN(
+        sql.SAFE_DIVIDE_FN(  # pyrefly: ignore[not-callable]
             numer=f'{raw_table_alias}.%(r)s',
             denom=f'{base_table_alias}.%(b)s',
         )
@@ -1753,14 +1753,15 @@ class MH(Comparison):
                               for c, b in zip(cond_cols.aliases, base))
     exclude_base_condition = ' OR '.join(exclude_base_condition)
     cond = None if self.include_base else sql.Filters([exclude_base_condition])
-    numerator = sql.SAFE_DIVIDE_FN(
+    numerator = sql.SAFE_DIVIDE_FN(  # pyrefly: ignore[not-callable]
         numer=f'{raw_table_alias}.%(numer)s * {base_table_alias}.%(denom)s',
         denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
     )
-    denominator = sql.SAFE_DIVIDE_FN(
+    denominator = sql.SAFE_DIVIDE_FN(  # pyrefly: ignore[not-callable]
         numer=f'{base_table_alias}.%(numer)s * {raw_table_alias}.%(denom)s',
         denom=f'{base_table_alias}.%(denom)s + {raw_table_alias}.%(denom)s',
     )
+    # pyrefly: ignore[not-callable]
     col_tmpl = f"""100 * {sql.SAFE_DIVIDE_FN(
         numer=f'COALESCE(SUM({numerator}), 0)',
         denom=f'COALESCE(SUM({denominator}), 0)')} - 100"""
@@ -3097,7 +3098,7 @@ class Jackknife(MetricWithCI):
         loo = sql.Sql(
             sql.Column('*', auto_alias=False),
             sql.Datasource(
-                sql.UNNEST_ARRAY_LITERAL_FN(units, 'meterstick_resample_idx')
+                sql.UNNEST_ARRAY_LITERAL_FN(units, 'meterstick_resample_idx')  # pyrefly: ignore[not-callable]
             ).join(table, on='meterstick_resample_idx != %s' % self.unit),
             self.where_,
         )
@@ -3796,7 +3797,7 @@ class PoissonBootstrap(Bootstrap):
       uniform_columns = sql.Columns(sql.Column('*', auto_alias=False))
     global_filter = sql.Filters(global_filter).add(self.where_)
     uniform_var = sql.Column(
-        sql.RAND_FN(), alias='poisson_bootstrap_uniform_var'
+        sql.RAND_FN(), alias='poisson_bootstrap_uniform_var'  # pyrefly: ignore[not-callable]
     )
     split_by_cols = (
         split_by.aliases
@@ -3806,17 +3807,17 @@ class PoissonBootstrap(Bootstrap):
     if self.unit:
       cols = ', '.join(
           map(
-              sql.STRING_CAST_FN,
+              sql.STRING_CAST_FN,  # pyrefly: ignore[bad-argument-type]
               (split_by_cols or []) + [self.unit, 'meterstick_resample_idx'],
           )
       )
       uniform_var = sql.Column(
-          sql.UNIFORM_MAPPING_FN(f'CONCAT({cols})'),
+          sql.UNIFORM_MAPPING_FN(f'CONCAT({cols})'),  # pyrefly: ignore[not-callable]
           alias='poisson_bootstrap_uniform_var',
       )
     uniform_columns.add(uniform_var)
     replicates = sql.Datasource(
-        sql.DUPLICATE_DATA_N_TIMES_FN(
+        sql.DUPLICATE_DATA_N_TIMES_FN(  # pyrefly: ignore[not-callable]
             self.n_replicates, 'meterstick_resample_idx'
         )
     )
@@ -3894,7 +3895,7 @@ class PoissonBootstrap(Bootstrap):
     else:
       poisson_sampled_columns = sql.Columns(sql.Column('*', auto_alias=False))
       replicates = sql.Datasource(
-          sql.DUPLICATE_DATA_N_TIMES_FN(
+          sql.DUPLICATE_DATA_N_TIMES_FN(  # pyrefly: ignore[not-callable]
               'poisson_bootstrap_weight', 'poisson_bootstrap_weight_unnested'
           )
       )
@@ -4026,15 +4027,15 @@ def get_se_sql(
       ci_method = getattr(metric, 'ci_method', 'std')
       if ci_method == 'percentile':
         for k, v in metric.select_percentiles().items():
-          pct_col = sql.Column(alias, sql.QUANTILE_FN(v),
+          pct_col = sql.Column(alias, sql.QUANTILE_FN(v),  # pyrefly: ignore[not-callable]
                                f'{c.alias_raw} {k}')
           columns.add(pct_col)
       elif ci_method == 'std':
-        se = sql.Column(c.alias, sql.STDDEV_SAMP_FN,
+        se = sql.Column(c.alias, sql.STDDEV_SAMP_FN,  # pyrefly: ignore[bad-argument-type]
                         '%s Bootstrap SE' % c.alias_raw)
         if isinstance(metric, Jackknife):
           adjustment = sql.Column(
-              sql.SAFE_DIVIDE_FN(
+              sql.SAFE_DIVIDE_FN(  # pyrefly: ignore[not-callable]
                   numer='COUNT({c}) - 1', denom='SQRT(COUNT({c}))'
               ).format(c=alias)
           )
@@ -4423,15 +4424,15 @@ def bootstrap_by_row(
       order=partition if sql.ROW_NUMBER_REQUIRE_ORDER_BY else None,
   )
   length = sql.Column('COUNT(*)', partition=partition)
-  random_row_number = sql.Column(sql.RAND_FN()) * length
+  random_row_number = sql.Column(sql.RAND_FN()) * length  # pyrefly: ignore[not-callable]
   random_row_number = sql.Column(
-      sql.CEIL_FN(random_row_number.expression),
+      sql.CEIL_FN(random_row_number.expression),  # pyrefly: ignore[not-callable]
       alias='meterstick_bs_random_row_number',
   )
   columns.add((row_number, random_row_number))
   columns.add((i for i in split_by if i != i.alias))
   replicates = sql.Datasource(
-      sql.DUPLICATE_DATA_N_TIMES_FN(
+      sql.DUPLICATE_DATA_N_TIMES_FN(  # pyrefly: ignore[not-callable]
           metric.n_replicates, 'meterstick_resample_idx'
       )
   )
