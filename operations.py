@@ -2825,7 +2825,7 @@ class Jackknife(MetricWithCI):
     Metrics in self can be expressed by Sum or Count so we apply the trick by
     1. replace self with an equivalent tree whose leaf Metrics are all Sum or
     Count.
-    2. computes the leaf Metrics on self.unit + split_by.
+    2. computes it on self.unit + split_by.
     3. loop through the cache and find all Sum and Count results in #2. Use them
     to compute the LOOs and save to cache.
     4. call super().compute_slices() which will just hits the cached results.
@@ -2843,13 +2843,7 @@ class Jackknife(MetricWithCI):
       util, df = utils.get_fully_expanded_equivalent_metric_tree(self, df)
       return self.compute_util_metric_on(util, df, split_by)
 
-    filter_in_leaf = utils.push_filters_to_leaf(self)
-    for leaf, leaf_split_by in set(
-        utils.iter_leaves_with_split_by(
-            filter_in_leaf, (split_by or []) + [self.unit]
-        )
-    ):
-      self.compute_util_metric_on(leaf, df, list(leaf_split_by))
+    self.compute_child(df, (split_by or []) + [self.unit])
     precomputed = self.find_all_in_cache_by_metric_type(metric=metrics.Sum)
     precomputed.update(
         self.find_all_in_cache_by_metric_type(metric=metrics.Count)

@@ -193,22 +193,6 @@ def get_leaf_metrics(metric, include_constants=False):
   return leaf
 
 
-def iter_leaves_with_split_by(
-    metric, split_by: Optional[Union[Text, Iterable[Text]]] = None
-):
-  """Yields (leaf_metric, accumulated_split_by) for every leaf path."""
-  curr_split_by = (
-      (split_by,) if isinstance(split_by, str) else tuple(split_by or ())
-  )
-  curr_split_by += tuple(metric.extra_split_by)
-  if not metric.children:
-    yield metric, curr_split_by
-    return
-  for c in metric.children:
-    if is_metric(c):
-      yield from iter_leaves_with_split_by(c, curr_split_by)
-
-
 def get_global_filter(metric) -> sql.Filters:
   """Collects the filters that can be applied globally to the Metric tree."""
   global_filter = sql.Filters()
