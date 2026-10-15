@@ -2849,7 +2849,10 @@ class Jackknife(MetricWithCI):
             filter_in_leaf, (split_by or []) + [self.unit]
         )
     ):
-      self.compute_util_metric_on(leaf, df, list(leaf_split_by))
+      try:
+        self.compute_util_metric_on(leaf, df, list(leaf_split_by))
+      except Exception:  # pylint: disable=broad-except
+        pass
     precomputed = self.find_all_in_cache_by_metric_type(metric=metrics.Sum)
     precomputed.update(
         self.find_all_in_cache_by_metric_type(metric=metrics.Count)
@@ -2860,16 +2863,17 @@ class Jackknife(MetricWithCI):
         for k, v in precomputed.items()
         if cache_key and k.key == cache_key.key
     }
-    all_split_by = (
-        (split_by or [])
-        + [self.unit]
-        + list(utils.get_extra_split_by(self, return_superset=True))
-    )
-    df_slices = df.groupby(all_split_by, observed=True).first().iloc[:, [0]]
-    for key, each_bucket in precomputed.items():
-      self.precompute_sum_or_count_for_jackknife(
-          key, each_bucket, split_by, df_slices
+    if precomputed:
+      all_split_by = (
+          (split_by or [])
+          + [self.unit]
+          + list(utils.get_extra_split_by(self, return_superset=True))
       )
+      df_slices = df.groupby(all_split_by, observed=True).first().iloc[:, [0]]
+      for key, each_bucket in precomputed.items():
+        self.precompute_sum_or_count_for_jackknife(
+            key, each_bucket, split_by, df_slices
+        )
     return super(Jackknife, self).compute_slices(df, split_by)
 
   def precompute_sum_or_count_for_jackknife(self, cache_key, each_bucket,

@@ -1054,6 +1054,62 @@ class JackknifeTests(parameterized.TestCase):
       self.assertEmpty(w)
       testing.assert_frame_equal(output, expected)
 
+  def test_jackknife_metric_list_missing_column_and_zero_unit(self):
+    df = pd.DataFrame({
+        'x': [0.0, 2.0, 4.0, 6.0, 0.0, 3.0, 5.0, 7.0],
+        'y': [1.0, 2.0, 2.0, 3.0, 1.0, 2.0, 2.0, 3.0],
+        'cond': ['A', 'A', 'A', 'A', 'B', 'B', 'B', 'B'],
+        'cookie': [0, 1, 2, 3, 0, 1, 2, 3],
+    })
+    m_list = metrics.MetricList([
+        metrics.Ratio('missing_col', 'y'),
+        operations.LogTransform(metrics.Ratio('x', 'y')),
+    ])
+    for op in (
+        m_list,
+        operations.PercentChange('cond', 'A', m_list),
+    ):
+      opt = operations.Jackknife('cookie', op)
+      no_opt = operations.Jackknife('cookie', op, enable_optimization=False)
+      with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always', RuntimeWarning)
+        output = opt.compute_on(df)
+        expected = no_opt.compute_on(df)
+      self.assertEmpty(w)
+      testing.assert_frame_equal(output, expected)
+
+  def test_jackknife_missing_column_without_or_all_failed_metric_list(self):
+    df = pd.DataFrame({
+        'x': [1.0, 2.0, 3.0],
+        'y': [1.0, 2.0, 3.0],
+        'cookie': [0, 1, 2],
+    })
+    with self.assertRaises(KeyError):
+      (
+          metrics.Ratio('missing_col', 'y') | operations.Jackknife('cookie')
+      ).compute_on(df)
+
+    df_only_keys = pd.DataFrame({
+        'cond': ['A', 'A', 'B', 'B'],
+        'cookie': [0, 1, 0, 1],
+    })
+    all_missing = operations.PercentChange(
+        'cond',
+        'A',
+        metrics.MetricList([
+            metrics.Ratio('missing_1', 'missing_2'),
+            metrics.Sum('missing_3'),
+        ]),
+    )
+    opt = operations.Jackknife('cookie', all_missing)
+    no_opt = operations.Jackknife(
+        'cookie', all_missing, enable_optimization=False
+    )
+    with self.assertRaisesRegex(ValueError, 'No objects to concatenate'):
+      opt.compute_on(df_only_keys)
+    with self.assertRaisesRegex(ValueError, 'No objects to concatenate'):
+      no_opt.compute_on(df_only_keys)
+
   @parameterized.named_parameters(*PRECOMPUTABLE_METRICS_JK)
   def test_optimization(self, m):
     opt = operations.Jackknife('cookie', m, 0.9)
