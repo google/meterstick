@@ -449,7 +449,7 @@ GROUP_BY_OPTIONS = {
 }
 SAFE_DIVIDE_OPTIONS = {
     'Default': safe_divide_fn_default,
-    'GoogleSQL': 'SAFE_DIVIDE({numer}, {denom})'.format,
+    'GoogleSQL': 'IEEE_DIVIDE({numer}, {denom})'.format,
 }
 LN_OPTIONS = {
     'Default': 'LN({})',
