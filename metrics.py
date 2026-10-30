@@ -1027,7 +1027,7 @@ class Metric(object):
       label = str(getattr(m, 'name', m))
       if getattr(m, 'where', ''):
         label += ' where %s' % m.where
-      dot.add_node(pydot.Node(id(m), label=label))
+      dot.add_node(pydot.Node(str(id(m)), label=label))
 
     def add_edges(metric):
       if isinstance(metric, Metric):
