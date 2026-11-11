@@ -13,13 +13,14 @@
 # limitations under the License.
 """Tests for meterstick.v2.models."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from meterstick import metrics
 from meterstick import models
 from meterstick import operations
 from meterstick import utils
-import mock
 import numpy as np
 import pandas as pd
 from sklearn import linear_model

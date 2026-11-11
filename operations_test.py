@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+from unittest import mock
 import warnings
 
 from absl.testing import absltest
@@ -27,7 +28,6 @@ from meterstick import metrics
 from meterstick import models
 from meterstick import operations
 from meterstick import utils
-import mock
 import numpy as np
 import pandas as pd
 from pandas import testing
