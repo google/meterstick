@@ -362,8 +362,9 @@ if __name__ == '__main__':
     print(f'Bootstrap is {bst.compute_on(df, s_by)}\n')
 
   # SQL computation (requires GCP project and data upload)
-  # for s_by in split_bys:
-  #   print(f'split_by is {s_by}\n\n')
-  #   print(f"Churn rate is {churn.compute_on_sql('demo.data', s_by)}\n")
-  #   print( f"Percent change is {pct.compute_on_sql('demo.data', s_by)}\n")
-  #   print(f"Bootstrap is {bst.compute_on_sql('demo.data', s_by)}\n")
+  if HAS_GBQ:
+    for s_by in split_bys:
+      print(f'split_by is {s_by}\n\n')
+      print(f"Churn rate is {churn.compute_on_sql('demo.data', s_by)}\n")
+      print(f"Percent change is {pct.compute_on_sql('demo.data', s_by)}\n")
+      print(f"Bootstrap is {bst.compute_on_sql('demo.data', s_by)}\n")
